@@ -1,0 +1,67 @@
+rules:
+
+# Spring Boot config hardening (application.properties/.yml): actuator endpoints exposed, H2 web console on.
+# Generic mode over *.properties/*.yml.
+
+- id: narvy.java.spring.actuator-exposed-all.actuator-exposed-all
+  message: >-
+    `management.endpoints.web.exposure.include` is set to `*`, which exposes
+    EVERY actuator endpoint over HTTP - including `/actuator/env`,
+    `/actuator/heapdump`, `/actuator/threaddump` and, when Spring Boot Admin
+    or the loggers endpoint is present, remote configuration changes. These
+    leak environment variables, secrets and internal state, and several are
+    write-capable (CWE-200, CWE-16). Expose only the endpoints you actually
+    need (typically `health,info`) and secure the management port/context
+    behind authentication.
+  severity: WARNING
+  languages: [generic]
+  paths:
+    include:
+      - "*.properties"
+      - "*.yml"
+      - "*.yaml"
+      - "*.conf"
+  metadata:
+    category: security
+    cwe:
+      - "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [audit]
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    technology: [java, spring, spring-boot]
+  patterns:
+    - pattern-regex: 'management\.endpoints\.web\.exposure\.include\s*[:=]\s*["'']?\*'
+
+- id: narvy.java.spring.h2-console-enabled.h2-console-enabled
+  message: >-
+    The H2 database web console is enabled (`spring.h2.console.enabled=true`).
+    The console is an unauthenticated servlet by default that runs arbitrary
+    SQL - and, through H2's `CREATE ALIAS ... AS` / `RUNSCRIPT` features, can
+    reach arbitrary Java code, making an exposed console a remote-code-
+    execution path (CWE-489, CWE-16). Never enable it outside local
+    development; if it must be on in a shared environment, restrict its
+    path to localhost and put it behind authentication.
+  severity: WARNING
+  languages: [generic]
+  paths:
+    include:
+      - "*.properties"
+      - "*.yml"
+      - "*.yaml"
+      - "*.conf"
+  metadata:
+    category: security
+    cwe:
+      - "CWE-489: Active Debug Code"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [audit]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology: [java, spring, spring-boot, h2]
+  patterns:
+    - pattern-regex: 'spring\.h2\.console\.enabled\s*[:=]\s*true'

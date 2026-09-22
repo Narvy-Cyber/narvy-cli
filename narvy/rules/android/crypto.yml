@@ -1,0 +1,34 @@
+# Android cryptography checks.
+
+- id: AND-CRYPTO-007
+  name: "Deprecated SSL Protocol Accepted"
+  pattern: 'SSLContext\.getInstance\s*\(\s*"SSL"'
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-327"
+    masvs: "MSTG-NETWORK-2"
+    description: "Requesting the generic \"SSL\" protocol (as opposed to a specific TLS version) can silently negotiate down to SSLv3 or earlier on some providers, both of which are broken (POODLE)."
+    recommendation: "Explicitly request \"TLSv1.2\" or \"TLSv1.3\"."
+
+- id: AND-CRYPTO-009
+  name: "Hardcoded Cryptographic IV"
+  pattern: 'new\s+IvParameterSpec\s*\(\s*"[^"]+"\.getBytes'
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-329"
+    masvs: "MSTG-CRYPTO-3"
+    description: "A hardcoded, static initialization vector (IV) is used for encryption. Reusing a static IV defeats the security properties of most cipher modes (e.g., enables pattern analysis in CBC, catastrophic key/plaintext recovery in GCM/CTR on reuse)."
+    recommendation: "Generate a fresh, random IV for every encryption operation using SecureRandom, and store/transmit it alongside the ciphertext (it does not need to be secret)."
+
+- id: AND-CRYPTO-010
+  name: "Hardcoded Symmetric Encryption Key"
+  pattern: 'new\s+SecretKeySpec\s*\(\s*"[^"]+"\.getBytes'
+  severity: "CRITICAL"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-321"
+    masvs: "MSTG-CRYPTO-1"
+    description: "A symmetric encryption key is built from a hardcoded string literal. Anyone who decompiles the app recovers the exact key used to encrypt/decrypt all protected data."
+    recommendation: "Never embed encryption keys in source code. Derive keys via the Android Keystore system, or retrieve them from a secure backend at runtime."

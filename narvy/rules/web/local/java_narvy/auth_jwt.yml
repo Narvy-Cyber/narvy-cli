@@ -1,0 +1,134 @@
+rules:
+
+# Java JWT auth weaknesses: hardcoded signing key, decode without verification, none-algorithm.
+
+- id: narvy.java.jwt.hardcoded-signing-key.hardcoded-signing-key
+  message: >-
+    A JWT signing/verification key is a hardcoded string literal (`jjwt`'s
+    `Keys.hmacShaKeyFor(...)`, `java-jwt`'s `Algorithm.HMAC256(...)`, or a
+    plain `.getBytes()` call on a literal). Anyone with source or
+    decompiled-binary access can forge arbitrarily privileged tokens
+    (CWE-321, CWE-798). Load the signing key from an environment variable or
+    secrets manager, generated with at least 256 bits of entropy for HMAC.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-321: Use of Hard-coded Cryptographic Key"
+      - "CWE-798: Use of Hard-coded Credentials"
+    owasp:
+      - "A07:2021 - Identification and Authentication Failures"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: Keys.hmacShaKeyFor("...".getBytes(...))
+        - pattern: io.jsonwebtoken.security.Keys.hmacShaKeyFor("...".getBytes(...))
+        - pattern: Algorithm.HMAC256("...")
+        - pattern: Algorithm.HMAC384("...")
+        - pattern: Algorithm.HMAC512("...")
+        - pattern: com.auth0.jwt.algorithms.Algorithm.HMAC256("...")
+
+- id: narvy.java.jwt.decode-without-verification.decode-without-verification
+  message: >-
+    `JWT.decode(...)` (auth0 java-jwt) reads and parses a token's claims
+    without verifying its signature - unlike `JWTVerifier.verify(...)`,
+    `decode` accepts a token signed with any key, or none at all. Branching
+    on claims read this way (role, user id, `exp`) is an authentication
+    bypass (CWE-347). Use a `JWTVerifier` built with the expected algorithm
+    and key, and call `verify(token)` instead of `decode(token)`.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-347: Improper Verification of Cryptographic Signature"
+    owasp:
+      - "A07:2021 - Identification and Authentication Failures"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: JWT.decode($TOKEN)
+        - pattern: com.auth0.jwt.JWT.decode($TOKEN)
+
+- id: narvy.java.jwt.parser-no-signing-key.parser-no-signing-key
+  message: >-
+    A `jjwt` `Jwts.parserBuilder()` (or the deprecated `Jwts.parser()`)
+    chain calls `.build().parse(...)`/`.parseClaimsJws(...)` with no
+    `.setSigningKey(...)`/`.verifyWith(...)` configured on the builder. Some
+    jjwt versions accept an unsigned or `alg: none` token in this
+    configuration, which is a full authentication bypass (CWE-347). Always
+    set the expected signing key (and, ideally, pin the accepted algorithm)
+    on the parser builder before parsing an incoming token.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-347: Improper Verification of Cryptographic Signature"
+    owasp:
+      - "A07:2021 - Identification and Authentication Failures"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology: [java]
+  patterns:
+    - pattern: |
+        $P = Jwts.parserBuilder();
+        ...
+        $P.build().parseClaimsJws($TOKEN);
+    - pattern-not: |
+        $P = Jwts.parserBuilder();
+        ...
+        $P.setSigningKey(...);
+        ...
+        $P.build().parseClaimsJws($TOKEN);
+    - pattern-not: |
+        $P = Jwts.parserBuilder();
+        ...
+        $P.verifyWith(...);
+        ...
+        $P.build().parseClaimsJws($TOKEN);
+
+- id: narvy.java.jwt.hardcoded-fallback-secret.hardcoded-fallback-secret
+  message: >-
+    A JWT/session-signing secret is read from configuration with a
+    hardcoded string as the fallback default (`System.getProperty("...",
+    "literal")`, `env.getProperty("...", "literal")`). If the real
+    environment variable or property is ever unset - a common deployment
+    mistake - every instance silently falls back to the same publicly
+    visible secret, which lets anyone forge valid tokens (CWE-798,
+    CWE-321). Fail closed instead: throw if the property is missing rather
+    than substituting a literal.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-798: Use of Hard-coded Credentials"
+      - "CWE-321: Use of Hard-coded Cryptographic Key"
+    owasp:
+      - "A07:2021 - Identification and Authentication Failures"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: System.getProperty($KEY, "...")
+        - pattern: System.getenv($KEY, "...")
+        - pattern: $ENV.getProperty($KEY, "...")
+        - pattern: $ENV.getProperty($KEY, "...", ...)
+    - metavariable-regex:
+        metavariable: $KEY
+        regex: (?i)"[^"]*(secret|jwt|token|signing.?key|api.?key|password|passwd|credential)[^"]*"

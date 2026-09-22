@@ -1,0 +1,59 @@
+rules:
+
+# C#/.NET unsafe deserialization: BinaryFormatter and Json.NET polymorphic TypeNameHandling.
+
+- id: narvy.csharp.deserialization.binary-formatter.binary-formatter
+  message: >-
+    `BinaryFormatter` is used. It deserializes the concrete .NET types named
+    in the payload, so on any attacker-influenced data it is a
+    remote-code-execution gadget - Microsoft has deprecated it and made it
+    throw by default from .NET 5+ precisely because it cannot be made safe
+    (CWE-502). Replace it with a contract-based serializer that does not
+    embed types, such as `System.Text.Json` or `DataContractSerializer` over
+    a known type.
+  severity: ERROR
+  languages: [csharp]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-502: Deserialization of Untrusted Data"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology: [csharp, dotnet]
+  patterns:
+    - pattern-either:
+        - pattern: new BinaryFormatter(...)
+        - pattern: new System.Runtime.Serialization.Formatters.Binary.BinaryFormatter(...)
+
+- id: narvy.csharp.deserialization.json-net-typenamehandling.json-net-typenamehandling
+  message: >-
+    Json.NET (`Newtonsoft.Json`) is configured with a permissive
+    `TypeNameHandling` (`All`, `Auto`, `Objects`, or `Arrays`). That makes
+    the serializer honour a `$type` field in the JSON and instantiate the
+    named type, which an attacker can point at a gadget class to achieve
+    remote code execution (CWE-502). Use `TypeNameHandling.None`, or, if
+    polymorphism is genuinely required, pin a strict `SerializationBinder`
+    that allow-lists the expected types.
+  severity: ERROR
+  languages: [csharp]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-502: Deserialization of Untrusted Data"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [csharp, dotnet, newtonsoft]
+  patterns:
+    - pattern-either:
+        - pattern: TypeNameHandling.All
+        - pattern: TypeNameHandling.Auto
+        - pattern: TypeNameHandling.Objects
+        - pattern: TypeNameHandling.Arrays

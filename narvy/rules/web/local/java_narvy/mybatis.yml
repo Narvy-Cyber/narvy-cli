@@ -1,0 +1,39 @@
+rules:
+
+# MyBatis mapper XML: `${...}` splices into SQL text (unlike `#{...}` which binds `?`), so tainted `${...}` is SQLi. Generic mode over mapper *.xml.
+
+- id: narvy.java.mybatis.handwritten-dollar-substitution.handwritten-dollar-substitution
+  message: >-
+    A MyBatis mapper uses `${...}` substitution in a SQL statement. MyBatis
+    inlines `${...}` into the query text verbatim (only `#{...}` becomes a
+    bound `?` placeholder), so any tainted value that reaches it is a SQL
+    injection (CWE-89). Use `#{param}` for values; a `${...}` is only
+    acceptable for a column/table identifier you have validated against a
+    fixed allow-list.
+  severity: ERROR
+  languages: [generic]
+  paths:
+    include:
+      - "*.xml"
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java, mybatis]
+  patterns:
+    - pattern-regex: '\$\{[^}]+\}'
+    # Exclude MyBatis Generator boilerplate tokens (framework-emitted, not hand-written interpolation).
+    - pattern-not-regex: '\$\{(criterion\.condition|criterion\.value|orderByClause|listItem|item\.[A-Za-z0-9_.]+)\}'
+    # Scope to MyBatis SQL statement elements, else `${...}` hits log4j2/Spring placeholders (large FP class).
+    - pattern-either:
+        - pattern-inside: "<select ...>...</select>"
+        - pattern-inside: "<insert ...>...</insert>"
+        - pattern-inside: "<update ...>...</update>"
+        - pattern-inside: "<delete ...>...</delete>"
+        - pattern-inside: "<sql ...>...</sql>"

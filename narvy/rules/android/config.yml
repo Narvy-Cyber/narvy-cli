@@ -1,0 +1,77 @@
+# Android manifest and configuration checks.
+
+- id: AND-CONF-001
+  name: "Application is Debuggable"
+  pattern: 'android:debuggable\s*=\s*"true"'
+  severity: "CRITICAL"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-489"
+    masvs: "MSTG-CODE-2"
+    description: "The application is set as debuggable, allowing attackers to attach a debugger and inspect its runtime behavior. This must be disabled in release builds."
+    recommendation: "Set android:debuggable to 'false' in the AndroidManifest.xml for all release builds."
+- id: AND-CONF-002
+  name: "Application Data Backup is Enabled"
+  pattern: 'android:allowBackup\s*=\s*"true"'
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-530"
+    masvs: "MSTG-STORAGE-8"
+    description: "The application's data can be backed up via ADB. If sensitive data is stored within the app, it can be extracted by anyone with physical access to the device."
+    recommendation: "If not required, set android:allowBackup to 'false'. If it is, use auto-backup rules to exclude sensitive data."
+- id: AND-CONF-003
+  name: "Cleartext HTTP Traffic is Permitted"
+  pattern: 'android:usesCleartextTraffic\s*=\s*"true"'
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-319"
+    masvs: "MSTG-NETWORK-1"
+    description: "The application is configured to permit cleartext HTTP traffic, exposing data to network sniffing."
+    recommendation: "Set android:usesCleartextTraffic to 'false' and use HTTPS for all communications. Use a Network Security Configuration file for exceptions."
+
+- id: AND-CONF-004
+  name: "Component is Exported without Permission"
+  pattern: |
+    (?s)<(?:activity|service|receiver|provider)\b(?=(?:(?!<)[\s\S])*?android:exported\s*=\s*"true")(?:(?!(?:(?!<)[\s\S])*?android:permission\s*=)|(?=(?:(?!<)[\s\S])*?android:permission\s*=\s*"android\.permission\.(?:FOREGROUND_SERVICE|INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE|BLUETOOTH|BLUETOOTH_ADMIN|CHANGE_NETWORK_STATE|CHANGE_WIFI_STATE|VIBRATE|WAKE_LOCK|GET_ACCOUNTS|NFC|RECEIVE_BOOT_COMPLETED|SET_ALARM|SET_WALLPAPER|SET_WALLPAPER_HINTS|TRANSMIT_IR|BROADCAST_STICKY|KILL_BACKGROUND_PROCESSES|MODIFY_AUDIO_SETTINGS|READ_SYNC_SETTINGS|READ_SYNC_STATS|WRITE_SYNC_SETTINGS|REORDER_TASKS|CHANGE_WIFI_MULTICAST_STATE|DISABLE_KEYGUARD|EXPAND_STATUS_BAR|FLASHLIGHT|PERSISTENT_ACTIVITY)"))[\s\S]*?(?:/>|>)
+  severity: "HIGH"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-926"
+    masvs: "MSTG-PLATFORM-2"
+    description: "An application component (Activity, Service, Receiver) is exported without a real access-control permission (either none is set, or the one set is an OS-defined 'normal' permission auto-granted to any app, not an actual restriction). This can allow malicious apps to access or abuse the component's functionality."
+    recommendation: "Set android:exported to 'false' if the component is not meant to be used by other apps. If it must be exported, protect it with a 'signature' level permission, and validate all input from the Intent regardless."
+
+- id: AND-CONF-005
+  name: "World-Readable File Mode"
+  pattern: 'MODE_WORLD_READABLE'
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-732"
+    masvs: "MSTG-STORAGE-2"
+    description: "A file is opened with MODE_WORLD_READABLE, making it readable by every other application on the device. This constant has been deprecated by Google specifically for being a security hazard."
+    recommendation: "Use MODE_PRIVATE and, if inter-process sharing is genuinely required, use a ContentProvider with explicit permission grants instead."
+
+- id: AND-CONF-006
+  name: "World-Writable File Mode"
+  pattern: 'MODE_WORLD_WRITEABLE'
+  severity: "CRITICAL"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-732"
+    masvs: "MSTG-STORAGE-2"
+    description: "A file is opened with MODE_WORLD_WRITEABLE, allowing any other application on the device to modify its contents. This can enable data tampering or, in some cases, code injection."
+    recommendation: "Use MODE_PRIVATE. If another app must write to this data, use a ContentProvider with explicit, signature-level permission grants."
+
+- id: AND-CONF-009
+  name: "PendingIntent Without Explicit Immutability Flag"
+  pattern: 'PendingIntent\.(getActivity|getBroadcast|getService)\s*\('
+  severity: "MEDIUM"
+  confidence: "LOW"
+  details:
+    cwe: "CWE-927"
+    masvs: "MSTG-PLATFORM-2"
+    description: "A PendingIntent is created. If it does not explicitly set FLAG_IMMUTABLE (or a deliberately-scoped FLAG_MUTABLE), a malicious app that obtains this PendingIntent may be able to fill in or modify the underlying Intent and have it executed with this app's identity."
+    recommendation: "Verify manually whether FLAG_IMMUTABLE is set at this call site (required on Android 12+ unless mutability is explicitly needed). This is a low-confidence heuristic - every PendingIntent creation is flagged for manual review, not every instance is a real bug."

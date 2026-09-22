@@ -1,0 +1,32 @@
+rules:
+
+# Spring Security authorization: a filter chain that permits every request.
+
+- id: narvy.java.spring.permit-all-requests.permit-all-requests
+  message: >-
+    This Spring Security filter chain authorizes EVERY request
+    (`anyRequest().permitAll()`), so no endpoint behind it requires
+    authentication. If any protected resource is served by this chain, it is
+    now publicly reachable (CWE-862, Missing Authorization). Scope
+    `permitAll()` to the handful of genuinely public paths with
+    `requestMatchers(...)` and finish the chain with
+    `anyRequest().authenticated()` so anything you did not explicitly open
+    stays protected.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-862: Missing Authorization"
+    owasp:
+      - "A01:2021 - Broken Access Control"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java, spring]
+  patterns:
+    - pattern-either:
+        - pattern: $A.anyRequest().permitAll()
+        - pattern: $A.antMatchers("/**").permitAll()
+        - pattern: $A.requestMatchers("/**").permitAll()

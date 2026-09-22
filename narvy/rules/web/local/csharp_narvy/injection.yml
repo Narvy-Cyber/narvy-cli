@@ -1,0 +1,122 @@
+rules:
+
+# C#/.NET injection: ADO.NET SQL concatenation, request input into filesystem APIs (path traversal) and process launch (command injection).
+
+- id: narvy.csharp.sqli.command-text-concat.command-text-concat
+  message: >-
+    A SQL command text is built with `+` string concatenation and handed to
+    ADO.NET (`new SqlCommand(...)`, `SqlCommand.CommandText`, or the
+    equivalent `Npgsql`/`MySql`/`OleDb`/`Odbc`/`SQLite` command). Any tainted
+    value spliced into the SQL grammar this way is a SQL injection (CWE-89).
+    Keep the command text a fixed literal and pass values as parameters
+    (`cmd.Parameters.AddWithValue("@id", id)` with a `@id` placeholder).
+  severity: ERROR
+  languages: [csharp]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [csharp, dotnet, ado.net]
+  patterns:
+    - pattern-either:
+        - pattern: new $CMDTYPE($SQL, ...)
+        - pattern: new $CMDTYPE($SQL)
+        - pattern: $CMD.CommandText = $SQL;
+    - metavariable-regex:
+        metavariable: $CMDTYPE
+        regex: ^(SqlCommand|NpgsqlCommand|MySqlCommand|OleDbCommand|OdbcCommand|SQLiteCommand|SqliteCommand)$
+    - metavariable-pattern:
+        metavariable: $SQL
+        patterns:
+          # concatenation, but not a chain of only string literals joined by `+`
+          - pattern-regex: '\+'
+          - pattern-not-regex: '^\s*@?\$?"(?:[^"\\]|\\.)*"(\s*\+\s*@?\$?"(?:[^"\\]|\\.)*")*\s*$'
+
+- id: narvy.csharp.pathtraversal.request-input-into-file-api.request-input-into-file-api
+  message: >-
+    A value read from the HTTP request (`Request.Query`/`Form`/`Headers`/
+    `Cookies`/`RouteValues`) reaches a `System.IO` file API without being
+    reduced to a bare file name first. An attacker can supply `../` segments
+    (or an absolute path) to read or write files outside the intended
+    directory (CWE-22). Strip the path with `Path.GetFileName(...)` and
+    resolve it against a fixed base directory, rejecting anything that
+    escapes it.
+  severity: ERROR
+  languages: [csharp]
+  mode: taint
+  metadata:
+    category: security
+    cwe:
+      - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+    owasp:
+      - "A01:2021 - Broken Access Control"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [csharp, dotnet, asp.net]
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: $REQ.Query[...]
+            - pattern: $REQ.Form[...]
+            - pattern: $REQ.Headers[...]
+            - pattern: $REQ.Cookies[...]
+            - pattern: $REQ.RouteValues[...]
+  pattern-sanitizers:
+    - pattern: Path.GetFileName(...)
+  pattern-sinks:
+    - patterns:
+        - pattern-either:
+            - pattern: File.ReadAllText(...)
+            - pattern: File.ReadAllBytes(...)
+            - pattern: File.ReadAllLines(...)
+            - pattern: File.OpenRead(...)
+            - pattern: File.OpenText(...)
+            - pattern: File.WriteAllText(...)
+            - pattern: File.WriteAllBytes(...)
+            - pattern: new StreamReader(...)
+            - pattern: new FileStream(...)
+
+- id: narvy.csharp.cmdi.process-start-untrusted.process-start-untrusted
+  message: >-
+    A value read from the HTTP request is passed to `Process.Start(...)`
+    (as the file name or the arguments). Request-controlled process
+    arguments let an attacker inject extra arguments, and a
+    request-controlled file name lets them choose the program to run - both
+    are command injection (CWE-78). Never build a process invocation from
+    request input; if an external tool must run, hardcode the executable and
+    pass a strictly validated, allow-listed argument.
+  severity: ERROR
+  languages: [csharp]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [csharp, dotnet]
+  patterns:
+    - pattern-either:
+        - pattern: System.Diagnostics.Process.Start(..., $REQ.Query[...], ...)
+        - pattern: System.Diagnostics.Process.Start(..., $REQ.Form[...], ...)
+        - pattern: System.Diagnostics.Process.Start(..., $REQ.Headers[...], ...)
+        - pattern: System.Diagnostics.Process.Start(..., $REQ.RouteValues[...], ...)
+        - pattern: System.Diagnostics.Process.Start($REQ.Query[...], ...)
+        - pattern: System.Diagnostics.Process.Start($REQ.Form[...], ...)
+        - pattern: Process.Start(..., $REQ.Query[...], ...)
+        - pattern: Process.Start(..., $REQ.Form[...], ...)
+        - pattern: Process.Start(..., $REQ.Headers[...], ...)
+        - pattern: Process.Start(..., $REQ.RouteValues[...], ...)
+        - pattern: Process.Start($REQ.Query[...], ...)
+        - pattern: Process.Start($REQ.Form[...], ...)

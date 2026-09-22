@@ -1,0 +1,258 @@
+# Rust web-source security rules, authored by Narvy.
+# Covers OS command injection, raw SQL string construction with sqlx,
+# weak/broken hashing, and untrusted binary deserialization.
+
+rules:
+
+# OS command injection - shell -c with a non-literal argument
+- id: narvy.rust.command-injection.command-injection-arg.command-injection-arg
+  message: >
+    A shell is launched with `-c` and a non-literal command string
+    (Command::new("sh").arg("-c").arg(<expr>)). Whatever the expression
+    evaluates to is parsed by the shell, so untrusted input yields arbitrary
+    command execution (CWE-78). Remediation: run the target program directly
+    with a fixed argument vector (Command::new("prog").arg(user_value)) so no
+    shell interprets metacharacters, and validate the value against an
+    allow-list.
+  severity: ERROR
+  languages: [rust]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  patterns:
+    - pattern-either:
+        - pattern: Command::new("sh").arg("-c").arg($CMD)
+        - pattern: Command::new("bash").arg("-c").arg($CMD)
+        - pattern: Command::new("/bin/sh").arg("-c").arg($CMD)
+        - pattern: Command::new("/bin/bash").arg("-c").arg($CMD)
+        - pattern: Command::new("zsh").arg("-c").arg($CMD)
+        - pattern: std::process::Command::new("sh").arg("-c").arg($CMD)
+        - pattern: std::process::Command::new("bash").arg("-c").arg($CMD)
+        - pattern: std::process::Command::new("/bin/sh").arg("-c").arg($CMD)
+        - pattern: std::process::Command::new("/bin/bash").arg("-c").arg($CMD)
+    - metavariable-pattern:
+        metavariable: $CMD
+        patterns:
+          - pattern-not: '"..."'
+
+# OS command injection - program name is not a string literal
+- id: narvy.rust.command-injection.command-injection-non-literal.command-injection-non-literal
+  message: >
+    The program passed to Command::new is not a string literal. If the value
+    is influenced by untrusted input an attacker can choose which binary to
+    execute (CWE-78). Remediation: select the executable from a fixed,
+    hard-coded allow-list rather than building the program name at runtime;
+    if a path must be configurable, resolve it from trusted configuration and
+    validate it before use.
+  severity: WARNING
+  languages: [rust]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [audit]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: LOW
+    source: narvy-local
+  patterns:
+    - pattern-either:
+        - pattern: Command::new($CMD)
+        - pattern: std::process::Command::new($CMD)
+    - pattern-not: Command::new("...")
+    - pattern-not: std::process::Command::new("...")
+    - pattern-not: Command::new(&"...")
+    - pattern-not: std::process::Command::new(&"...")
+
+# Broken password hashing - MD5
+- id: narvy.rust.md5-used-as-password-hash.md5-used-as-password-hash.md5-used-as-password-hash
+  message: >
+    The md5 crate is used to hash data. MD5 is a fast, collision-broken hash
+    with no work factor, so using it for passwords or credentials leaves them
+    trivially recoverable with rainbow tables or brute force
+    (CWE-916, CWE-327). Remediation: hash passwords with a purpose-built
+    password KDF - argon2, bcrypt, or scrypt - and reserve MD5, if anything,
+    for non-security checksums only.
+  severity: ERROR
+  languages: [rust]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-916: Use of Password Hash With Insufficient Computational Effort"
+      - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+    owasp:
+      - "A02:2021 - Cryptographic Failures"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  pattern-either:
+    - pattern: md5::compute(...)
+    - pattern: Md5::new()
+    - pattern: md5::Md5::new()
+    - pattern: Md5::digest(...)
+    - pattern: md5::Md5::digest(...)
+
+# Weak hash - SHA-1
+- id: narvy.rust.sha1-weak-hash.sha1-weak-hash.sha1-weak-hash
+  message: >
+    SHA-1 is used to compute a hash. SHA-1 is broken against collision attacks
+    and must not be used for signatures, integrity guarantees, or credential
+    handling (CWE-327). Remediation: use SHA-256 or SHA-3 for integrity, and a
+    dedicated password KDF (argon2/bcrypt/scrypt) for credentials.
+  severity: WARNING
+  languages: [rust]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+    owasp:
+      - "A02:2021 - Cryptographic Failures"
+    subcategory: [audit]
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    source: narvy-local
+  pattern-either:
+    - pattern: Sha1::new()
+    - pattern: sha1::Sha1::new()
+    - pattern: Sha1::digest(...)
+    - pattern: sha1::Sha1::digest(...)
+
+# SQL injection - sqlx query built with format!()
+- id: narvy.rust.sql-injection.sql-injection-format.sql-injection-format
+  message: >
+    A sqlx query string is built with format!(). Any value interpolated by
+    format! becomes part of the SQL text, so a user-controlled argument allows
+    SQL injection (CWE-89). Remediation: keep the SQL literal and pass values
+    as bound parameters - sqlx::query("... WHERE id = $1").bind(id) - or use
+    the compile-time-checked query!/query_as! macros.
+  severity: ERROR
+  languages: [rust]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  pattern-either:
+    - pattern: sqlx::query(&format!(...))
+    - pattern: sqlx::query(format!(...).as_str())
+    - pattern: sqlx::query_as::<_, $T>(&format!(...))
+    - pattern: sqlx::query_scalar(&format!(...))
+    - pattern: |
+        let $S = format!(...);
+        ...
+        sqlx::query(&$S)
+    - pattern: |
+        let $S = format!(...);
+        ...
+        sqlx::query($S.as_str())
+    - pattern: |
+        let $S = format!(...);
+        ...
+        sqlx::query_as::<_, $T>(&$S)
+
+# SQL injection - sqlx query built by mutating a String
+- id: narvy.rust.sql-injection.sql-injection-string-push.sql-injection-string-push
+  message: >
+    A mutable String is assembled with runtime data (write!/push_str) and then
+    handed to sqlx::query. Concatenating values into raw SQL text allows SQL
+    injection (CWE-89). Remediation: build the statement with a fixed SQL
+    string and bound parameters, or use sqlx's QueryBuilder with .push_bind()
+    so values are never spliced into the query text.
+  severity: ERROR
+  languages: [rust]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [audit]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: LOW
+    source: narvy-local
+  pattern-either:
+    - pattern: |
+        let mut $S = String::new();
+        ...
+        write!($S, ...).unwrap();
+        ...
+        sqlx::query(&$S)
+    - pattern: |
+        let mut $S = String::new();
+        ...
+        write!($S, ...)?;
+        ...
+        sqlx::query(&$S)
+    - pattern: |
+        let mut $S = String::new();
+        ...
+        write!($S, ...).expect(...);
+        ...
+        sqlx::query(&$S)
+    - pattern: |
+        let mut $S = String::new();
+        ...
+        writeln!($S, ...).unwrap();
+        ...
+        sqlx::query(&$S)
+    - pattern: |
+        let mut $S = String::new();
+        ...
+        writeln!($S, ...)?;
+        ...
+        sqlx::query(&$S)
+    - pattern: |
+        let mut $S = String::new();
+        ...
+        $S.push_str(&format!(...));
+        ...
+        sqlx::query(&$S)
+
+# Untrusted deserialization - bincode
+- id: narvy.rust.bincode-deserialize.bincode-deserialize.bincode-deserialize
+  message: >
+    Data is decoded with bincode::deserialize. Bincode performs no validation
+    of length prefixes or structure, so a hostile buffer can drive very large
+    allocations (denial of service) and, combined with unsound downstream
+    code, memory-safety problems (CWE-502). Remediation: only deserialize
+    bincode from a trusted source; for data crossing a trust boundary, apply
+    a configured size limit (bincode::options().with_limit(...)) and
+    authenticate the bytes (e.g. an HMAC) before decoding.
+  severity: WARNING
+  languages: [rust]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-502: Deserialization of Untrusted Data"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    source: narvy-local
+  pattern-either:
+    - pattern: bincode::deserialize(...)
+    - pattern: bincode::deserialize_from(...)
+    - pattern: bincode::deserialize_in_place(...)
+    - pattern: bincode::options().deserialize(...)

@@ -1,0 +1,1576 @@
+# Java security rules, authored by Narvy.
+# Injection, path traversal, XSS, LDAP and XPath, TLS, CSRF, CORS, weak crypto.
+
+rules:
+- id: narvy.java.cmdi.runtime-exec-concat.runtime-exec-concat
+  message: '`Runtime.getRuntime().exec(...)` is called with a command string built by `+` concatenation. When invoked with
+    a single string argument, the JVM itself performs a naive shell-style tokenisation and any tainted operand can inject
+    additional arguments or, on platforms that route through a shell, additional commands (CWE-78). Use the `exec(String[])`
+    overload with the executable and each argument as a separate array element, and validate the executable against an allow-list.'
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: Runtime.getRuntime().exec($A + $B)
+    - pattern: $RT.exec($A + $B)
+  - pattern-not: Runtime.getRuntime().exec("..." + "...")
+  - pattern-not: $RT.exec("..." + "...")
+- id: narvy.java.cmdi.processbuilder-shell-flag.processbuilder-shell-flag
+  message: '`ProcessBuilder` invokes a shell (`sh -c` / `bash -c` / `cmd.exe /c`) with a command string that is not a literal.
+    Even though `ProcessBuilder` normally avoids shell interpretation, explicitly re-introducing a shell via `-c`/`/c` hands
+    the tainted string to shell metacharacter expansion (`;`, `|`, `` ` ``, `$(...)`) (CWE-78). Invoke the target binary directly
+    with its arguments as separate array elements instead of going through a shell.'
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: new ProcessBuilder("sh", "-c", $X)
+    - pattern: new ProcessBuilder("bash", "-c", $X)
+    - pattern: new ProcessBuilder("/bin/sh", "-c", $X)
+    - pattern: new ProcessBuilder("/bin/bash", "-c", $X)
+    - pattern: new ProcessBuilder("cmd.exe", "/c", $X)
+    - pattern: new ProcessBuilder("cmd", "/c", $X)
+  - pattern-not: new ProcessBuilder("sh", "-c", "...")
+  - pattern-not: new ProcessBuilder("bash", "-c", "...")
+  - pattern-not: new ProcessBuilder("/bin/sh", "-c", "...")
+  - pattern-not: new ProcessBuilder("/bin/bash", "-c", "...")
+  - pattern-not: new ProcessBuilder("cmd.exe", "/c", "...")
+  - pattern-not: new ProcessBuilder("cmd", "/c", "...")
+- id: narvy.java.cmdi.tainted-request-param-to-exec.tainted-request-param-to-exec
+  message: 'A value read directly from the HTTP request reaches `Runtime.exec`/`ProcessBuilder` as (part of) the command to
+    execute, with no allow-list or escaping in between. This is a remote command injection path (CWE-78): an attacker who
+    controls the request can run arbitrary OS commands with the application''s privileges. Validate the value against a strict
+    allow-list before it reaches the process-spawning call, or avoid building the command from request data entirely.'
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: Runtime.getRuntime().exec($SINK)
+      - pattern: Runtime.getRuntime().exec("..." + $SINK + "...")
+      - pattern: $RT.exec($SINK)
+      - pattern: new ProcessBuilder($SINK)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: Integer.parseInt(...)
+- id: narvy.java.crlf.tainted-response-header.tainted-response-header
+  message: A value read directly from the HTTP request is passed to `HttpServletResponse.setHeader`/`addHeader`/`sendRedirect`
+    with no newline stripping. A tainted value containing `\r\n` injects extra response headers or splits the response into
+    a second, attacker-defined one (HTTP response splitting, CWE-113); on Servlet containers that reject raw CR/LF in header
+    values automatically this degrades to a caught exception, but code should not rely on the container to do that validation.
+    Strip/reject `\r` and `\n` from the value before using it as a header.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-113: Improper Neutralization of CRLF Sequences in HTTP Headers (''HTTP Response Splitting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $RESP.setHeader($NAME, $SINK)
+      - pattern: $RESP.addHeader($NAME, $SINK)
+      - pattern: $RESP.sendRedirect($SINK)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: $X.replaceAll(...)
+  - patterns:
+    - pattern: URLEncoder.encode(...)
+- id: narvy.java.log-injection.tainted-request-param-in-log.tainted-request-param-in-log
+  message: A value read directly from the HTTP request is written into a log statement with no newline neutralisation. An
+    attacker can embed `\r\n` plus a fabricated log line to forge audit entries, or embed a payload that a downstream log
+    viewer renders as HTML/JS if it does not escape (CWE-117). Strip/replace `\r`/`\n` before logging user-controlled values,
+    or use a logging framework's structured/parameterised logging so the value is never spliced into the raw log line.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-117: Improper Output Neutralization for Logs'
+    owasp:
+    - A09:2021 - Security Logging and Monitoring Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: LOW
+    confidence: LOW
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: logger.info("..." + $SINK + "...")
+      - pattern: logger.warn("..." + $SINK + "...")
+      - pattern: logger.error("..." + $SINK + "...")
+      - pattern: log.info("..." + $SINK + "...")
+      - pattern: log.warn("..." + $SINK + "...")
+      - pattern: log.error("..." + $SINK + "...")
+  pattern-sanitizers:
+  - patterns:
+    - pattern: $X.replaceAll(...)
+- id: narvy.java.ldapi.tainted-search-filter.tainted-search-filter
+  message: An LDAP search filter is built by concatenating a value read from the HTTP request into the filter string passed
+    to `DirContext.search(...)`/`InitialDirContext`. An attacker can inject filter metacharacters (`*`, `)`, `(`, `|`, `&`)
+    to alter the query logic (bypass an authentication check, enumerate directory entries) (CWE-90). Escape the value with
+    `javax.naming.ldap` filter-escaping rules (escape `\`, `*`, `(`, `)`, NUL) before splicing it into the filter string,
+    or build the filter with a library that parameterises LDAP queries.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-90: Improper Neutralization of Special Elements used in an LDAP Query (''LDAP Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $CTX.search("..." + $SINK + "...", ...)
+      - pattern: $CTX.search($SINK, ...)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: $X.replace(...)
+- id: narvy.java.xpathi.tainted-xpath-expression.tainted-xpath-expression
+  message: An XPath expression is built by concatenating a value read from the HTTP request into the expression string passed
+    to `XPath.evaluate(...)` / `XPath.compile(...)`. An attacker can inject XPath syntax to bypass a login check or extract
+    arbitrary nodes from the document (CWE-643). Use `XPath.setXPathVariableResolver(...)` with a bound variable instead of
+    concatenating the tainted value into the expression text.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-643: Improper Neutralization of Data within XPath Expressions (''XPath Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $XP.evaluate("..." + $SINK + "...", ...)
+      - pattern: $XP.compile("..." + $SINK + "...")
+- id: narvy.java.session.tainted-session-attribute-key.tainted-session-attribute-key
+  message: 'A value read directly from the HTTP request is used as the SESSION ID (`request.getSession(...)` chained off a
+    request-derived value, or a manual session-id cookie set from a request parameter) rather than letting the container generate
+    one. Accepting an attacker-supplied session identifier is session fixation: the attacker sets a known ID, waits for the
+    victim to authenticate under it, and reuses the same ID to hijack the now-authenticated session (CWE-384). Never accept
+    a client-supplied value as the session identifier; regenerate the session ID on privilege change (login) with `request.changeSessionId()`.'
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-384: Session Fixation'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: new Cookie("JSESSIONID", $REQ.getParameter(...))
+    - pattern: new Cookie("sessionid", $REQ.getParameter(...))
+    - pattern: $RESP.addCookie(new Cookie("JSESSIONID", $X))
+- id: narvy.java.ssrf.tainted-request-url-host.tainted-request-url-host
+  message: A value read directly from the HTTP request is used as (or to build) the full target URL/host for an outbound HTTP
+    call (`RestTemplate`, `HttpClient`, `URL`/`URLConnection`). An attacker can point the request at an internal-only service
+    (metadata endpoint, admin panel, database admin UI) that is not reachable directly from outside the network - a server-side
+    request forgery (CWE-918). Validate the target against an allow-list of expected hosts/schemes before making the request,
+    and block requests to loopback/link-local/private ranges.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery (SSRF)
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+  - patterns:
+    - pattern-either:
+      - pattern-inside: |
+          $METHOD(..., @$ANNO(...) $TYPE $SRC, ...) {
+            ...
+          }
+      - pattern-inside: |
+          $METHOD(..., @$ANNO $TYPE $SRC, ...) {
+            ...
+          }
+    - metavariable-regex:
+        metavariable: $ANNO
+        regex: (RequestParam|PathVariable|RequestHeader)
+    - focus-metavariable: $SRC
+  pattern-sanitizers:
+  - patterns:
+    - pattern: '"..." + $SAFE'
+    - focus-metavariable: $SAFE
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $RT.getForObject($SINK, ...)
+      - pattern: $RT.postForObject($SINK, ...)
+      - pattern: $RT.exchange($SINK, ...)
+      - pattern: new URL($SINK).openConnection()
+      - pattern: new URL($SINK).openStream()
+- id: narvy.java.reflection.tainted-classfor-name.tainted-classfor-name
+  message: '`Class.forName(...)` (or `getMethod`/`getDeclaredMethod`) is invoked with a class or method name that traces back
+    to HTTP request data. An attacker who controls the class/method name can instantiate or invoke an arbitrary class already
+    on the classpath - useful both as an RCE gadget and as a way to bypass an intended allow-list of operations (CWE-470).
+    Validate the name against an explicit allow-list before passing it to reflective APIs; never resolve a class/method purely
+    from request input.'
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-470: Use of Externally-Controlled Input to Select Classes or Code (''Unsafe Reflection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: Class.forName($SINK)
+      - pattern: $CLS.getMethod($SINK, ...)
+      - pattern: $CLS.getDeclaredMethod($SINK, ...)
+- id: narvy.java.cookie.sensitive-cookie-flags-explicitly-false.sensitive-cookie-flags-explicitly-false
+  message: A `Cookie` explicitly disables `HttpOnly` or `Secure` (`setHttpOnly(false)` / `setSecure(false)`). `HttpOnly` blocks
+    JavaScript from reading the cookie (mitigates session-token theft via XSS); `Secure` stops the browser sending it over
+    plaintext HTTP (CWE-1004, CWE-614). Only disable either flag if there is a specific, documented reason (e.g. a legacy
+    HTTP-only integration) - otherwise set both to `true`.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-1004: Sensitive Cookie Without ''HttpOnly'' Flag'
+    - 'CWE-614: Sensitive Cookie in HTTPS Session Without ''Secure'' Attribute'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: $C.setHttpOnly(false)
+    - pattern: $C.setSecure(false)
+- id: narvy.java.mass-assignment.spring-bean-untyped-request-body.spring-bean-untyped-request-body
+  message: A Spring MVC handler binds an incoming `@RequestBody`/form-backed object directly to a JPA entity (rather than
+    a dedicated DTO) and persists it without an explicit allow-list of settable fields. If the entity has a field the client
+    should never control (`role`, `isAdmin`, `balance`, `ownerId`), the attacker can set it just by adding the JSON key -
+    mass assignment (CWE-915). Bind to a request-scoped DTO that only exposes the fields the client is meant to set, and map
+    it onto the entity explicitly.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - java
+    - spring
+  patterns:
+  - pattern-either:
+    - pattern: "@PostMapping(...)\npublic $RET $HANDLER(@RequestBody $ENTITY $BODY, ...) {\n  ...\n  $REPO.save($BODY);\n\
+        \  ...\n}\n"
+  - metavariable-pattern:
+      metavariable: $ENTITY
+      patterns:
+      - pattern-either:
+        - pattern-regex: .*Entity$
+- id: narvy.java.open-redirect.tainted-sendredirect.tainted-sendredirect
+  message: '`HttpServletResponse.sendRedirect(...)` is called with a value read directly from the HTTP request. An attacker
+    can craft a link to the trusted site that redirects the victim''s browser to an arbitrary external URL - useful for phishing
+    and OAuth token theft (CWE-601). Validate the target against an allow-list of known-good paths/hosts, or only permit relative
+    paths within the application.'
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-601: URL Redirection to Untrusted Site (''Open Redirect'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: LOW
+    confidence: MEDIUM
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $RESP.sendRedirect($SINK)
+      - pattern: $RESP.sendRedirect("..." + $SINK)
+      - pattern: $RESP.setHeader("Location", $SINK)
+- id: narvy.java.open-redirect.spring-redirect-prefix-tainted.spring-redirect-prefix-tainted
+  message: A Spring MVC handler builds a `"redirect:" + ...` view name from a `@RequestParam`/`@PathVariable` value. Spring
+    resolves that string as an HTTP redirect target; an attacker-controlled value can send the victim to an arbitrary external
+    site (CWE-601). Validate the target against an allow-list, or restrict it to a known set of internal view names.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-601: URL Redirection to Untrusted Site (''Open Redirect'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: LOW
+    confidence: MEDIUM
+    technology:
+    - java
+    - spring
+  patterns:
+  - pattern-either:
+    - pattern: '"redirect:" + $PARAM'
+    - pattern: new RedirectView($PARAM)
+  - pattern-not: '"redirect:" + "..."'
+- id: narvy.java.pathtraversal.tainted-request-param-to-file.tainted-request-param-to-file
+  message: A value read directly from the HTTP request (`getParameter`, `getHeader`, `getPathInfo`) is used to build a `File`/file
+    stream without validating that the resolved path stays inside the intended directory. A value containing `../` segments
+    (or an absolute path) lets an attacker read or write files outside the intended directory (CWE-22). Resolve the path,
+    canonicalise it, and verify with `startsWith(...)` that it stays inside the allowed base directory before use.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+      - pattern: $REQ.getPathInfo()
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: new File($BASE, $SINK)
+      - pattern: new File($SINK)
+      - pattern: new FileInputStream($SINK)
+      - pattern: new FileOutputStream($SINK)
+      - pattern: Files.newInputStream(Paths.get($SINK))
+      - pattern: Files.newOutputStream(Paths.get($SINK))
+      - pattern: Paths.get($BASE, $SINK)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: $P.normalize()
+  - patterns:
+    - pattern: $P.toRealPath()
+  - patterns:
+    - pattern: FilenameUtils.getName(...)
+- id: narvy.java.pathtraversal.jaxrs-pathparam-to-file.jaxrs-pathparam-to-file
+  message: 'A JAX-RS `@PathParam`/`@QueryParam` value flows into a `File`/`Path` constructor with no canonicalisation or allow-list
+    check. Same risk as the Servlet case: a `../` segment escapes the intended base directory (CWE-22). Canonicalise the resolved
+    path and verify it stays under the expected base directory before opening it.'
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: "public $RET $METHOD(@PathParam(...) $T $NAME, ...) {\n  ...\n  new File($BASE, $NAME);\n  ...\n}\n"
+    - pattern: "public $RET $METHOD(@QueryParam(...) $T $NAME, ...) {\n  ...\n  new File($BASE, $NAME);\n  ...\n}\n"
+- id: narvy.java.pathtraversal.zip-entry-no-canonical-check.zip-entry-no-canonical-check
+  message: A `ZipInputStream`/`ZipFile` entry name is used to build an output `File` path with no check that the resulting
+    path stays inside the destination directory. A crafted archive entry named `../../evil.sh` (a "Zip Slip") writes outside
+    the intended extraction directory (CWE-22). Resolve the entry path against the destination directory, canonicalise it,
+    and reject any entry whose resolved path escapes that directory.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: '$ENTRY = $ZIS.getNextEntry();
+
+        ...
+
+        $OUT = new File($DESTDIR, $ENTRY.getName());
+
+        ...
+
+        '
+    - pattern: '$NAME = $ENTRY.getName();
+
+        ...
+
+        $OUT = new File($DESTDIR, $NAME);
+
+        ...
+
+        '
+  - pattern-not: '$ENTRY = $ZIS.getNextEntry();
+
+      ...
+
+      $OUT = new File($DESTDIR, $ENTRY.getName());
+
+      ...
+
+      if (!$OUT.getCanonicalPath().startsWith(...)) { ... }
+
+      ...
+
+      '
+- id: narvy.java.crypto.plaintext-socket-construction.plaintext-socket-construction
+  message: A plain `java.net.Socket`/`java.net.ServerSocket` is constructed directly. Everything sent or received on it travels
+    unencrypted, so anyone who can observe the network path can read or tamper with the traffic (CWE-319). This is an audit-level
+    flag, not a proven bug - a loopback-only or already-tunnelled connection is fine as-is, but if this socket carries credentials,
+    tokens, or other sensitive data over a network that is not otherwise trusted, wrap it with `SSLSocketFactory` / `SSLServerSocketFactory`
+    (or an equivalent TLS-terminating client) instead of the bare constructor.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-319: Cleartext Transmission of Sensitive Information'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: new Socket(...)
+    - pattern: new ServerSocket(...)
+- id: narvy.java.sqli.sprintf-var-to-jdbc-statement.sprintf-var-to-jdbc-statement
+  message: A SQL string built with `String.format(...)` (with real substitution arguments, not just a literal) is assigned
+    to a variable that later reaches a plain JDBC `Statement`/`PreparedStatement` call. `String.format` does not escape SQL
+    metacharacters, so if any of the substituted values is not fully trusted, this is a SQL injection (CWE-89). Build the
+    query text as a fixed literal and bind the dynamic parts with `?` placeholders and `setString`/`setInt`/etc instead of
+    formatting them into the text.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern: '$Q = String.format(...);
+
+          ...
+
+          $STMT.executeQuery($Q);
+
+          '
+      - pattern-not: '$Q = String.format("...");
+
+          ...
+
+          $STMT.executeQuery($Q);
+
+          '
+    - patterns:
+      - pattern: '$Q = String.format(...);
+
+          ...
+
+          $STMT.executeUpdate($Q);
+
+          '
+      - pattern-not: '$Q = String.format("...");
+
+          ...
+
+          $STMT.executeUpdate($Q);
+
+          '
+    - patterns:
+      - pattern: '$Q = String.format(...);
+
+          ...
+
+          $STMT.execute($Q);
+
+          '
+      - pattern-not: '$Q = String.format("...");
+
+          ...
+
+          $STMT.execute($Q);
+
+          '
+    - patterns:
+      - pattern: '$Q = String.format(...);
+
+          ...
+
+          $CONN.prepareStatement($Q);
+
+          ...
+
+          $P.$EXECFUNC(...);
+
+          '
+      - pattern-not: '$Q = String.format("...");
+
+          ...
+
+          $CONN.prepareStatement($Q);
+
+          ...
+
+          $P.$EXECFUNC(...);
+
+          '
+      - metavariable-regex:
+          metavariable: $EXECFUNC
+          regex: (?i)^execute
+- id: narvy.java.sqli.plus-var-to-jdbc-statement.plus-var-to-jdbc-statement
+  message: A SQL string is built with `+` concatenation, assigned to a variable, then that variable is later passed to a JDBC
+    `Statement.execute*` call. This is the same defect `Statement`/`+`-inline concatenation already covers, but reached through
+    a separate assignment instead of the concatenation sitting directly in the call argument - splitting it across two statements
+    does not change the risk (CWE-89). Use a `PreparedStatement` with `?` placeholders instead of assembling the query text
+    yourself.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern: '$Q = $A + $B;
+
+          ...
+
+          $STMT.executeQuery($Q);
+
+          '
+      - pattern-not: '$Q = "..." + "...";
+
+          ...
+
+          $STMT.executeQuery($Q);
+
+          '
+    - patterns:
+      - pattern: '$Q = $A + $B;
+
+          ...
+
+          $STMT.executeUpdate($Q);
+
+          '
+      - pattern-not: '$Q = "..." + "...";
+
+          ...
+
+          $STMT.executeUpdate($Q);
+
+          '
+    - patterns:
+      - pattern: '$Q = $A + $B;
+
+          ...
+
+          $STMT.execute($Q);
+
+          '
+      - pattern-not: '$Q = "..." + "...";
+
+          ...
+
+          $STMT.execute($Q);
+
+          '
+- id: narvy.java.sqli.stringbuilder-query-to-jdbc-statement.stringbuilder-query-to-jdbc-statement
+  message: A SQL query string is assembled across several `StringBuilder.append(...)` calls, with at least one appended value
+    that is not a string literal (a table name, column list, WHERE fragment, or similar coming from a variable), and the resulting
+    text reaches a JDBC `Statement` or `PreparedStatement` execute call once `.toString()`'d. Even when the surrounding code
+    later binds `?` placeholders for values, splicing identifiers or query fragments into the text this way is still SQL injection
+    risk for whatever produced that fragment (CWE-89). Prefer a fixed literal query text; if a piece of the query genuinely
+    has to vary (table/column name), validate it against an allow-list before splicing it in, since JDBC has no bind-parameter
+    syntax for identifiers.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern: '$SB = new StringBuilder(...);
+
+          ...
+
+          $SB.append($ARG);
+
+          ...
+
+          $Q = $SB.toString();
+
+          ...
+
+          $P = $CONN.prepareStatement($Q);
+
+          ...
+
+          $P.$EXECFUNC(...);
+
+          '
+      - metavariable-regex:
+          metavariable: $EXECFUNC
+          regex: (?i)^execute
+      - metavariable-pattern:
+          metavariable: $ARG
+          patterns:
+          - pattern-not: '"..."'
+    - patterns:
+      - pattern: '$SB = new StringBuilder(...);
+
+          ...
+
+          $SB.append($ARG);
+
+          ...
+
+          $Q = $SB.toString();
+
+          ...
+
+          $STMT.$EXECFUNC($Q);
+
+          '
+      - metavariable-regex:
+          metavariable: $EXECFUNC
+          regex: (?i)^execute
+      - metavariable-pattern:
+          metavariable: $ARG
+          patterns:
+          - pattern-not: '"..."'
+- id: narvy.java.sqli.jdbc-statement-concat.jdbc-statement-concat
+  message: A plain JDBC `Statement` executes a query string built with `+` concatenation. `Statement` never parameterises,
+    so any tainted value reaching the concatenation is a direct SQL injection (CWE-89). Switch to `PreparedStatement` with
+    `?` placeholders and `setString`/`setInt`/etc.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: $STMT.executeQuery($A + $B)
+    - pattern: $STMT.executeUpdate($A + $B)
+    - pattern: $STMT.execute($A + $B)
+  - pattern-not: $STMT.executeQuery("..." + "...")
+  - pattern-not: $STMT.executeUpdate("..." + "...")
+  - pattern-not: $STMT.execute("..." + "...")
+- id: narvy.java.sqli.jdbc-connection-createquery-concat.jdbc-connection-createquery-concat
+  message: '`Connection.prepareStatement(...)` is called with a SQL string built by `+` concatenation. Building the query
+    text via concatenation defeats the protection `PreparedStatement` exists to provide, because the tainted value is already
+    part of the parsed SQL grammar by the time the driver sees it (CWE-89). Keep the query text a fixed literal and bind values
+    with `?` + `setString`/`setInt`.'
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: $CONN.prepareStatement($A + $B)
+    - pattern: $CONN.prepareStatement($A + $B, ...)
+  - pattern-not: $CONN.prepareStatement("..." + "...")
+  - pattern-not: $CONN.prepareStatement("..." + "...", ...)
+- id: narvy.java.sqli.jdbctemplate-concat.jdbctemplate-concat
+  message: Spring `JdbcTemplate` is called with a SQL string built by `+` concatenation instead of the `?` placeholder + args
+    form. `JdbcTemplate` only protects arguments passed through its own varargs binder; splicing a value into the SQL text
+    bypasses that entirely (CWE-89). Use `jdbcTemplate.query("... WHERE id = ?", rowMapper, id)`.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+    - spring
+  patterns:
+  - pattern-either:
+    - pattern: $JT.query($A + $B, ...)
+    - pattern: $JT.queryForObject($A + $B, ...)
+    - pattern: $JT.queryForList($A + $B, ...)
+    - pattern: $JT.update($A + $B, ...)
+    - pattern: $JT.execute($A + $B)
+  - pattern-not: $JT.query("..." + "...", ...)
+  - pattern-not: $JT.queryForObject("..." + "...", ...)
+  - pattern-not: $JT.queryForList("..." + "...", ...)
+  - pattern-not: $JT.update("..." + "...", ...)
+  - pattern-not: $JT.execute("..." + "...")
+- id: narvy.java.sqli.tainted-request-param-to-statement.tainted-request-param-to-statement
+  message: A value read directly from the HTTP request (`getParameter`, `getHeader`, `getQueryString`) reaches a `Statement`/`PreparedStatement`
+    SQL sink through a local variable, with no bind-parameter API in the call. Even when the sink call itself is a `PreparedStatement`,
+    if the tainted value ends up as part of the SQL text (versus a bound `?` argument) it is a SQL injection (CWE-89). Bind
+    the value with `setString`/`setInt`/etc; never build the SQL string from request data.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+      - pattern: $REQ.getQueryString()
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $STMT.executeQuery("..." + $SINK + "...")
+      - pattern: $STMT.executeQuery("..." + $SINK)
+      - pattern: $STMT.executeUpdate("..." + $SINK + "...")
+      - pattern: $STMT.execute("..." + $SINK + "...")
+  pattern-sanitizers:
+  - patterns:
+    - pattern: Integer.parseInt(...)
+  - patterns:
+    - pattern: Long.parseLong(...)
+- id: narvy.java.tls.weak-sslcontext-protocol.weak-sslcontext-protocol
+  message: '`SSLContext.getInstance(...)` is initialised with a deprecated/broken protocol name ("SSL", "SSLv2", "SSLv3",
+    "SSLv2Hello", or the bare "TLS" alias, which on some JVMs still negotiates down to TLS 1.0). SSLv2/v3 have known practical
+    breaks (POODLE, DROWN); TLS 1.0/1.1 are formally deprecated (CWE-326). Request `"TLSv1.3"` (or `"TLSv1.2"` at minimum)
+    explicitly.'
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: SSLContext.getInstance("SSL")
+    - pattern: SSLContext.getInstance("SSLv2")
+    - pattern: SSLContext.getInstance("SSLv3")
+    - pattern: SSLContext.getInstance("SSLv2Hello")
+    - pattern: SSLContext.getInstance("TLS")
+- id: narvy.java.tls.trust-all-managers.trust-all-managers
+  message: A custom `X509TrustManager` implements `checkServerTrusted`/ `checkClientTrusted` as a no-op (empty body, or a
+    body that never throws). Installing it into an `SSLContext` disables certificate validation entirely - the connection
+    accepts any certificate, including one presented by a man-in-the-middle (CWE-295). Use the platform default trust manager,
+    or implement real chain/hostname validation if a custom trust store is genuinely required.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-295: Improper Certificate Validation'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: "new X509TrustManager() {\n  public void checkServerTrusted(...) { }\n  ...\n}\n"
+    - pattern: "new X509TrustManager() {\n  ...\n  public void checkServerTrusted(...) { }\n}\n"
+- id: narvy.java.tls.hostnameverifier-always-true.hostnameverifier-always-true
+  message: A `HostnameVerifier` (or `HttpsURLConnection.setDefaultHostnameVerifier`) implementation returns `true` unconditionally
+    from `verify(...)`. This disables hostname validation on the TLS handshake - the connection accepts a certificate for
+    ANY hostname, not just the one being connected to, which is a man-in-the-middle enabler (CWE-295). Use the default `HostnameVerifier`,
+    or implement real hostname comparison against the certificate's SAN entries.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-295: Improper Certificate Validation'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: "new HostnameVerifier() {\n  public boolean verify(String $HOST, SSLSession $SESSION) {\n    return true;\n\
+        \  }\n}\n"
+    - pattern: 'HostnameVerifier $VERIFIER = ($HOST, $SESSION) -> true;
+
+        '
+    - pattern: '$X.setDefaultHostnameVerifier(($HOST, $SESSION) -> true);
+
+        '
+    - pattern: '$X.setHostnameVerifier(($HOST, $SESSION) -> true);
+
+        '
+- id: narvy.java.tls.cleartext-http-url.cleartext-http-url
+  message: An outbound network call is built against a literal `http://` URL instead of `https://`. Traffic carrying session
+    tokens, credentials, or any sensitive payload over plaintext HTTP can be read or altered by anyone on the network path
+    (CWE-319). Use `https://` unless the target is a loopback/internal address that is genuinely local-only.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-319: Cleartext Transmission of Sensitive Information'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: new URL("http://...")
+    - pattern: new java.net.URL("http://...")
+    - pattern: $CLIENT.getForObject("http://...", ...)
+    - pattern: $CLIENT.postForObject("http://...", ...)
+  - pattern-not: new URL("http://localhost...")
+  - pattern-not: new URL("http://127.0.0.1...")
+- id: narvy.java.tls.smtp-starttls-explicitly-disabled.smtp-starttls-explicitly-disabled
+  message: JavaMail's `mail.smtp.starttls.enable` (or `mail.smtp.ssl.enable`) is explicitly set to `"false"`. The SMTP session
+    then authenticates and sends mail over an unencrypted connection - credentials and message content are readable to anyone
+    on the network path (CWE-319). Set the property to `"true"` (and prefer implicit SSL on port 465 or STARTTLS on 587 over
+    unauthenticated plaintext SMTP on 25).
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-319: Cleartext Transmission of Sensitive Information'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: $PROPS.put("mail.smtp.starttls.enable", "false")
+    - pattern: $PROPS.setProperty("mail.smtp.starttls.enable", "false")
+    - pattern: $PROPS.put("mail.smtp.ssl.enable", "false")
+    - pattern: $PROPS.setProperty("mail.smtp.ssl.enable", "false")
+  - pattern-not-inside: '...
+
+      $PROPS.put("mail.smtp.ssl.enable", "true");
+
+      ...
+
+      '
+  - pattern-not-inside: '...
+
+      $PROPS.setProperty("mail.smtp.ssl.enable", "true");
+
+      ...
+
+      '
+- id: narvy.java.crypto.use-of-md5.use-of-md5
+  message: MD5 is cryptographically broken; practical collisions have been demonstrated for over a decade. Do not use it for
+    signatures, integrity checks, password storage, or any other security control (CWE-327, CWE-328). Use SHA-256 or stronger
+    for integrity, and a memory-hard KDF (Argon2id, scrypt, bcrypt) for password hashing.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    - 'CWE-328: Use of Weak Hash'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: java.security.MessageDigest.getInstance("MD5")
+    - pattern: MessageDigest.getInstance("MD5")
+    - pattern: java.security.MessageDigest.getInstance("MD2")
+    - pattern: MessageDigest.getInstance("MD2")
+    - pattern: org.apache.commons.codec.digest.DigestUtils.md5Hex(...)
+    - pattern: DigestUtils.md5Hex(...)
+    - pattern: org.apache.commons.codec.digest.DigestUtils.md5(...)
+    - pattern: DigestUtils.md5(...)
+    - pattern: com.google.common.hash.Hashing.md5()
+    - pattern: Hashing.md5()
+- id: narvy.java.crypto.use-of-sha1.use-of-sha1
+  message: SHA-1 is deprecated for security purposes; chosen-prefix collisions are practical. Do not use it for signatures,
+    certificate fingerprints, or any security-relevant integrity check (CWE-327, CWE-328). Use SHA-256 or stronger.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    - 'CWE-328: Use of Weak Hash'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: java.security.MessageDigest.getInstance("SHA-1")
+    - pattern: MessageDigest.getInstance("SHA-1")
+    - pattern: java.security.MessageDigest.getInstance("SHA1")
+    - pattern: MessageDigest.getInstance("SHA1")
+    - pattern: org.apache.commons.codec.digest.DigestUtils.sha1Hex(...)
+    - pattern: DigestUtils.sha1Hex(...)
+    - pattern: org.apache.commons.codec.digest.DigestUtils.sha1(...)
+    - pattern: DigestUtils.sha1(...)
+    - pattern: com.google.common.hash.Hashing.sha1()
+    - pattern: Hashing.sha1()
+- id: narvy.java.crypto.weak-symmetric-cipher.weak-symmetric-cipher
+  message: 'DES / 3DES(DESede) / RC2 / RC4 are broken or insufficient for modern use: DES''s 56-bit key is brute-forceable
+    in hours, RC2/RC4 have known keystream biases, and 3DES''s 64-bit block size is vulnerable to birthday attacks (Sweet32)
+    on any connection that moves enough data (CWE-327). Use AES-256 in GCM mode instead.'
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: Cipher.getInstance("DES")
+    - pattern: Cipher.getInstance("DES/...")
+    - pattern: Cipher.getInstance("DESede")
+    - pattern: Cipher.getInstance("DESede/...")
+    - pattern: Cipher.getInstance("TripleDES")
+    - pattern: Cipher.getInstance("TripleDES/...")
+    - pattern: Cipher.getInstance("RC2")
+    - pattern: Cipher.getInstance("RC2/...")
+    - pattern: Cipher.getInstance("RC4")
+    - pattern: Cipher.getInstance("RC4/...")
+    - pattern: Cipher.getInstance("ARCFOUR")
+    - pattern: Cipher.getInstance("ARCFOUR/...")
+    - pattern: KeyGenerator.getInstance("DES")
+    - pattern: KeyGenerator.getInstance("DESede")
+    - pattern: KeyGenerator.getInstance("RC4")
+- id: narvy.java.crypto.blowfish-weak-keysize.blowfish-weak-keysize
+  message: Blowfish is instantiated with a key generator that has not been sized up from its 32-bit default in the default
+    JCE provider. A short Blowfish key is brute-forceable (CWE-326). If Blowfish must be kept for legacy interop, call `init(256)`
+    on the KeyGenerator; otherwise migrate to AES-256-GCM.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: KeyGenerator.getInstance("Blowfish")
+    - pattern: Cipher.getInstance("Blowfish")
+    - pattern: Cipher.getInstance("Blowfish/...")
+- id: narvy.java.crypto.ecb-cipher.ecb-cipher
+  message: A symmetric cipher is used in ECB mode (explicitly, or implicitly via a bare algorithm name such as `Cipher.getInstance("AES")`,
+    which most JCE providers default to `AES/ECB/PKCS5Padding`). ECB encrypts each block independently, so identical plaintext
+    blocks produce identical ciphertext blocks; patterns in the plaintext (including images) leak through unencrypted (CWE-327).
+    Use `AES/GCM/NoPadding` with a unique 12-byte nonce per encryption.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: Cipher.getInstance("AES/ECB/...")
+    - pattern: Cipher.getInstance("AES")
+- id: narvy.java.crypto.static-iv.static-iv
+  message: An `IvParameterSpec` (or GCM nonce) is built from a fixed byte array (a string literal, a `new byte[N]` zero-initialised
+    array, or a hardcoded literal array) instead of a fresh random value per encryption. Reusing an IV/nonce with the same
+    key breaks CBC's semantic security and is catastrophic for GCM (full plaintext/key recovery on nonce reuse) (CWE-329).
+    Generate a new IV/nonce with `SecureRandom` for every encryption operation.
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-329: Generation of Predictable IV with CBC Mode'
+    - 'CWE-330: Use of Insufficiently Random Values'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: new IvParameterSpec("...".getBytes(...))
+    - pattern: new IvParameterSpec(new byte[...])
+    - pattern: new GCMParameterSpec($TAGLEN, "...".getBytes(...))
+- id: narvy.java.crypto.null-cipher.null-cipher
+  message: '`javax.crypto.NullCipher` performs no encryption at all; every byte passes through unchanged. It exists purely
+    for testing pipelines that expect a `Cipher` object. Shipping it in production code paths that handle real data is equivalent
+    to storing/transmitting plaintext (CWE-327).'
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: new NullCipher()
+    - pattern: new javax.crypto.NullCipher()
+- id: narvy.java.crypto.weak-rsa-keysize.weak-rsa-keysize
+  message: An RSA `KeyPairGenerator` is initialised with a key size below 2048 bits. NIST deprecated 1024-bit RSA in 2013;
+    keys that small are within reach of well-resourced attackers and are rejected by most modern CA/TLS policies (CWE-326).
+    Initialise with 2048 bits minimum (3072+ for long-lived keys).
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: $KPG.initialize(512, ...)
+    - pattern: $KPG.initialize(512)
+    - pattern: $KPG.initialize(768, ...)
+    - pattern: $KPG.initialize(768)
+    - pattern: $KPG.initialize(1024, ...)
+    - pattern: $KPG.initialize(1024)
+  - pattern-inside: '$KPG = KeyPairGenerator.getInstance("RSA");
+
+      ...
+
+      '
+- id: narvy.java.crypto.rsa-ecb-nopadding-cipher
+  message: 'RSA is used with `NoPadding` (raw textbook RSA) instead of OAEP. Textbook RSA is deterministic and malleable:
+    identical plaintexts always produce identical ciphertexts, and an attacker who can submit chosen ciphertexts to a decryption
+    oracle can recover the plaintext (Bleichenbacher-style attacks) (CWE-780). Use `RSA/ECB/OAEPWithSHA-256AndMGF1Padding`.'
+  severity: ERROR
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-780: Use of RSA Algorithm without OAEP'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: Cipher.getInstance("RSA/ECB/NoPadding")
+    - pattern: Cipher.getInstance("RSA/None/NoPadding")
+    - pattern: Cipher.getInstance("RSA/NONE/NoPadding")
+- id: narvy.java.crypto.rsa-pkcs1-padding.rsa-pkcs1-padding
+  message: RSA is used with legacy PKCS#1 v1.5 padding. PKCS#1v1.5 is vulnerable to Bleichenbacher-style padding-oracle attacks
+    when the same key decrypts attacker-supplied ciphertexts (CWE-780). Prefer `RSA/ECB/OAEPWithSHA-256AndMGF1Padding` for
+    new code; if PKCS#1v1.5 is required for interop, ensure decryption errors never leak padding validity to the caller.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-780: Use of RSA Algorithm without OAEP'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - java
+  patterns:
+  - pattern: Cipher.getInstance("RSA/ECB/PKCS1Padding")
+- id: narvy.java.crypto.insecure-random.insecure-random
+  message: '`java.util.Random` / `Math.random()` / `ThreadLocalRandom` are linear-congruential or xorshift PRNGs whose output
+    is predictable once a handful of samples are observed. Used to seed a token, password reset code, session identifier,
+    or any other security-relevant value, an attacker can reconstruct past or future outputs (CWE-330, CWE-338). Use `java.security.SecureRandom`
+    for anything that must be unpredictable.'
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-330: Use of Insufficiently Random Values'
+    - 'CWE-338: Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - java
+  patterns:
+  - pattern-either:
+    - pattern: new java.util.Random(...)
+    - pattern: new Random(...)
+    - pattern: Math.random()
+    - pattern: ThreadLocalRandom.current()
+  - pattern-not: new java.security.SecureRandom(...)
+  - pattern-not: new SecureRandom(...)
+- id: narvy.java.xss.servlet-writer-tainted-request-param.servlet-writer-tainted-request-param
+  message: A value read from the HTTP request (`getParameter`, `getHeader`, `getQueryString`) is written to `HttpServletResponse.getWriter()`
+    (or `getOutputStream()`) without HTML-escaping. The value is reflected into the response body verbatim; an attacker who
+    controls it can inject `<script>` or event-handler markup (CWE-79). Escape with an HTML encoder (`org.owasp.encoder.Encode.forHtml(...)`)
+    before writing, or render through a templating engine that auto-escapes.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - java
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $REQ.getParameter(...)
+      - pattern: $REQ.getHeader(...)
+      - pattern: $REQ.getQueryString()
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $RESP.getWriter().write($SINK)
+      - pattern: $RESP.getWriter().print($SINK)
+      - pattern: $RESP.getWriter().println($SINK)
+      - pattern: $RESP.getOutputStream().print($SINK)
+      - pattern: $W.write($SINK)
+      - pattern: $W.print($SINK)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: org.owasp.encoder.Encode.forHtml(...)
+  - patterns:
+    - pattern: Encode.forHtml(...)
+  - patterns:
+    - pattern: StringEscapeUtils.escapeHtml4(...)
+  - patterns:
+    - pattern: HtmlUtils.htmlEscape(...)
+  - patterns:
+    - pattern: Integer.parseInt(...)
+- id: narvy.java.xss.spring-responsebody-tainted-string.spring-responsebody-tainted-string
+  message: A `@RestController`/`@ResponseBody` handler method returns a `String` built directly from a `@RequestParam`/`@PathVariable`
+    value with no HTML-escaping. When the response `Content-Type` is (or can be coerced to) `text/html`, this is a reflected-XSS
+    sink (CWE-79). Return a typed DTO/JSON object instead of a raw HTML string, or escape the value explicitly before concatenating
+    it into markup.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - java
+    - spring
+  patterns:
+  - pattern-either:
+    - pattern: "@GetMapping(...)\npublic String $HANDLER(..., @RequestParam $T $PARAM, ...) {\n  ...\n  return \"...\" + $PARAM\
+        \ + \"...\";\n}\n"
+    - pattern: "@PostMapping(...)\npublic String $HANDLER(..., @RequestParam $T $PARAM, ...) {\n  ...\n  return \"...\" +\
+        \ $PARAM + \"...\";\n}\n"
+  - pattern-not-inside: '@Controller
+
+      class $CLASS { ... }
+
+      '
+- id: narvy.java.xss.modelandview-tainted-attribute.modelandview-tainted-attribute
+  message: A request parameter is added to a `ModelAndView`/`Model` attribute and the view is a `text/*` or a hand-built HTML
+    string view (not a `Thymeleaf`/`JSP` template that auto-escapes with `${...}`). If the rendering layer does not HTML-escape
+    model attributes, this is a reflected-XSS sink (CWE-79). Confirm the view technology escapes by default, or escape the
+    value before adding it to the model.
+  severity: WARNING
+  languages:
+  - java
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - java
+    - spring
+  patterns:
+  - pattern-either:
+    - pattern: $MODEL.addAttribute($KEY, $REQ.getParameter(...))
+    - pattern: $MAV.addObject($KEY, $REQ.getParameter(...))

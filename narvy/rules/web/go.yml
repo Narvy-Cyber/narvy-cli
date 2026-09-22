@@ -1,0 +1,2837 @@
+# Go security rules, authored by Narvy.
+# Injection, path traversal, SSRF, CORS, cookies, weak crypto, secrets.
+
+rules:
+- id: narvy.go.auth.insecure-string-compare-secret.insecure-string-compare-secret
+  message: A secret/token/signature/HMAC comparison uses `==` (or `strings.Compare`) instead of a constant-time comparison.
+    `==` short-circuits on the first mismatched byte, so response timing leaks how many leading bytes were correct - a timing
+    side-channel an attacker can use to recover the secret byte-by-byte (CWE-208). Use `subtle.ConstantTimeCompare()` or `hmac.Equal()`.
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-208: Observable Timing Discrepancy'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: $SIG == $EXPECTED
+  - metavariable-regex:
+      metavariable: $SIG
+      regex: (?i).*(sig|signature|hmac|mac|token|secret)$
+  - pattern-not: $SIG == nil
+  - pattern-not: nil == $SIG
+  - pattern-not: $SIG == ""
+  - pattern-not: '"" == $SIG'
+  - metavariable-pattern:
+      metavariable: $EXPECTED
+      patterns:
+      - pattern-not: nil
+      - pattern-not: '""'
+- id: narvy.go.auth.cookie-httponly-unset.cookie-httponly-unset
+  message: 'A session cookie is set (`http.SetCookie` with a name containing `session`) without `HttpOnly: true`. Without
+    it, JavaScript on the page (including an attacker''s, via any XSS) can read the cookie and exfiltrate it (CWE-1004). Set
+    `HttpOnly: true` on every session cookie.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-1004: Sensitive Cookie Without ''HttpOnly'' Flag'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern: 'http.SetCookie($W, &http.Cookie{..., Name: $NAME, ...})
+
+      '
+  - pattern-not: 'http.SetCookie($W, &http.Cookie{..., HttpOnly: true, ...})
+
+      '
+  - metavariable-regex:
+      metavariable: $NAME
+      regex: (?i).*session.*
+- id: narvy.go.auth.cookie-secure-unset.cookie-secure-unset
+  message: 'A session cookie is set without `Secure: true`. Without it, the browser will also send the cookie over a plaintext
+    `http://` connection, letting a network attacker capture it (CWE-614). Set `Secure: true` on every session cookie in production.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-614: Sensitive Cookie in HTTPS Session Without ''Secure'' Attribute'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern: 'http.SetCookie($W, &http.Cookie{..., Name: $NAME, ...})
+
+      '
+  - pattern-not: 'http.SetCookie($W, &http.Cookie{..., Secure: true, ...})
+
+      '
+  - metavariable-regex:
+      metavariable: $NAME
+      regex: (?i).*session.*
+- id: narvy.go.auth.cookie-samesite-none-mode-set.cookie-samesite-none-mode-set
+  message: 'A session cookie is set with `SameSite: http.SameSiteNoneMode`. `None` disables the CSRF-mitigating same-site
+    restriction entirely, sending the cookie on every cross-site request (CWE-352). Use `http.SameSiteLaxMode` (or `Strict`
+    for the most sensitive flows) unless the cookie genuinely needs to be sent from a third-party context, and pair `None`
+    with a separate CSRF token if it is required.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  pattern: 'http.SetCookie($W, &http.Cookie{..., SameSite: http.SameSiteNoneMode, ...})
+
+    '
+- id: narvy-go-cmdi-splat-args
+  patterns:
+  - pattern-either:
+    - pattern: 'exec.Command($ARGS[$IDX], ...)
+
+        '
+    - pattern: 'exec.CommandContext($CTX, $ARGS[$IDX], ...)
+
+        '
+  - pattern-not: 'exec.Command("...", ...)
+
+      '
+  - pattern-not: 'exec.CommandContext($CTX, "...", ...)
+
+      '
+  message: 'Command injection: `exec.Command` first argument is an indexed slice expression (e.g. `args[0]`), which means
+    the executable path itself is user-controlled. Even with subsequent arguments fixed, the attacker can run arbitrary binaries.
+    Use an allow-list of binary names.'
+  metadata:
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    technology:
+    - go
+    confidence: HIGH
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+  severity: ERROR
+  languages:
+  - go
+- id: narvy-go-syscall-exec-tainted
+  patterns:
+  - pattern-either:
+    - pattern: syscall.Exec($BIN, ...)
+    - pattern: syscall.ForkExec($BIN, ...)
+    - pattern: os.StartProcess($BIN, ...)
+  - pattern-not: syscall.Exec("...", ...)
+  - pattern-not: syscall.ForkExec("...", ...)
+  - pattern-not: os.StartProcess("...", ...)
+  message: Low-level process execution (`syscall.Exec` / `os.StartProcess`) with a non-literal binary path. If the path comes
+    from user input this is a command injection. Validate with an allow-list of approved binaries.
+  metadata:
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    technology:
+    - go
+    confidence: MEDIUM
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+  severity: ERROR
+  languages:
+  - go
+- id: narvy-go-cmdi-shell-flag
+  patterns:
+  - pattern-either:
+    - pattern: 'exec.Command("sh", "-c", $X)
+
+        '
+    - pattern: 'exec.Command("bash", "-c", $X)
+
+        '
+    - pattern: 'exec.Command("/bin/sh", "-c", $X)
+
+        '
+    - pattern: 'exec.Command("/bin/bash", "-c", $X)
+
+        '
+    - pattern: 'exec.CommandContext($CTX, "sh", "-c", $X)
+
+        '
+    - pattern: 'exec.CommandContext($CTX, "bash", "-c", $X)
+
+        '
+  - pattern-not: 'exec.Command($S, "-c", "...")
+
+      '
+  - pattern-not: 'exec.CommandContext($CTX, $S, "-c", "...")
+
+      '
+  message: Shell expansion via `sh -c` / `bash -c` with a non-literal command string. Even properly-quoted user input is interpreted
+    by the shell (subshells, redirection, env expansion). Invoke the target binary directly without `-c` and pass arguments
+    as a slice.
+  metadata:
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    technology:
+    - go
+    confidence: HIGH
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+  severity: ERROR
+  languages:
+  - go
+- id: narvy.go.code-injection.embedded-js-run-non-literal.embedded-js-run-non-literal
+  message: An embedded JavaScript interpreter (goja / otto) executes a non-literal script string. If the script text is attacker-
+    influenced, this is full code execution inside your Go process (CWE-94) - these interpreters are not a real security sandbox
+    against a determined attacker and have full access to whatever Go functions you registered on the runtime. Never run request-derived
+    text as a script.
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - go
+    - goja
+    - otto
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Code Injection
+  patterns:
+  - pattern-either:
+    - pattern: $VM.RunString($X)
+    - pattern: $VM.Run($X)
+  - pattern-not: $VM.RunString("...")
+  - pattern-not: $VM.Run("...")
+  - metavariable-regex:
+      metavariable: $VM
+      regex: (?i)(vm|runtime|interp|js|script|otto)
+- id: narvy.go.code-injection.plugin-open-non-literal-path.plugin-open-non-literal-path
+  message: '`plugin.Open()` loads a Go shared-object (.so) plugin from a non-literal path. Loading a plugin runs its `init()`
+    functions immediately with the full privileges of your process - there is no sandboxing. If the path is attacker-influenced
+    (even indirectly, e.g. a filename derived from a request), this is remote code execution (CWE-94). Load plugins only from
+    a fixed, trusted, non-writable directory.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - go
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Code Injection
+  patterns:
+  - pattern: plugin.Open($PATH)
+  - pattern-not: plugin.Open("...")
+- id: narvy.go.code-injection.reflect-methodbyname-non-literal.reflect-methodbyname-non-literal
+  message: '`reflect.ValueOf(...).MethodByName($NAME)` looks up and invokes a method whose name is not a literal. If `$NAME`
+    is influenced by request data, an attacker can call any exported method on the target object - including ones never meant
+    to be reachable from outside (unsafe reflection / unintended dispatch, CWE-470). Use an explicit allow-list mapping request
+    values to a fixed set of permitted method names.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-470: Use of Externally-Controlled Input to Select Classes or Code (''Unsafe Reflection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - go
+    - reflect
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Code Injection
+  patterns:
+  - pattern: reflect.ValueOf($OBJ).MethodByName($NAME)
+  - pattern-not: reflect.ValueOf($OBJ).MethodByName("...")
+- id: narvy.go.cmdi.dangerous-exec-command.dangerous-exec-command
+  message: '`exec.Command()` / `exec.CommandContext()` called with a command or argument built from request-derived data.
+    `exec.Command` does not invoke a shell, so classic `;`/`&&` shell metacharacter injection does not apply directly - but
+    if the *binary name itself* or an argument that changes program behavior (e.g. a flag) is attacker-controlled, this is
+    still command injection / argument injection (CWE-78/CWE-88). Validate the binary against a fixed allow-list and treat
+    every argument as untrusted data, never as a flag.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    - 'CWE-88: Argument Injection or Modification'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: exec.Command($BIN, ...)
+    - pattern: exec.CommandContext($CTX, $BIN, ...)
+  - pattern-not: exec.Command("...", ...)
+  - pattern-not: exec.CommandContext($CTX, "...", ...)
+- id: narvy.go.reflect.reflect-methodby-name-tainted.reflect-methodby-name-tainted
+  message: '`reflect.ValueOf(...).MethodByName()` (or `.FieldByName()`) called with a name taken from request data. This lets
+    an attacker invoke any exported method reachable through the reflected value by naming it in the request - the same class
+    of risk as PHP''s tainted `call_user_func()` (CWE-470). Restrict the name to a fixed allow-list keyed by a validated token,
+    never the raw input.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-470: Use of Externally-Controlled Input to Select Classes or Code (''Unsafe Reflection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: reflect.ValueOf($OBJ).MethodByName($NAME)
+    - pattern: reflect.ValueOf($OBJ).FieldByName($NAME)
+  - pattern-not: reflect.ValueOf($OBJ).MethodByName("...")
+  - pattern-not: reflect.ValueOf($OBJ).FieldByName("...")
+- id: narvy.go.plugin.plugin-open-tainted-path.plugin-open-tainted-path
+  message: '`plugin.Open()` called with a path built from request data. Go plugins are arbitrary native code loaded and executed
+    in-process - if an attacker can influence which `.so` file gets opened (directly, or via a directory they can also write
+    to), this is remote code execution (CWE-94). Load plugins only from a fixed, non-writable-by-request path.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern: plugin.Open($PATH)
+  - pattern-not: plugin.Open("...")
+- id: narvy.go.misc.use-of-unsafe-block.use-of-unsafe-block
+  message: '`unsafe.$FUNC(...)` call (Pointer conversion, Slice/SliceData/String/StringData zero-copy cast, or Add/Sizeof/Alignof/Offsetof).
+    The `unsafe` package steps outside Go''s type and memory safety guarantees, so the compiler no longer checks size or
+    layout for you. Manual pointer arithmetic on a size that is not a compile-time constant or independently validated can
+    read or write past the intended buffer (CWE-119/CWE-787). Confirm every offset and length is bounded and trusted; prefer
+    `encoding/binary` for request-derived byte layouts, and avoid `unsafe` entirely unless a benchmarked hot path requires it.'
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-119: Improper Restriction of Operations within the Bounds of a Memory Buffer'
+    owasp:
+    - A06:2021 - Vulnerable and Outdated Components
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  paths:
+    exclude:
+    - '*.pb.go'
+    - '*_generated.go'
+    - '*.gen.go'
+    - zz_generated*.go
+    - zsyscall_*.go
+    - '*_string.go'
+  pattern: unsafe.$FUNC(...)
+- id: narvy.go.cors.wildcard-allow-origin.wildcard-allow-origin
+  message: '`Access-Control-Allow-Origin` header set to `*`. This lets any origin read the response via a cross-origin XHR/fetch
+    - safe only for genuinely public, non-authenticated endpoints. If the endpoint uses cookies/sessions or returns non-public
+    data, this exposes it to any site the victim visits (CWE-942). Echo back a validated origin from an allow-list instead
+    of a wildcard.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  paths:
+    exclude:
+    - '**/*_test.go'
+  patterns:
+  - pattern-either:
+    - pattern: $W.Header().Set("Access-Control-Allow-Origin", "*")
+    - pattern: $W.Header().Add("Access-Control-Allow-Origin", "*")
+    - pattern: $CTX.Header("Access-Control-Allow-Origin", "*")
+- id: narvy.go.cors.reflected-origin-header.reflected-origin-header
+  message: The incoming `Origin` request header is echoed straight back as `Access-Control-Allow-Origin` with no allow-list
+    check. This grants every origin CORS access - functionally equivalent to a wildcard but easy to miss in review because
+    there is no literal `*` (CWE-942). Validate the origin against a fixed allow-list before echoing it.
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: $W.Header().Set("Access-Control-Allow-Origin", $R.Header.Get("Origin"))
+    - pattern: $W.Header().Set("Access-Control-Allow-Origin", $ORIGIN)
+  - pattern-inside: '$ORIGIN := $R.Header.Get("Origin")
+
+      ...
+
+      '
+- id: narvy.go.cors.wildcard-with-credentials.wildcard-with-credentials
+  message: '`Access-Control-Allow-Credentials: true` set alongside a wildcard/ reflected `Access-Control-Allow-Origin`. Per
+    the Fetch spec browsers reject the literal combination of `*` with credentials, so code relying on this is usually reflecting
+    the Origin header dynamically instead - which grants every origin authenticated, cookie-bearing cross-site access (CWE-942).
+    Restrict `Allow-Origin` to a fixed allow-list when `Allow-Credentials` is `true`.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: '$W.Header().Set("Access-Control-Allow-Credentials", "true")
+
+        ...
+
+        $W.Header().Set("Access-Control-Allow-Origin", $R.Header.Get("Origin"))
+
+        '
+    - pattern: '$W.Header().Set("Access-Control-Allow-Origin", $R.Header.Get("Origin"))
+
+        ...
+
+        $W.Header().Set("Access-Control-Allow-Credentials", "true")
+
+        '
+- id: narvy.go.cors.gin-permissive-config.gin-permissive-config
+  message: '`cors.Config{AllowAllOrigins: true}` (gin-contrib/cors) combined with `AllowCredentials: true`. This grants any
+    origin authenticated, cookie-bearing cross-site access to the API - a full CORS bypass (CWE-942). Set `AllowOrigins` to
+    a fixed list of trusted origins instead of allowing all.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  pattern: 'cors.Config{..., AllowAllOrigins: true, ..., AllowCredentials: true, ...}
+
+    '
+- id: narvy.go.crypto.hardcoded-env-fallback-to-crypto.hardcoded-env-fallback-to-crypto
+  message: 'Hardcoded fallback secret ''$LITERAL'' is used when the environment variable is unset, and is then fed into a
+    cryptographic primitive (HMAC / AES / JWT signing). If the env var is missing in any deployment, the key reduces to a
+    public constant. Fix: fail fast at startup with `log.Fatal("$ENV must be set")` if the env var is empty - never silently
+    fall back to a literal.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    - A07:2021 - Identification and Authentication Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - go
+    - golang
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: "$K := os.Getenv($ENV)\n...\nif $K == \"\" {\n    $K = \"$LITERAL\"\n}\n...\nhmac.New($H, []byte($K))\n"
+    - pattern: "$K := os.Getenv($ENV)\n...\nif $K == \"\" {\n    $K = \"$LITERAL\"\n}\n...\naes.NewCipher([]byte($K))\n"
+    - pattern: "$K := os.Getenv($ENV)\n...\nif len($K) == 0 {\n    $K = \"$LITERAL\"\n}\n...\nhmac.New($H, []byte($K))\n"
+    - pattern: "$K := os.Getenv($ENV)\n...\nif len($K) == 0 {\n    $K = \"$LITERAL\"\n}\n...\naes.NewCipher([]byte($K))\n"
+    - pattern: "$K := os.Getenv($ENV)\n...\nif $K == \"\" {\n    $K = \"$LITERAL\"\n}\n...\n$TOKEN.SignedString([]byte($K))\n"
+    - pattern: "$K := os.Getenv($ENV)\n...\nif len($K) == 0 {\n    $K = \"$LITERAL\"\n}\n...\n$TOKEN.SignedString([]byte($K))\n"
+    - pattern: "$K := os.Getenv($ENV)\n...\nif \"\" == $K {\n    $K = \"$LITERAL\"\n}\n...\nhmac.New($H, []byte($K))\n"
+    - pattern: "$K := os.Getenv($ENV)\n...\nif $K == \"\" {\n    $K = \"$LITERAL\"\n}\n...\nargon2.IDKey([]byte($K), ...)\n"
+    - pattern: "$K := os.Getenv($ENV)\n...\nif $K == \"\" {\n    $K = \"$LITERAL\"\n}\n...\nargon2.Key([]byte($K), ...)\n"
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.go.crypto.helper-env-fallback-to-crypto.helper-env-fallback-to-crypto
+  message: 'Helper-function fallback (e.g. `getEnvOrDefault("$ENV", "$LITERAL")`) is used to read a secret with a hardcoded
+    default, and the result is fed into a crypto primitive. If the env var is unset the key is a public constant. Fix: fail
+    fast at startup instead of silently defaulting.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - go
+    - golang
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: 'hmac.New($H, []byte(getEnvOrDefault($ENV, "$LITERAL")))
+
+        '
+    - pattern: 'hmac.New($H, []byte(GetEnvOrDefault($ENV, "$LITERAL")))
+
+        '
+    - pattern: 'hmac.New($H, []byte(getEnv($ENV, "$LITERAL")))
+
+        '
+    - pattern: 'aes.NewCipher([]byte(getEnvOrDefault($ENV, "$LITERAL")))
+
+        '
+    - pattern: '$TOKEN.SignedString([]byte(getEnvOrDefault($ENV, "$LITERAL")))
+
+        '
+    - pattern: '$K := getEnvOrDefault($ENV, "$LITERAL")
+
+        ...
+
+        hmac.New($H, []byte($K))
+
+        '
+    - pattern: '$K := getEnvOrDefault($ENV, "$LITERAL")
+
+        ...
+
+        $TOKEN.SignedString([]byte($K))
+
+        '
+    - pattern: '$K := getEnv($ENV, "$LITERAL")
+
+        ...
+
+        hmac.New($H, []byte($K))
+
+        '
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.go.misc.pprof-registered-on-public-mux.pprof-registered-on-public-mux
+  message: '`net/http/pprof` imported for its side-effecting `init()` (which registers `/debug/pprof/*` on `http.DefaultServeMux`)
+    in a binary that also serves that mux to the public internet. `/debug/pprof/*` exposes goroutine stacks, heap dumps, and
+    command-line arguments, and its CPU profile endpoint is a trivial DoS lever (CWE-200). Register pprof only on a separate
+    listener bound to localhost, or behind auth.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-200: Exposure of Sensitive Information to an Unauthorized Actor'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern: 'import _ "net/http/pprof"
+
+      '
+  - pattern-inside: '...
+
+      http.ListenAndServe($ADDR, nil)
+
+      '
+- id: narvy.go.misc.listen-bind-all-interfaces.listen-bind-all-interfaces
+  message: Server bound to `0.0.0.0` (or an empty host, e.g. `":8080"` combined with an explicit all-interfaces comment/config)
+    instead of a specific interface. For anything not meant to be internet-facing (internal admin APIs, debug/metrics endpoints,
+    databases), binding to all interfaces is an unintended external-exposure risk if the host also has a public NIC (CWE-1327
+    class). Bind to `127.0.0.1`/a specific internal IP unless the service is deliberately public.
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-668: Exposure of Resource to Wrong Sphere'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: net.Listen("tcp", "0.0.0.0:...")
+    - pattern: http.ListenAndServe("0.0.0.0:...", ...)
+- id: narvy.go.misc.fileserver-directory-listing-unguarded.fileserver-directory-listing-unguarded
+  message: '`http.FileServer(http.Dir($DIR))` mounted directly with no directory- listing guard. Without an `index.html` in
+    every directory, Go''s default file server returns a browsable directory listing for any path with no index file, potentially
+    exposing source files, config, or backups that were only meant to be served by direct link (CWE-548). Wrap the `http.FileSystem`
+    to return 404 on directory requests missing an index, or serve from an explicit allow-list of files.'
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-548: Exposure of Information Through Directory Listing'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: LOW
+    confidence: LOW
+    technology:
+    - go
+  pattern: http.FileServer(http.Dir($DIR))
+- id: narvy.go.misc.websocket-checkorigin-always-true.websocket-checkorigin-always-true
+  message: '`gorilla/websocket.Upgrader` constructed with `CheckOrigin` left unset (nil) or hardcoded to always return `true`.
+    The default/permissive behavior accepts a WebSocket upgrade from any origin, enabling cross-site WebSocket hijacking against
+    cookie-authenticated endpoints (CWE-346). Set `CheckOrigin` to validate the `Origin` header against a fixed allow-list.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-346: Origin Validation Error'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: 'websocket.Upgrader{..., CheckOrigin: func(r *http.Request) bool { return true }, ...}
+
+        '
+- id: narvy.go.misc.predictable-tmp-path-not-createtemp.predictable-tmp-path-not-createtemp
+  message: '`os.Create()` / `os.MkdirAll()` / `os.WriteFile()` used on a path under `/tmp` built with a predictable name (fixed
+    string, PID, timestamp with no random component, or a format-string with no random component) instead of `os.CreateTemp()`/`ioutil.TempFile()`.
+    A predictable temp-file or temp-directory name in a world-writable directory is a classic symlink-race / TOCTOU target
+    (CWE-377). Use `os.CreateTemp()` for files (unpredictable name, opens with `O_EXCL`) or `os.MkdirTemp()` for directories.
+   '
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-377: Insecure Temporary File'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: LOW
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern: os.Create($PATH)
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: ^"/tmp/
+    - pattern: os.Create("/tmp/" + ...)
+    - patterns:
+      - pattern: os.Create(fmt.Sprintf($FMT, ...))
+      - metavariable-regex:
+          metavariable: $FMT
+          regex: ^"/tmp/
+    - patterns:
+      - pattern: os.MkdirAll($PATH, ...)
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: ^"/tmp/
+    - pattern: os.MkdirAll("/tmp/" + ..., ...)
+    - patterns:
+      - pattern: os.MkdirAll(fmt.Sprintf($FMT, ...), ...)
+      - metavariable-regex:
+          metavariable: $FMT
+          regex: ^"/tmp/
+    - patterns:
+      - pattern: os.WriteFile($PATH, ...)
+      - metavariable-regex:
+          metavariable: $PATH
+          regex: ^"/tmp/
+    - pattern: os.WriteFile("/tmp/" + ..., ...)
+    - patterns:
+      - pattern: os.WriteFile(fmt.Sprintf($FMT, ...), ...)
+      - metavariable-regex:
+          metavariable: $FMT
+          regex: ^"/tmp/
+- id: narvy.go.misc.insecure-file-permission.insecure-file-permission
+  message: File permission bits are set to world-writable (0777/0666) via `os.Chmod` / `os.OpenFile` / `os.WriteFile` / `ioutil.WriteFile`.
+    Any local user or process can then modify or read this file, which is dangerous for config files, key material, or scripts
+    that get executed later (CWE-732). Use the narrowest mode that works, e.g. 0600 for secrets or 0644 for regular files.
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-732: Incorrect Permission Assignment for Critical Resource'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - go
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Improper Access Control
+  patterns:
+  - pattern-either:
+    - pattern: os.Chmod($PATH, 0777)
+    - pattern: os.Chmod($PATH, 0666)
+    - pattern: os.OpenFile($PATH, $FLAG, 0777)
+    - pattern: os.OpenFile($PATH, $FLAG, 0666)
+    - pattern: os.WriteFile($PATH, $DATA, 0777)
+    - pattern: os.WriteFile($PATH, $DATA, 0666)
+    - pattern: ioutil.WriteFile($PATH, $DATA, 0777)
+    - pattern: ioutil.WriteFile($PATH, $DATA, 0666)
+- id: narvy.go.misc.pprof-blank-import-exposure.pprof-blank-import-exposure
+  message: '`net/http/pprof` is blank-imported, which registers profiling handlers (`/debug/pprof/*`, including goroutine
+    dumps, heap profiles, and a CPU-profile trigger) onto `http.DefaultServeMux` with zero authentication. If that mux is
+    served on a publicly-reachable listener, this leaks internal application state and provides a CPU-exhaustion knob to anyone
+    who can reach it (CWE-200). Serve pprof on a separate listener bound to localhost, or behind authentication middleware.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-200: Exposure of Sensitive Information to an Unauthorized Actor'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - go
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Information Exposure
+  patterns:
+  - pattern: import _ "net/http/pprof"
+- id: narvy.go.ssh.insecure-hostkey-callback.insecure-hostkey-callback
+  message: 'golang.org/x/crypto/ssh.InsecureIgnoreHostKey() accepts whatever host key the remote end presents, with no verification
+    at all. Anyone able to sit on the network path between this client and the SSH server can present their own key and the
+    client will treat the connection as trusted, defeating the entire point of the SSH handshake (CWE-322: Key Exchange without
+    Entity Authentication). Verify against a pinned key with ssh.FixedHostKey(), or check the remote key against a known_hosts
+    file with golang.org/x/crypto/ssh/knownhosts instead.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-322: Key Exchange without Entity Authentication'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - go
+  paths:
+    exclude:
+    - '**/*_test.go'
+    - '**/testdata/**'
+  pattern: ssh.InsecureIgnoreHostKey()
+- id: narvy.go.http.plaintext-server-no-tls-anywhere.plaintext-server-no-tls-anywhere
+  message: 'An HTTP server is started with no TLS involved at all - either http.ListenAndServe() (the plaintext entry point,
+    as opposed to http.ListenAndServeTLS()) or an *http.Server started via .ListenAndServe() on a Server value that never
+    had a TLSConfig set. Every request and response on this listener, including any auth cookie, bearer token, or session
+    id, crosses the wire unencrypted and can be read or tampered with by anyone on the network path (CWE-319: Cleartext Transmission
+    of Sensitive Information). Switch to ListenAndServeTLS()/set TLSConfig, or if TLS is deliberately terminated in front
+    of this listener (a reverse proxy, a service mesh sidecar, a Unix socket only reachable locally), suppress this finding
+    with a comment explaining that.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-319: Cleartext Transmission of Sensitive Information'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  paths:
+    exclude:
+    - '**/*_test.go'
+    - '**/testdata/**'
+    - '**/fixtures/**'
+    - '**/examples/**'
+  patterns:
+  - pattern-either:
+    - pattern: http.ListenAndServe($ADDR, $HANDLER)
+    - patterns:
+      - pattern: $SRV.ListenAndServe()
+      - pattern-not-inside: '$SRV := &http.Server{..., TLSConfig: $CFG, ...}
+
+          ...
+
+          '
+      - pattern-not-inside: '$SRV.TLSConfig = $CFG
+
+          ...
+
+          '
+- id: narvy.go.reflect.makefunc-dynamic-code.makefunc-dynamic-code
+  message: 'reflect.MakeFunc() builds a function value at runtime from a reflect.Type and a Go closure, bypassing the normal
+    compile-time type system. If any part of what gets wired into that closure (which argument gets used, what it does with
+    it, which downstream call it makes) is influenced by untrusted input, this is a code-generation-adjacent sink and a much
+    larger attack surface than a normal function call (CWE-913: Improper Control of Dynamically-Managed Code Resources). Confirm
+    the reflect.Type and the closure body are both fully static (no request-derived data feeding either), or replace this
+    with a plain typed function / a small static dispatch table.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-913: Improper Control of Dynamically-Managed Code Resources'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  paths:
+    exclude:
+    - '**/*_test.go'
+    - '**/testdata/**'
+  pattern: reflect.MakeFunc(...)
+- id: narvy.go.httptrace.trace-not-literal-at-callsite.trace-not-literal-at-callsite
+  message: 'httptrace.WithClientTrace() is handed a trace value that is not a struct literal written directly at the call
+    site (it is a variable, a function return value, or otherwise assembled elsewhere). A *httptrace.ClientTrace carries hook
+    functions that run automatically for connection/DNS/TLS events on every request using this context; if the trace (or any
+    hook inside it) can be influenced by request data or config an attacker controls, code runs that the reviewer cannot see
+    just by reading this call (CWE-913: Improper Control of Dynamically-Managed Code Resources). Either inline the &httptrace.ClientTrace{...}
+    literal here so it is auditable at the call site, or confirm the variable is assigned exactly once, from a static literal,
+    with no request-derived input anywhere in it.'
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-913: Improper Control of Dynamically-Managed Code Resources'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: LOW
+    confidence: LOW
+    technology:
+    - go
+  paths:
+    exclude:
+    - '**/*_test.go'
+    - '**/testdata/**'
+  patterns:
+  - pattern: httptrace.WithClientTrace($CTX, $TRACE)
+  - pattern-not: httptrace.WithClientTrace($CTX, &httptrace.ClientTrace{...})
+- id: narvy.go.open-redirect.request-param-to-http-redirect.request-param-to-http-redirect
+  message: A value read directly from a request query parameter, form value, or path variable flows into `http.Redirect`'s
+    target URL. An attacker can craft a link that redirects victims to an attacker-controlled site (open redirect, CWE-601),
+    a common phishing / OAuth-token-theft primitive. Validate the target against an allow-list of known paths or hosts before
+    redirecting.
+  severity: WARNING
+  languages:
+  - go
+  mode: taint
+  metadata:
+    cwe:
+    - 'CWE-601: URL Redirection to Untrusted Site (''Open Redirect'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - go
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Open Redirect
+    references:
+    - https://cwe.mitre.org/data/definitions/601.html
+  paths:
+    exclude:
+    - '**/*_test.go'
+  pattern-sources:
+  - pattern: $R.URL.Query().Get(...)
+  - pattern: $R.FormValue(...)
+  - pattern: $R.URL.Query()[...]
+  pattern-sanitizers:
+  - patterns:
+    - pattern: $V
+    - pattern-inside: 'if (<... strings.HasPrefix($V, "/") ...>) { ... }
+
+        '
+  - pattern: url.Parse(...)
+  pattern-sinks:
+  - pattern: http.Redirect($W, $R, $SINK, ...)
+- id: narvy-go-pathtraversal-os-open
+  patterns:
+  - pattern-either:
+    - pattern: os.Open($PATH)
+    - pattern: os.OpenFile($PATH, ...)
+  - pattern-not: os.Open("...")
+  - pattern-not: os.OpenFile("...", ...)
+  - pattern-not-inside: '$PATH = "..."
+
+      ...
+
+      '
+  - pattern-not: os.Open(filepath.Join("...", "..."))
+  - pattern-either:
+    - pattern-inside: "func $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C echo.Context, ...) $RET {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C *gin.Context, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN($X interface{}, $PAYLOAD string) (data string, raw bool, err error) {\n  ...\n}\n"
+  message: 'Path traversal: `os.Open` is called with a non-literal path inside an HTTP handler. If the path comes from a request
+    parameter an attacker can submit `../../../etc/passwd` and read arbitrary files. Validate the path with `filepath.Clean`
+    AND restrict it to a safe base directory via `strings.HasPrefix(cleanedPath, baseDir)`.'
+  metadata:
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    technology:
+    - go
+    confidence: HIGH
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+  severity: ERROR
+  languages:
+  - go
+- id: narvy-go-pathtraversal-readfile
+  patterns:
+  - pattern-either:
+    - pattern: os.ReadFile($PATH)
+    - pattern: ioutil.ReadFile($PATH)
+  - pattern-not: os.ReadFile("...")
+  - pattern-not: ioutil.ReadFile("...")
+  - pattern-not-inside: '$PATH = "..."
+
+      ...
+
+      '
+  - pattern-not: os.ReadFile(filepath.Join("...", "..."))
+  - pattern-either:
+    - pattern-inside: "func $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C echo.Context, ...) $RET {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C *gin.Context, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN($X interface{}, $PAYLOAD string) (data string, raw bool, err error) {\n  ...\n}\n"
+  message: 'Path traversal: `os.ReadFile` / `ioutil.ReadFile` is called with a non-literal path inside an HTTP handler. Same
+    risk as `os.Open` - file disclosure. Validate with `filepath.Clean` + base-prefix check.'
+  metadata:
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    technology:
+    - go
+    confidence: HIGH
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+  severity: ERROR
+  languages:
+  - go
+- id: narvy-go-pathtraversal-writefile
+  patterns:
+  - pattern-either:
+    - pattern: os.WriteFile($PATH, ...)
+    - pattern: ioutil.WriteFile($PATH, ...)
+    - pattern: os.Create($PATH)
+  - pattern-not: os.WriteFile("...", ...)
+  - pattern-not: ioutil.WriteFile("...", ...)
+  - pattern-not: os.Create("...")
+  - pattern-not-inside: '$PATH = "..."
+
+      ...
+
+      '
+  - pattern-not: os.Create(filepath.Join("...", "..."))
+  - pattern-either:
+    - pattern-inside: "func $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C echo.Context, ...) $RET {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C *gin.Context, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN($X interface{}, $PAYLOAD string) (data string, raw bool, err error) {\n  ...\n}\n"
+  message: 'Path traversal (write): `os.WriteFile` / `os.Create` is called with a non-literal path inside an HTTP handler.
+    An attacker can overwrite arbitrary files (e.g. /root/.ssh/authorized_keys). Validate the path with `filepath.Clean` +
+    base-prefix check before writing.'
+  metadata:
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    technology:
+    - go
+    confidence: HIGH
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+  severity: ERROR
+  languages:
+  - go
+- id: narvy-go-pathtraversal-filepath-join-tainted
+  patterns:
+  - pattern: filepath.Join($BASE, $UNTRUSTED)
+  - pattern-not: filepath.Join("...", "...")
+  - pattern-not: filepath.Join($X, "...")
+  - pattern-either:
+    - pattern: '$P := filepath.Join($BASE, $UNTRUSTED)
+
+        ...
+
+        os.Open($P)
+
+        '
+    - pattern: '$P := filepath.Join($BASE, $UNTRUSTED)
+
+        ...
+
+        os.ReadFile($P)
+
+        '
+    - pattern: '$P := filepath.Join($BASE, $UNTRUSTED)
+
+        ...
+
+        os.WriteFile($P, ...)
+
+        '
+    - pattern: '$P := filepath.Join($BASE, $UNTRUSTED)
+
+        ...
+
+        os.Create($P)
+
+        '
+    - pattern: '$P := filepath.Join($BASE, $UNTRUSTED)
+
+        ...
+
+        os.OpenFile($P, ...)
+
+        '
+  - pattern-not: '$P := filepath.Join($BASE, $UNTRUSTED)
+
+      ...
+
+      $P = filepath.Clean($P)
+
+      ...
+
+      '
+  - pattern-either:
+    - pattern-inside: "func $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C echo.Context, ...) $RET {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C *gin.Context, ...) {\n  ...\n}\n"
+  message: 'Path traversal: `filepath.Join` accepts a variable then flows to a file I/O sink without intermediate `filepath.Clean`
+    validation, inside an HTTP handler. `Join` normalises but does NOT prevent `../` escape past the base; you must `Clean`
+    and then verify `strings.HasPrefix(cleaned, baseDir)`.'
+  metadata:
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    technology:
+    - go
+    confidence: MEDIUM
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+  severity: WARNING
+  languages:
+  - go
+- id: narvy.go.pathtraversal.zip-slip-extraction.zip-slip-extraction
+  message: A file's path is taken from a `zip.Reader`/`tar.Reader` entry name and joined onto a destination directory with
+    no check that the result stays inside it. A malicious archive entry named `../../etc/cron.d/x` escapes the extraction
+    directory and writes anywhere the process can (`zip-slip`, CWE-22). After `filepath.Join(destDir, entry.Name)`, verify
+    the result is still prefixed by `destDir` (e.g. via `filepath.Rel` + reject any leading `..`) before writing.
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: '$DST := filepath.Join($DESTDIR, $ENTRY.Name)
+
+        ...
+
+        os.Create($DST)
+
+        '
+    - pattern: '$DST := filepath.Join($DESTDIR, $HDR.Name)
+
+        ...
+
+        os.OpenFile($DST, ...)
+
+        '
+  - pattern-not-inside: "...\nif !strings.HasPrefix($DST, ...) {\n  ...\n}\n...\n"
+- id: narvy.go.pathtraversal.serve-file-tainted.serve-file-tainted
+  message: '`http.ServeFile()` called with a filesystem path built directly from the request URL/query. `ServeFile` has its
+    own `../` guard for the exact `r.URL.Path` case, but once the path is rebuilt via concatenation or `filepath.Join` with
+    a query-parameter value, that guard no longer applies - path traversal to any file the process can read (CWE-22). Confine
+    the served root and reject `..` segments explicitly, or use `http.FileServer` with `http.Dir` on a fixed root.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: http.ServeFile($W, $R, filepath.Join($ROOT, $R.URL.Query().Get(...)))
+    - pattern: http.ServeFile($W, $R, "..." + $R.URL.Query().Get(...))
+    - pattern: http.ServeFile($W, $R, filepath.Join($ROOT, $R.FormValue(...)))
+- id: narvy.go.pathtraversal.remove-tainted-path.remove-tainted-path
+  message: '`os.Remove()` / `os.RemoveAll()` called with a path built directly from request data. An attacker who controls
+    the path (or a `../` segment within it) can delete files outside the intended directory - path traversal with a destructive
+    sink (CWE-22). Confine to a fixed base directory and reject any resolved path that escapes it.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: os.Remove(filepath.Join($ROOT, $R.URL.Query().Get(...)))
+    - pattern: os.RemoveAll(filepath.Join($ROOT, $R.URL.Query().Get(...)))
+    - pattern: os.Remove($R.FormValue(...))
+    - pattern: os.RemoveAll($R.FormValue(...))
+- id: narvy.go.secrets.hardcoded-auth-header-value.hardcoded-auth-header-value
+  message: An `Authorization` (or `X-Api-Key`) header is set to a hardcoded string literal that looks like a credential (contains
+    `Bearer `, `Basic `, or is a long opaque token). Anyone with source or binary access recovers the live credential (CWE-798).
+    Load it from an environment variable or secrets manager at startup.
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: $REQ.Header.Set("Authorization", "Bearer ...")
+    - pattern: $REQ.Header.Set("Authorization", "Basic ...")
+    - pattern: $REQ.Header.Set("X-Api-Key", "...")
+- id: narvy.go.secrets.hardcoded-dsn-password.hardcoded-dsn-password
+  message: A database connection string (DSN) literal contains an embedded password (`user:password@host` / `password=...`).
+    This ships the live database credential in source control and in the compiled binary (CWE-798). Build the DSN from environment
+    variables / a secrets manager at startup, never a literal.
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-798: Use of Hard-coded Credentials'
+    - 'CWE-259: Use of Hard-coded Password'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: sql.Open("...", "...:...@...")
+    - pattern: sql.Open("...", "...password=...")
+- id: narvy.go.secrets.hardcoded-private-key-pem.hardcoded-private-key-pem
+  message: A PEM-formatted private key block (`-----BEGIN ... PRIVATE KEY-----`) is embedded as a Go string literal. This
+    ships the live key in source control and in the compiled binary - anyone with either can decrypt traffic or forge signatures
+    made with it (CWE-798/CWE-321). Load the key from a file/secrets manager at startup, outside the repository.
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-798: Use of Hard-coded Credentials'
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - go
+  patterns:
+  - pattern-regex: (?s)-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----.*-----END (RSA |EC |OPENSSH )?PRIVATE KEY-----
+- id: narvy.go.session.cookie-secure-explicitly-false.cookie-secure-explicitly-false
+  message: '`http.Cookie{Secure: false}` explicitly disables the Secure flag, allowing this cookie to be sent over plain HTTP.
+    If it carries a session token, an on-path attacker on an unencrypted network segment can capture it (CWE-614). Set `Secure:
+    true` unless this cookie is provably non-sensitive.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-614: Sensitive Cookie in HTTPS Session Without ''Secure'' Attribute'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - go
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Insecure Communication
+    references:
+    - https://cwe.mitre.org/data/definitions/614.html
+  paths:
+    exclude:
+    - '**/*_test.go'
+  patterns:
+  - pattern: "http.Cookie{\n  ...,\n  Secure: false,\n  ...\n}\n"
+- id: narvy.go.session.cookie-httponly-explicitly-false.cookie-httponly-explicitly-false
+  message: '`http.Cookie{HttpOnly: false}` explicitly disables the HttpOnly flag, allowing client-side JavaScript to read
+    this cookie. If it carries a session token, any XSS on the page can exfiltrate it (CWE-1004). Set `HttpOnly: true` unless
+    client-side JS provably needs to read this cookie.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-1004: Sensitive Cookie Without ''HttpOnly'' Flag'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - go
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Security Misconfiguration
+    references:
+    - https://cwe.mitre.org/data/definitions/1004.html
+  paths:
+    exclude:
+    - '**/*_test.go'
+  patterns:
+  - pattern: "http.Cookie{\n  ...,\n  HttpOnly: false,\n  ...\n}\n"
+- id: narvy-go-sqli-concat
+  patterns:
+  - pattern-either:
+    - pattern: $DB.Query($A + $B)
+    - pattern: $DB.QueryContext($CTX, $A + $B)
+    - pattern: $DB.QueryRow($A + $B)
+    - pattern: $DB.QueryRowContext($CTX, $A + $B)
+    - pattern: $DB.Exec($A + $B)
+    - pattern: $DB.ExecContext($CTX, $A + $B)
+  - pattern-not: $DB.Query("..." + "...")
+  - pattern-not: $DB.QueryContext($CTX, "..." + "...")
+  - pattern-not: $DB.QueryRow("..." + "...")
+  - pattern-not: $DB.QueryRowContext($CTX, "..." + "...")
+  - pattern-not: $DB.Exec("..." + "...")
+  - pattern-not: $DB.ExecContext($CTX, "..." + "...")
+  message: 'Dynamic SQL: query string is built with the Go concat operator (`+`) rather than a bound placeholder. This is
+    a code-smell audit signal (HIGH), not a proven CRITICAL: without data-flow proof the concatenated operand may be an
+    internal constant (e.g. a table name in a migration) rather than user input. IF the operand is request-derived this is
+    SQL injection (CWE-89) - see the CRITICAL taint rule narvy-go-sqli-request-taint. Prefer placeholders regardless:
+    `db.Query("SELECT ... WHERE id = ?", userID)`.'
+  metadata:
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    technology:
+    - go
+    confidence: MEDIUM
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+  severity: WARNING
+  languages:
+  - go
+- id: narvy-go-sqli-sprintf-via-var
+  patterns:
+  - pattern-either:
+    - pattern: '$QUERY := fmt.Sprintf($FMT, ...)
+
+        ...
+
+        $DB.Query($QUERY)
+
+        '
+    - pattern: '$QUERY := fmt.Sprintf($FMT, ...)
+
+        ...
+
+        $DB.QueryContext($CTX, $QUERY)
+
+        '
+    - pattern: '$QUERY := fmt.Sprintf($FMT, ...)
+
+        ...
+
+        $DB.QueryRow($QUERY)
+
+        '
+    - pattern: '$QUERY := fmt.Sprintf($FMT, ...)
+
+        ...
+
+        $DB.Exec($QUERY)
+
+        '
+    - pattern: '$QUERY := fmt.Sprintf($FMT, ...)
+
+        ...
+
+        $DB.ExecContext($CTX, $QUERY)
+
+        '
+    - pattern: '$QUERY = fmt.Sprintf($FMT, ...)
+
+        ...
+
+        $DB.Exec($QUERY)
+
+        '
+    - pattern: '$QUERY = fmt.Sprintf($FMT, ...)
+
+        ...
+
+        $DB.Query($QUERY)
+
+        '
+  message: 'Dynamic SQL: `fmt.Sprintf` builds the query, then the result is passed to `db.Query`/`db.Exec`. Format-string
+    quoting is not driver escaping. This is a code-smell audit signal (HIGH), not a proven CRITICAL: the interpolated
+    args may be internal constants (e.g. a migration table name) rather than user input. IF an arg is request-derived
+    this is SQL injection (CWE-89) - the taint-proven case is reported at CRITICAL by narvy-go-sqli-request-taint.
+    Use parameterised queries with placeholders regardless.'
+  metadata:
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    technology:
+    - go
+    confidence: MEDIUM
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+  severity: WARNING
+  languages:
+  - go
+- id: narvy-go-sqlx-tainted-query
+  patterns:
+  - pattern-inside: "import (\n  ...\n  $X \"github.com/jmoiron/sqlx\"\n  ...\n)\n...\n"
+  - pattern-either:
+    - pattern: $DB.Queryx(fmt.Sprintf("...", ...))
+    - pattern: $DB.MustExec(fmt.Sprintf("...", ...))
+    - pattern: $DB.Queryx($A + $B)
+    - pattern: $DB.QueryxContext($CTX, fmt.Sprintf("...", ...))
+    - pattern: $DB.QueryxContext($CTX, $A + $B)
+  - pattern-not: $DB.Queryx("..." + "...")
+  - pattern-not: $DB.MustExec("..." + "...")
+  - pattern-not: $DB.QueryxContext($CTX, "..." + "...")
+  message: 'Dynamic SQL via sqlx: query built with `fmt.Sprintf` or concatenation. Code-smell audit signal (HIGH), not a
+    proven CRITICAL - without data-flow proof the operand may be an internal constant. IF request-derived it is SQL
+    injection (CWE-89); the taint-proven case is at CRITICAL in narvy-go-sqli-request-taint. sqlx supports named
+    parameters and `?` placeholders - use those instead.'
+  metadata:
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    technology:
+    - go
+    - sqlx
+    confidence: MEDIUM
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+  severity: WARNING
+  languages:
+  - go
+- id: narvy.go.sqli.queryrow-exec-concat.queryrow-exec-concat
+  message: 'Dynamic SQL: `db.QueryRow()` / `db.Exec()` called with a query string built by concatenation or `fmt.Sprintf`
+    instead of using a `?`/`$1` placeholder with a separate argument. Code-smell audit signal (HIGH), not a proven
+    CRITICAL - without data-flow proof the interpolated operand may be an internal constant (e.g. a migration table
+    name) rather than user input. IF request-derived the operand is interpreted as SQL syntax, not data - SQL injection
+    (CWE-89), reported at CRITICAL by narvy-go-sqli-request-taint. Move the value to a bound parameter regardless:
+    `db.QueryRow("... WHERE id = ?", id)`.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: $DB.QueryRow("..." + $X)
+    - pattern: $DB.QueryRow("..." + $X + "...")
+    - pattern: $DB.QueryRow(fmt.Sprintf("...%s...", $X))
+    - pattern: $DB.Exec("..." + $X)
+    - pattern: $DB.Exec("..." + $X + "...")
+    - pattern: $DB.Exec(fmt.Sprintf("...%s...", $X))
+# Taint-proven CRITICAL tier: the two rules below use mode:taint to fire only when a request-derived value reaches the sink.
+- id: narvy-go-sqli-request-taint
+  mode: taint
+  message: 'SQL injection (taint-proven): a value read from the HTTP request reaches a `db.Query`/`Exec`/`QueryRow`
+    (or sqlx) call as part of a dynamically-built query string, not as a bound `?`/`$1` parameter. The attacker
+    controls SQL syntax (CWE-89). Bind the value: `db.Query("... WHERE id = ?", id)`.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - go
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $R.URL.Query().Get(...)
+      - pattern: $R.URL.Query()
+      - pattern: $R.FormValue(...)
+      - pattern: $R.PostFormValue(...)
+      - pattern: $R.Form.Get(...)
+      - pattern: $R.PostForm.Get(...)
+      - pattern: $R.Header.Get(...)
+      - pattern: $C.Param(...)
+      - pattern: $C.PostForm(...)
+      - pattern: $C.QueryParam(...)
+      - pattern: $C.DefaultQuery(...)
+      - pattern: $C.GetHeader(...)
+      - pattern: $C.Params(...)
+      - pattern: mux.Vars($R)[...]
+      - pattern: chi.URLParam(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $DB.Query($X)
+      - pattern: $DB.QueryContext($C, $X)
+      - pattern: $DB.QueryRow($X)
+      - pattern: $DB.QueryRowContext($C, $X)
+      - pattern: $DB.Exec($X)
+      - pattern: $DB.ExecContext($C, $X)
+      - pattern: $DB.Queryx($X)
+      - pattern: $DB.QueryxContext($C, $X)
+      - pattern: $DB.MustExec($X)
+    - pattern-not: $DB.Query("...")
+    - pattern-not: $DB.QueryContext($C, "...")
+    - pattern-not: $DB.QueryRow("...")
+    - pattern-not: $DB.QueryRowContext($C, "...")
+    - pattern-not: $DB.Exec("...")
+    - pattern-not: $DB.ExecContext($C, "...")
+    - pattern-not: $DB.Queryx("...")
+    - pattern-not: $DB.QueryxContext($C, "...")
+    - pattern-not: $DB.MustExec("...")
+- id: narvy-go-xss-template-html-request-taint
+  mode: taint
+  message: 'Reflected/stored XSS (taint-proven): a value read from the HTTP request is cast to `template.HTML` (or
+    `JS` / `URL` / `HTMLAttr` / `CSS`), suppressing `html/template` auto-escaping and emitting attacker input verbatim
+    (CWE-79). Sanitise with `bluemonday` before casting, or drop the cast and let `html/template` escape.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - go
+    - html/template
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $R.URL.Query().Get(...)
+      - pattern: $R.URL.Query()
+      - pattern: $R.FormValue(...)
+      - pattern: $R.PostFormValue(...)
+      - pattern: $R.Form.Get(...)
+      - pattern: $R.PostForm.Get(...)
+      - pattern: $R.Header.Get(...)
+      - pattern: $C.Param(...)
+      - pattern: $C.PostForm(...)
+      - pattern: $C.QueryParam(...)
+      - pattern: $C.DefaultQuery(...)
+      - pattern: $C.GetHeader(...)
+      - pattern: $C.Params(...)
+      - pattern: mux.Vars($R)[...]
+      - pattern: chi.URLParam(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: template.HTML($X)
+      - pattern: template.JS($X)
+      - pattern: template.URL($X)
+      - pattern: template.HTMLAttr($X)
+      - pattern: template.CSS($X)
+- id: narvy-go-ssrf-http-get
+  patterns:
+  - pattern-either:
+    - pattern: http.Get($URL)
+    - pattern: http.Head($URL)
+    - pattern: http.Post($URL, $CT, $BODY)
+    - pattern: http.PostForm($URL, $DATA)
+  - pattern-not: http.Get("...")
+  - pattern-not: http.Head("...")
+  - pattern-not: http.Post("...", $CT, $BODY)
+  - pattern-not: http.PostForm("...", $DATA)
+  - pattern-not: http.Get(os.Getenv($X))
+  - pattern-not: http.Get($X + "/...")
+  - pattern-either:
+    - pattern-inside: "func $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C echo.Context, ...) $RET {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C *gin.Context, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN($SAFETY common.Safety, $PAYLOAD string, $X interface{}) ($A, $B, $C) {\n  ...\n}\n"
+  message: 'SSRF risk: `net/http` request to a non-literal URL inside an HTTP handler. If `$URL` comes from a request parameter
+    the attacker can scan internal services, hit cloud-metadata endpoints (169.254.169.254), or trigger arbitrary outbound
+    traffic. Validate the URL against an allow-list of hosts before requesting.'
+  metadata:
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery (SSRF)
+    category: security
+    technology:
+    - go
+    confidence: HIGH
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+  severity: ERROR
+  languages:
+  - go
+- id: narvy-go-ssrf-newrequest-tainted
+  patterns:
+  - pattern-either:
+    - pattern: http.NewRequest($METHOD, $URL, $BODY)
+    - pattern: http.NewRequestWithContext($CTX, $METHOD, $URL, $BODY)
+  - pattern-not: http.NewRequest($METHOD, "...", $BODY)
+  - pattern-not: http.NewRequestWithContext($CTX, $METHOD, "...", $BODY)
+  - pattern-not: http.NewRequest($METHOD, os.Getenv($X), $BODY)
+  - pattern-not: http.NewRequestWithContext($CTX, $METHOD, os.Getenv($X), $BODY)
+  - pattern-either:
+    - pattern-inside: "func $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C echo.Context, ...) $RET {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C *gin.Context, ...) {\n  ...\n}\n"
+  message: 'SSRF risk: `http.NewRequest` URL is a non-literal expression inside an HTTP handler. Confirm the URL is validated
+    against an allow-list before this request is sent via `client.Do(req)`.'
+  metadata:
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery (SSRF)
+    category: security
+    technology:
+    - go
+    confidence: MEDIUM
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+  severity: WARNING
+  languages:
+  - go
+- id: narvy-go-ssrf-client-get
+  patterns:
+  - pattern-either:
+    - pattern: $CLIENT.Get($URL)
+    - pattern: $CLIENT.Post($URL, $CT, $BODY)
+    - pattern: $CLIENT.PostForm($URL, $DATA)
+  - pattern-inside: '$CLIENT := &http.Client{...}
+
+      ...
+
+      '
+  - pattern-not: $CLIENT.Get("...")
+  - pattern-not: $CLIENT.Post("...", $CT, $BODY)
+  - pattern-not: $CLIENT.PostForm("...", $DATA)
+  message: 'SSRF risk: custom `http.Client` is invoked with a non-literal URL. Same risk as `http.Get` - validate against
+    an allow-list of hosts.'
+  metadata:
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery (SSRF)
+    category: security
+    technology:
+    - go
+    confidence: MEDIUM
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+  severity: WARNING
+  languages:
+  - go
+- id: narvy.go.ssrf.net-dial-tainted-host.net-dial-tainted-host
+  message: '`net.Dial()` / `net.DialTimeout()` called with a host/address built from request data. This lets an attacker make
+    the server open a raw TCP connection to any internal host/port it can reach (cloud metadata endpoints, internal admin
+    ports, redis/memcache with no auth) - SSRF at the socket level (CWE-918). Validate the target against a strict allow-list,
+    and resolve+re-check the IP is not in a private/link-local range before connecting.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery (SSRF)
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: net.Dial("tcp", $R.URL.Query().Get(...))
+    - pattern: net.Dial("tcp", $R.FormValue(...))
+    - pattern: net.DialTimeout("tcp", $R.URL.Query().Get(...), ...)
+- id: narvy.go.ssrf.outbound-url-host-from-request-concat.outbound-url-host-from-request-concat
+  message: An outbound URL is assembled by concatenating a fixed scheme onto a host taken directly from request data, then
+    handed to an HTTP client. Same SSRF risk as passing the tainted value straight to `http.Get` (CWE-918) - the concatenation
+    doesn't add any validation. Resolve and check the host against an allow-list before building the request.
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery (SSRF)
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: '$URL := "http://" + $R.URL.Query().Get(...)
+
+        ...
+
+        http.Get($URL)
+
+        '
+    - pattern: '$URL := "https://" + $R.FormValue(...)
+
+        ...
+
+        http.Get($URL)
+
+        '
+- id: narvy.go.transport.insecure-skip-verify.insecure-skip-verify
+  message: '`InsecureSkipVerify: true` in a TLS (or TLS-forwarding) config struct literal disables TLS certificate validation
+    entirely. Any certificate - including one presented by an attacker-in-the-middle - will be accepted, defeating the point
+    of TLS (CWE-295). Remove the field (defaults to verifying) or, for pinning use cases, implement `VerifyConnection`/`VerifyPeerCertificate`
+    instead.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-295: Improper Certificate Validation'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - go
+  paths:
+    exclude:
+    - '**/*_test.go'
+    - '**/testdata/**'
+    - '**/protocoltest/**'
+  patterns:
+  - pattern: '$T{..., InsecureSkipVerify: true, ...}
+
+      '
+- id: narvy.go.transport.tls-insecure-skip-verify.tls-insecure-skip-verify
+  message: '`InsecureSkipVerify` field on a TLS config is set to `true` via field assignment (not the struct-literal form).
+    This disables certificate validation on that connection - any certificate is accepted, defeating TLS (CWE-295). Remove
+    the assignment (defaults to `false`).'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-295: Improper Certificate Validation'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - go
+  paths:
+    exclude:
+    - '**/*_test.go'
+    - '**/testdata/**'
+    - '**/protocoltest/**'
+  pattern: $CFG.InsecureSkipVerify = true
+- id: narvy.go.tls.missing-ssl-minversion.missing-ssl-minversion
+  message: '`tls.Config{}` constructed with no `MinVersion` field. Go 1.18+ defaults to TLS 1.2 in the absence of this field,
+    so this is a hardening advisory rather than a live vuln by itself - set `MinVersion: tls.VersionTLS12` (or 1.3) explicitly
+    so the floor cannot silently drop on an older Go toolchain or be overridden elsewhere in the struct literal.'
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern: 'tls.Config{...}
+
+      '
+  - pattern-not: 'tls.Config{..., MinVersion: $V, ...}
+
+      '
+- id: narvy.go.tls.explicit-weak-min-version.explicit-weak-min-version
+  message: '`tls.Config.MinVersion` explicitly set to SSLv3/TLS1.0/TLS1.1. All three have known practical attacks (POODLE,
+    BEAST) and are disallowed by PCI-DSS; explicitly pinning the floor there (rather than merely omitting it) is a real, exploitable
+    defect (CWE-326). Set `MinVersion: tls.VersionTLS12` or higher.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: 'tls.Config{..., MinVersion: tls.VersionSSL30, ...}
+
+        '
+    - pattern: 'tls.Config{..., MinVersion: tls.VersionTLS10, ...}
+
+        '
+    - pattern: 'tls.Config{..., MinVersion: tls.VersionTLS11, ...}
+
+        '
+- id: narvy.go.tls.weak-cipher-suite-allowed.weak-cipher-suite-allowed
+  message: '`tls.Config.CipherSuites` explicitly includes a CBC-mode or RC4 cipher suite. Including these re-enables ciphers
+    modern TLS stacks disable by default because of padding-oracle (Lucky13) and keystream-bias attacks (CWE-327). Stick to
+    the Go 1.18+ default cipher suite list (leave `CipherSuites` unset) or select only AEAD suites (`TLS_*_WITH_AES_*_GCM_*`,
+    `TLS_*_CHACHA20_POLY1305_*`).'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: tls.TLS_RSA_WITH_RC4_128_SHA
+    - pattern: tls.TLS_RSA_WITH_AES_128_CBC_SHA
+    - pattern: tls.TLS_RSA_WITH_AES_256_CBC_SHA
+- id: narvy.go.transport.grpc-dial-insecure-credentials.grpc-dial-insecure-credentials
+  message: '`grpc.Dial()` (or `grpc.NewClient()`) called with `grpc.WithInsecure()`/`insecure.NewCredentials()`, disabling
+    transport encryption on the gRPC connection entirely - every request/response (including any auth token in metadata) crosses
+    the wire in plaintext (CWE-319). Use `grpc.WithTransportCredentials(credentials.NewTLS(...))` for any connection that
+    leaves the local host.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-319: Cleartext Transmission of Sensitive Information'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: grpc.Dial($ADDR, ..., grpc.WithInsecure(), ...)
+    - pattern: grpc.Dial($ADDR, ..., grpc.WithTransportCredentials(insecure.NewCredentials()), ...)
+    - pattern: grpc.NewClient($ADDR, ..., grpc.WithTransportCredentials(insecure.NewCredentials()), ...)
+- id: narvy.go.transport.grpc-serve-no-tls-credentials.grpc-serve-no-tls-credentials
+  message: '`grpc.NewServer()` constructed with no transport credentials, so the server accepts plaintext connections. Any
+    auth metadata or payload sent to it crosses the wire unencrypted (CWE-319). Pass `grpc.Creds(credentials.NewTLS(...))`
+    unless the server is deliberately scoped to a trusted local/mTLS-terminated network.'
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-319: Cleartext Transmission of Sensitive Information'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern: grpc.NewServer()
+- id: narvy.go.open-redirect.shared-url-struct-mutation.shared-url-struct-mutation
+  message: A `url.URL` struct's `Host` or `Scheme` field is mutated using a value that traces back to request data (query
+    param, header, form value). Building a proxy/redirect target this way lets an attacker redirect the request to an arbitrary
+    external host by controlling that value (CWE-601 / SSRF-adjacent when the mutated URL is then fetched server-side rather
+    than redirected to). Validate the host against a fixed allow-list before assigning it.
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-601: URL Redirection to Untrusted Site (''Open Redirect'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: $U.Host = $R.URL.Query().Get(...)
+    - pattern: $U.Host = $R.FormValue(...)
+    - pattern: $U.Host = $R.Header.Get(...)
+    - pattern: $U.Scheme = $R.URL.Query().Get(...)
+    - pattern: $U.Scheme = $R.FormValue(...)
+- id: narvy.go.open-redirect.location-header-tainted.location-header-tainted
+  message: '`Location` response header set directly from request data via `Header().Set()`, bypassing `http.Redirect()`''s
+    handling entirely. Same open-redirect risk as `http.Redirect()` with a tainted target (CWE-601): validate against a fixed
+    allow-list before setting the header, or only allow relative paths.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-601: URL Redirection to Untrusted Site (''Open Redirect'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: $W.Header().Set("Location", $R.URL.Query().Get(...))
+    - pattern: $W.Header().Set("Location", $R.FormValue(...))
+- id: narvy.go.crypto.weak-hash-password.weak-hash-password
+  message: MD5/SHA1 applied to a value whose name indicates a password or credential. Both are fast, unsalted digests, brute-forceable
+    with commodity GPUs (MD5 is also collision-broken). Use `golang.org/x/crypto/bcrypt` or `golang.org/x/crypto/argon2` for
+    credential storage. CWE-916.
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-916: Use of Password Hash With Insufficient Computational Effort'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - go
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: md5.Sum([]byte($PW))
+    - pattern: sha1.Sum([]byte($PW))
+  - metavariable-regex:
+      metavariable: $PW
+      regex: (?i).*(pass|pwd|secret|credential).*
+- id: narvy.go.crypto.weak-des-cipher.weak-des-cipher
+  message: '`crypto/des` used to construct a cipher. DES has a brute-forceable 56-bit effective key, and TripleDES (168-bit
+    nominal, ~112-bit effective) is deprecated by NIST for new use and vulnerable to SWEET32 birthday attacks on its 64-bit
+    block size. Use `crypto/aes` with GCM instead. CWE-327.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - go
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: des.NewCipher(...)
+    - pattern: des.NewTripleDESCipher(...)
+- id: narvy.go.crypto.math-rand-security-token.math-rand-security-token
+  message: '`math/rand` (a deterministic PRNG, not cryptographically secure) is used to produce a value assigned to a variable
+    whose name indicates security-sensitive use (token, secret, password, session, nonce, apikey, csrf). Its internal state
+    can be recovered from observed outputs, making future values predictable. Use `crypto/rand` (`rand.Read` / a helper that
+    base64/hex-encodes its bytes) for anything security-relevant. CWE-338.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    cwe:
+    - 'CWE-338: Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)'
+    - 'CWE-330: Use of Insufficiently Random Values'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - go
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Insufficient Entropy
+  patterns:
+  - pattern-either:
+    - pattern: $TOKEN := rand.Int(...)
+    - pattern: $TOKEN := rand.Intn(...)
+    - pattern: $TOKEN := rand.Int63(...)
+    - pattern: $TOKEN = rand.Intn(...)
+  - metavariable-regex:
+      metavariable: $TOKEN
+      regex: (?i).*(token|secret|password|passwd|pwd|session|nonce|apikey|api_key|csrf|auth).*
+  - pattern-not-inside: 'import "crypto/rand"
+
+      ...
+
+      '
+- id: narvy.go.crypto.use-of-md5.use-of-md5
+  message: '`md5.Sum()` / `md5.New()` used to hash a value. MD5 is cryptographically broken (collision-forgeable) and must
+    not be used for integrity checks, signatures, or password hashing (CWE-327 / CWE-328). Use SHA-256+ for integrity/signing,
+    or `bcrypt`/`argon2`/`scrypt` for passwords.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    - 'CWE-328: Use of Weak Hash'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: md5.Sum(...)
+    - pattern: md5.New()
+- id: narvy.go.crypto.use-of-sha1.use-of-sha1
+  message: '`sha1.Sum()` / `sha1.New()` used to hash a value. SHA-1 has practical collision attacks and should not be used
+    for integrity checks or signatures (CWE-327 / CWE-328). Use SHA-256 or better.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    - 'CWE-328: Use of Weak Hash'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: LOW
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: sha1.Sum(...)
+    - pattern: sha1.New()
+- id: narvy.go.crypto.math-random-used.math-random-used
+  message: '`math/rand` used to generate a value. `math/rand`''s default source is not cryptographically secure and is predictable
+    once seeded - using it for anything security-sensitive (tokens, session IDs, password reset codes, nonces, keys) lets
+    an attacker predict or brute-force the value (CWE-338). Use `crypto/rand` for anything security-sensitive; this broad
+    detector deliberately also fires on non-sensitive uses (jitter, load-balancing, retry backoff), which you can treat
+    as advisory. Covers both the classic `math/rand` API
+    (`rand.Intn`/`.Int63`/`.Int31`/`.Float64`/`.Int`) and `math/rand/v2`''s generic form (`rand.N`/`.IntN`/`.Int32N`/ `.Int64N`/`.Uint32N`/`.Uint64N`/...)
+    via a `$FUNC` wildcard instead of a fixed identifier list, and matches through an import alias (`mathrand "math/rand"`
+    then `mathrand.Int63()`) by binding the alias from the import statement itself rather than assuming the package is always
+    referenced as literal `rand`.'
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-338: Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern: rand.$FUNC(...)
+      - pattern-not-inside: 'import "crypto/rand"
+
+          ...
+
+          '
+    - patterns:
+      - pattern: $ALIAS.$FUNC(...)
+      - pattern-inside: 'import $ALIAS "$MODPATH"
+
+          ...
+
+          '
+      - metavariable-regex:
+          metavariable: $MODPATH
+          regex: ^math/rand(/v[0-9]+)?$
+- id: narvy.go.crypto.rc4-cipher-constructed.rc4-cipher-constructed
+  message: '`rc4.NewCipher()` used. RC4 has known keystream biases that break confidentiality in practice and is disabled
+    by default in modern TLS stacks for that reason (CWE-327). Use AES-GCM or ChaCha20-Poly1305.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - go
+  pattern: rc4.NewCipher(...)
+- id: narvy.go.crypto.rsa-key-undersized-modulus.rsa-key-undersized-modulus
+  message: '`rsa.GenerateKey()` called with a key size below 2048 bits. RSA keys under 2048 bits are within reach of modern
+    factoring attacks (CWE-326). Generate at least a 2048-bit key (3072+ recommended for new systems).'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - go
+  patterns:
+  - pattern: rsa.GenerateKey($RAND, $BITS)
+  - metavariable-comparison:
+      metavariable: $BITS
+      comparison: $BITS < 2048
+- id: narvy.go.crypto.aes-cbc-static-iv.aes-cbc-static-iv
+  message: '`cipher.NewCBCEncrypter()` called with an IV that is a hardcoded literal byte-array instead of a freshly generated
+    random value. A reused/predictable IV breaks CBC''s semantic-security guarantee and leaks information about the plaintext
+    across messages (CWE-329). Draw the IV from `crypto/rand` for every encryption.'
+  severity: ERROR
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-329: Generation of Predictable IV with CBC Mode'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern: cipher.NewCBCEncrypter($BLOCK, $IV)
+  - pattern-inside: 'var $IV = [...]byte{...}
+
+      ...
+
+      '
+- id: narvy.go.crypto.sha224-checksum-used.sha224-checksum-used
+  message: '`sha256.Sum224()` / `sha256.New224()` used. SHA-224 is not broken, but it is a truncated-output variant with no
+    benefit over SHA-256 on 64-bit hardware and is easy to confuse with the weaker SHA-1/MD5 family in review (CWE-327 advisory,
+    not exploitable by itself). Use SHA-256 unless you have a specific length-constrained wire-format requirement.'
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: LOW
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: sha256.Sum224(...)
+    - pattern: sha256.New224()
+- id: narvy-go-xss-template-html-cast
+  patterns:
+  - pattern-either:
+    - pattern: template.HTML($X)
+    - pattern: template.JS($X)
+    - pattern: template.URL($X)
+    - pattern: template.HTMLAttr($X)
+    - pattern: template.CSS($X)
+  - pattern-not: template.HTML("...")
+  - pattern-not: template.JS("...")
+  - pattern-not: template.URL("...")
+  - pattern-not: template.HTMLAttr("...")
+  - pattern-not: template.CSS("...")
+  # Excludes provably-safe sources: just-built strings.Builder/bytes.Buffer `.String()` and escaper output (html.EscapeString / template.HTMLEscapeString / url.QueryEscape).
+  - pattern-not: template.HTML($SB.String())
+  - pattern-not: template.JS($SB.String())
+  - pattern-not: template.URL($SB.String())
+  - pattern-not: template.HTMLAttr($SB.String())
+  - pattern-not: template.CSS($SB.String())
+  - pattern-not: template.HTML(html.EscapeString(...))
+  - pattern-not: template.HTML(template.HTMLEscapeString(...))
+  - pattern-not: template.HTMLAttr(html.EscapeString(...))
+  - pattern-not: template.HTMLAttr(template.HTMLEscapeString(...))
+  - pattern-not: template.JS(template.JSEscapeString(...))
+  - pattern-not: template.URL(url.QueryEscape(...))
+  - pattern-not: template.URL(html.EscapeString(...))
+  message: 'Non-literal value cast to `template.HTML` (or `JS` / `URL` / `HTMLAttr` / `CSS`), which suppresses Go''s
+    auto-escaping in `html/template`. This is a HEURISTIC audit signal, not a proven exploit: without data-flow proof
+    we cannot tell a safe internal string from attacker input. IF the value is user-controlled it is stored/reflected
+    XSS (CWE-79) - sanitise with `bluemonday` (or equivalent) before casting, or drop the cast and let `html/template`
+    escape. The taint-proven case is reported separately at CRITICAL by narvy-go-xss-template-html-request-taint.'
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    technology:
+    - go
+    - html/template
+    confidence: LOW
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: HIGH
+  severity: INFO
+  languages:
+  - go
+- id: narvy-go-xss-responsewriter-bytes
+  patterns:
+  - pattern-either:
+    - pattern: $W.Write([]byte($X))
+  - pattern-not: $W.Write([]byte("..."))
+  - pattern-either:
+    - pattern-inside: "func $FN($W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN($W http.ResponseWriter, ...) {\n  ...\n}\n"
+  message: 'XSS risk: `ResponseWriter.Write([]byte(x))` with a non-literal value `x`. The response body is written verbatim
+    to the browser without escaping. If `x` originates from a request parameter this is reflected XSS. Use `html/template`
+    to render dynamic content.'
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    technology:
+    - go
+    confidence: MEDIUM
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: MEDIUM
+  severity: WARNING
+  languages:
+  - go
+- id: narvy.go.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
+  message: '`w.Write(...)` writes raw bytes to the `http.ResponseWriter`. This is safe for JSON/binary responses and is
+    idiomatic Go; it is only XSS when the bytes carry attacker-controlled data into an HTML response without escaping (CWE-79).
+    We cannot prove taint here, so this is a review pointer, not a confirmed finding: if the value is request-derived and the
+    response is HTML, render through `html/template` (auto-escapes) instead. Ignore for JSON/`application/json` handlers.'
+  severity: INFO
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: $W.Write([]byte($X))
+    - pattern: $W.Write($X)
+  - pattern-not: $W.Write([]byte("..."))
+  - pattern-either:
+    - pattern-inside: 'func $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+    - pattern-inside: 'func ($RECV) $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+- id: narvy.go.xss.no-fprintf-to-responsewriter.no-fprintf-to-responsewriter
+  message: '`fmt.Fprintf(w, ...)` formats a tainted value directly into the HTTP response body. `Fprintf` does not HTML-escape
+    its arguments, so a request-derived value reaching the format arguments is reflected XSS (CWE-79). Use `html/template`
+    for anything written to an HTML response.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern: fmt.Fprintf($W, "...", ...)
+  - pattern-either:
+    - pattern-inside: 'func $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+    - pattern-inside: 'func ($RECV) $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+- id: narvy.go.xss.no-io-writestring-to-responsewriter.no-io-writestring-to-responsewriter
+  message: '`io.WriteString(w, ...)` writes a tainted string directly to the HTTP response body with no HTML escaping - reflected
+    XSS if the string contains request-derived data (CWE-79). Use `html/template` instead.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern: io.WriteString($W, $X)
+  - pattern-either:
+    - pattern-inside: 'func $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+    - pattern-inside: 'func ($RECV) $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+- id: narvy.go.xss.no-printf-in-responsewriter.no-printf-in-responsewriter
+  message: A formatted/concatenated string is passed to a `ResponseWriter` write call. If any operand is request-derived,
+    this is a reflected-XSS sink (CWE-79) - the response body is not passed through an HTML escaper. Render through `html/template`.
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern: $W.Write([]byte(fmt.Sprintf("...", ...)))
+  - pattern-either:
+    - pattern-inside: 'func $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+    - pattern-inside: 'func ($RECV) $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+- id: narvy.go.xss.wip-xss-using-responsewriter-and-printf.wip-xss-using-responsewriter-and-printf
+  message: '`fmt.Fprint(w, ...)` / `fmt.Fprintln(w, ...)` writes concatenated, request-derived data straight to the response
+    body with no escaping - reflected XSS (CWE-79). Render through `html/template` instead of hand-formatting the body.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: fmt.Fprint($W, ...)
+    - pattern: fmt.Fprintln($W, ...)
+  - pattern-not: fmt.Fprint($W, "...")
+  - pattern-not: fmt.Fprintln($W, "...")
+  - pattern-either:
+    - pattern-inside: 'func $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+    - pattern-inside: 'func ($RECV) $FUNC(..., $W http.ResponseWriter, ...) { ... }
+
+        '
+- id: narvy.go.xss.text-template-attr-context-unescaped.text-template-attr-context-unescaped
+  message: A `text/template` (not `html/template`) template renders a value inside an HTML attribute. `text/template` performs
+    no contextual escaping, so a request-derived value here can break out of the attribute and inject markup/script - XSS
+    (CWE-79). Switch the template engine to `html/template`.
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern: text/template.Must(text/template.New($NAME).Parse($SRC))
+  - pattern-not: text/template.Must(text/template.New($NAME).Parse("..."))
+- id: narvy.go.xss.href-src-concat-unescaped.href-src-concat-unescaped
+  message: A request-derived value is concatenated directly into an `href`/`src` attribute string that is then written to
+    the response without going through `html/template`'s URL-context escaping. A `javascript:` URL or quote-breakout here
+    is XSS (CWE-79). Use `html/template`, which escapes URL attribute context correctly.
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: fmt.Sprintf("...href=\"%s\"...", $X)
+    - pattern: fmt.Sprintf("...src=\"%s\"...", $X)
+    - pattern: '"<a href=\"" + $X + "\">"'
+- id: narvy.go.deserialization.tar-entry-unbounded-copy.tar-entry-unbounded-copy
+  message: A `tar.Reader` entry is copied out with `io.Copy()` and no size limit anywhere in the copy path. `header.Size`
+    from the tar header is attacker-controlled and is not enforced by `tar.Reader.Read()` in any way - a crafted tar stream
+    can present a small on-disk archive that unpacks to gigabytes on this entry alone, exhausting disk/memory (decompression
+    bomb, CWE-409). Cap the copy with `io.CopyN($DST, tarReader, maxEntrySize)` or wrap the destination/source in `io.LimitReader`
+    sized off a fixed maximum before copying.
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-409: Improper Handling of Highly Compressed Data (Data Amplification)'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern: '$TR := tar.NewReader(...)
+
+      ...
+
+      io.Copy($DST, $TR)
+
+      '
+  - pattern-not: '$TR := tar.NewReader(...)
+
+      ...
+
+      io.Copy($DST, io.LimitReader($TR, ...))
+
+      '
+  - pattern-not: '$TR := tar.NewReader(...)
+
+      ...
+
+      io.CopyN($DST, $TR, ...)
+
+      '
+- id: narvy.go.deserialization.zip-entry-unbounded-copy.zip-entry-unbounded-copy
+  message: A `*zip.File` entry is opened and its content copied out with `io.Copy()` with no size limit enforced during the
+    copy itself. The entry's declared `UncompressedSize64` in the zip central directory is just a header field an attacker
+    fully controls - it is not checked by `zip.File.Open()`/`Read()`, so even code that pre-checks the declared size against
+    free disk space is still exposed to a stream that decompresses to far more bytes than it claims (decompression bomb, CWE-409).
+    Cap the copy with `io.CopyN()` or wrap the entry reader in `io.LimitReader(entryReader, maxEntrySize)` before copying,
+    and treat a truncated/limited read as an error, not a success.
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-409: Improper Handling of Highly Compressed Data (Data Amplification)'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern-inside: "for $_, $ZF := range $ZR.File {\n  ...\n}\n"
+      - pattern: '$RC, $ERR := $ZF.Open()
+
+          ...
+
+          io.Copy($DST, $RC)
+
+          '
+      - pattern-not: '$RC, $ERR := $ZF.Open()
+
+          ...
+
+          io.Copy($DST, io.LimitReader($RC, ...))
+
+          '
+      - pattern-not: '$RC, $ERR := $ZF.Open()
+
+          ...
+
+          io.CopyN($DST, $RC, ...)
+
+          '
+    - patterns:
+      - pattern: "func($P *zip.File) $RET {\n  ...\n  $RC, $ERR := $P.Open()\n  ...\n  io.Copy($DST, $RC)\n  ...\n}\n"
+      - pattern-not: "func($P *zip.File) $RET {\n  ...\n  $RC, $ERR := $P.Open()\n  ...\n  io.Copy($DST, io.LimitReader($RC,\
+          \ ...))\n  ...\n}\n"
+      - pattern-not: "func($P *zip.File) $RET {\n  ...\n  $RC, $ERR := $P.Open()\n  ...\n  io.CopyN($DST, $RC, ...)\n  ...\n\
+          }\n"
+- id: narvy.go.deserialization.decompression-reader-unbounded-read.decompression-reader-unbounded-read
+  message: '`gzip.NewReader()` / `zlib.NewReader()` output is copied with `io.Copy()` and no size limit. A malicious small
+    compressed payload can expand to gigabytes in memory/disk, exhausting resources - a decompression-bomb DoS (CWE-409).
+    Wrap the reader with `io.LimitReader(r, maxDecompressedSize)` before copying.'
+  severity: WARNING
+  languages:
+  - go
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-409: Improper Handling of Highly Compressed Data (Data Amplification)'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - go
+  patterns:
+  - pattern-either:
+    - pattern: '$GZ, $ERR := gzip.NewReader($R)
+
+        ...
+
+        io.Copy($DST, $GZ)
+
+        '
+    - pattern: '$ZR, $ERR := zlib.NewReader($R)
+
+        ...
+
+        io.Copy($DST, $ZR)
+
+        '

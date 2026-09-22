@@ -1,0 +1,3683 @@
+# Narvy JavaScript / TypeScript security rules (.js/.jsx/.ts/.tsx).
+# Injection rules run in taint mode and pin the vulnerable arg with focus-metavariable.
+
+rules:
+
+# CLEARTEXT HTTP
+
+  - id: narvy.javascript.transport.cleartext-http-literal.cleartext-http-literal
+    message: >-
+      Cleartext HTTP URL detected. Traffic to this endpoint is unencrypted
+      and vulnerable to MITM (eavesdropping, tampering, session hijacking).
+      Use HTTPS. CWE-319.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-319: Cleartext Transmission of Sensitive Information"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+        - "A03:2017 - Sensitive Data Exposure"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript]
+      likelihood: MEDIUM
+      impact: MEDIUM
+      confidence: HIGH
+      vulnerability_class:
+        - Insecure Communication
+      references:
+        - https://cwe.mitre.org/data/definitions/319.html
+        - https://owasp.org/www-community/vulnerabilities/Insecure_Transport
+    paths:
+      exclude:
+        - "**/fuzzer/payloads.js"
+        - "**/fuzzer/payloads.ts"
+        - "**/payloads/*.js"
+        - "**/payloads/*.ts"
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.js"
+        - "**/*.test.ts"
+        - "**/*.spec.js"
+        - "**/*.spec.ts"
+    patterns:
+      - pattern-either:
+          - pattern: "\"$URL\""
+          - pattern: "'$URL'"
+          - pattern: "`$URL`"
+      - metavariable-regex:
+          metavariable: $URL
+          regex: ^http://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|169\.254\.|10\.\d+\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|\[::1\]|[a-zA-Z0-9.-]+\.(local|internal|test|example)(/|$|:)|schemas\.|www\.w3\.org|xmlns\.com|purl\.org|ns\.adobe\.com|java\.sun\.com|jabber\.org|x\.org|evil\.com)[a-zA-Z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$
+
+# CORS ORIGIN REFLECTION
+
+  - id: narvy.javascript.cors.origin-callback-always-allows.origin-callback-always-allows
+    message: >-
+      The CORS origin callback calls back with `true` unconditionally,
+      without checking the incoming origin against an allow-list. This
+      accepts requests from every origin, same as `origin: "*"`, but
+      combined with `credentials: true` this is worse: unlike a literal
+      wildcard, per the CORS spec a dynamic origin callback CAN be
+      combined with credentialed requests, letting any site make
+      authenticated cross-origin requests on behalf of a logged-in user
+      (CWE-942). Check the `origin` argument against an explicit
+      allow-list before calling back with true.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [vuln]
+      technology: [express, cors, nodejs, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Other
+      references:
+        - https://cwe.mitre.org/data/definitions/942.html
+    patterns:
+      - pattern-either:
+          - pattern: |
+              cors({..., origin: function ($ORIGIN, $CB) { $CB(null, true) }, ...})
+          - pattern: |
+              cors({..., origin: ($ORIGIN, $CB) => { $CB(null, true) }, ...})
+          - pattern: |
+              cors({..., origin: ($ORIGIN, $CB) => $CB(null, true), ...})
+
+  - id: narvy.javascript.cors.header-reflects-request-origin.header-reflects-request-origin
+    message: >-
+      Access-Control-Allow-Origin is set directly from the incoming
+      request's Origin header, with no allow-list check in between. This
+      lets any origin pass CORS, functionally identical to a wildcard,
+      and if paired with Access-Control-Allow-Credentials: true it
+      allows any site to make authenticated cross-origin requests
+      (CWE-942). Look the incoming origin up in an explicit allow-list
+      and only echo it back if it matches.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Other
+    patterns:
+      - pattern-either:
+          - pattern: $RES.header("Access-Control-Allow-Origin", $REQ.headers.origin)
+          - pattern: $RES.header('Access-Control-Allow-Origin', $REQ.headers.origin)
+          - pattern: $RES.setHeader("Access-Control-Allow-Origin", $REQ.headers.origin)
+          - pattern: $RES.setHeader('Access-Control-Allow-Origin', $REQ.headers.origin)
+          - pattern: $RES.set("Access-Control-Allow-Origin", $REQ.headers.origin)
+
+# EXPRESS SECURITY HARDENING
+
+  # 1. Helmet with Content-Security-Policy explicitly disabled.
+  - id: narvy.javascript.express.helmet-csp-disabled.helmet-csp-disabled
+    message: >-
+      Helmet is initialised with `contentSecurityPolicy: false`, which turns
+      OFF the Content-Security-Policy header. Without a CSP the app has no
+      defence-in-depth against XSS, clickjacking via script/style injection,
+      or malicious resource loads. Configure an explicit CSP directive set
+      instead of disabling it. CWE-1021 / CWE-693.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-1021: Improper Restriction of Rendered UI Layers or Frames"
+        - "CWE-693: Protection Mechanism Failure"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, helmet, javascript, typescript]
+      likelihood: MEDIUM
+      impact: MEDIUM
+      confidence: HIGH
+      vulnerability_class:
+        - Security Misconfiguration
+      references:
+        - https://helmetjs.github.io/
+        - https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.js"
+        - "**/*.test.ts"
+        - "**/*.spec.js"
+        - "**/*.spec.ts"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              helmet({..., contentSecurityPolicy: false, ...})
+          - pattern: |
+              helmet.contentSecurityPolicy(false)
+
+  # 2. CORS configured to allow any origin.
+  - id: narvy.javascript.express.cors-wildcard-origin.cors-wildcard-origin
+    message: >-
+      CORS is configured to accept requests from ANY origin
+      (`origin: "*"` or `origin: true`). Combined with credentialed requests
+      this lets any website read authenticated responses on behalf of a
+      logged-in user. Restrict `origin` to an explicit allow-list. CWE-942.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, cors, javascript, typescript]
+      likelihood: MEDIUM
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Security Misconfiguration
+      references:
+        - https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.js"
+        - "**/*.test.ts"
+        - "**/*.spec.js"
+        - "**/*.spec.ts"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              cors({..., origin: "*", ...})
+          - pattern: |
+              cors({..., origin: true, ...})
+
+  # 3. MongoDB connection string with no credentials.
+  - id: narvy.javascript.database.mongodb-uri-without-auth.mongodb-uri-without-auth
+    message: >-
+      MongoDB connection string has no user:password credentials, so it
+      connects to an UNAUTHENTICATED database. If this URI is ever used in
+      production (e.g. an unset env var falling back to this literal), any
+      network-adjacent actor can read/write the entire database. Require
+      authentication and never fall back to a credential-less URI. CWE-306.
+    severity: INFO
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-306: Missing Authentication for Critical Function"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+        - "A07:2021 - Identification and Authentication Failures"
+      category: security
+      subcategory: [audit]
+      technology: [mongodb, nodejs, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Security Misconfiguration
+      references:
+        - https://www.mongodb.com/docs/manual/administration/security-checklist/
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.js"
+        - "**/*.test.ts"
+        - "**/*.spec.js"
+        - "**/*.spec.ts"
+    patterns:
+      - pattern-either:
+          - pattern: "\"$URI\""
+          - pattern: "'$URI'"
+      - metavariable-regex:
+          metavariable: $URI
+          # mongodb:// or mongodb+srv:// with a host but NO "@" (credentials).
+          regex: ^mongodb(\+srv)?://(?!.*@)[a-zA-Z0-9._-]+(:[0-9]+)?(/[a-zA-Z0-9._-]*)?$
+
+# HARDCODED KDF FALLBACK
+
+  # Rule 1: env-fallback fed into `crypto.createHash(...).update(...)`
+  - id: narvy.javascript.crypto.hardcoded-env-fallback-to-hash.hardcoded-env-fallback-to-hash
+    message: >-
+      Hardcoded fallback secret '$LITERAL' is used when the environment
+      variable is unset, and is then fed into a cryptographic hash. If the
+      env var is missing in any deployment (e.g. local dev, CI, misconfigured
+      prod), the encryption key reduces to a public constant. Furthermore,
+      a single hash round is not a key-derivation function - use HKDF
+      (crypto.hkdfSync), PBKDF2 (crypto.pbkdf2Sync), scrypt, or Argon2 with
+      a per-tenant salt. Fix the env loading (fail fast if absent) AND
+      switch to a real KDF.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-321: Use of Hard-coded Cryptographic Key"
+        - "CWE-798: Use of Hard-coded Credentials"
+        - "CWE-916: Use of Password Hash With Insufficient Computational Effort"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+        - "A07:2021 - Identification and Authentication Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-crypto, javascript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+        - Hard-coded Credentials
+      references:
+        - https://cwe.mitre.org/data/definitions/321.html
+        - https://cwe.mitre.org/data/definitions/916.html
+        - https://datatracker.ietf.org/doc/html/rfc5869
+    patterns:
+      - pattern-either:
+          # Variant 1: `||` operator
+          - pattern: |
+              $CRYPTO.createHash($ALGO).update(process.env.$ENV || "$LITERAL")
+          - pattern: |
+              $CRYPTO.createHash($ALGO).update(process.env.$ENV || '$LITERAL')
+          - pattern: |
+              $CRYPTO.createHash($ALGO).update(process.env[$X] || "$LITERAL")
+          # Variant 2: `??` nullish coalescing
+          - pattern: |
+              $CRYPTO.createHash($ALGO).update(process.env.$ENV ?? "$LITERAL")
+          - pattern: |
+              $CRYPTO.createHash($ALGO).update(process.env.$ENV ?? '$LITERAL')
+          - pattern: |
+              $CRYPTO.createHash($ALGO).update(process.env[$X] ?? "$LITERAL")
+          # Variant 3: ternary
+          - pattern: |
+              $CRYPTO.createHash($ALGO).update(process.env.$ENV ? process.env.$ENV : "$LITERAL")
+          - pattern: |
+              $CRYPTO.createHash($ALGO).update(process.env.$ENV ? process.env.$ENV : '$LITERAL')
+          # Variant 4: two-statement (split hash chain)
+          - pattern: |
+              $HASH = $CRYPTO.createHash($ALGO)
+              ...
+              $HASH.update(process.env.$ENV || "$LITERAL")
+          - pattern: |
+              $HASH = $CRYPTO.createHash($ALGO)
+              ...
+              $HASH.update(process.env.$ENV ?? "$LITERAL")
+          # Variant 5: separate-assign (let K=env.X; if (!K) K="lit"; ...update(K))
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              if (!$K) { $K = "$LITERAL" }
+              ...
+              $CRYPTO.createHash($ALGO).update($K)
+          - pattern: |
+              let $K = process.env.$ENV
+              ...
+              if (!$K) { $K = "$LITERAL" }
+              ...
+              $CRYPTO.createHash($ALGO).update($K)
+          # Variant 6: chained-var (const K = env.X; const F = K || "lit"; update(F))
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              $F = $K || "$LITERAL"
+              ...
+              $CRYPTO.createHash($ALGO).update($F)
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              $F = $K ?? "$LITERAL"
+              ...
+              $CRYPTO.createHash($ALGO).update($F)
+          # Variant 7: ternary in assignment chained to hash
+          - pattern: |
+              $K = process.env.$ENV ? process.env.$ENV : "$LITERAL"
+              ...
+              $CRYPTO.createHash($ALGO).update($K)
+      - metavariable-regex:
+          metavariable: $LITERAL
+          regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+
+  # Rule 2: env-fallback as symmetric-cipher key / HMAC key
+  - id: narvy.javascript.crypto.hardcoded-env-fallback-to-cipher-key.hardcoded-env-fallback-to-cipher-key
+    message: >-
+      Hardcoded fallback secret '$LITERAL' from `process.env.$ENV` is passed
+      directly to a symmetric cipher or HMAC. If the env var is unset the
+      key becomes a public constant and all ciphertexts can be decrypted by
+      anyone reading this source. Fail fast on missing env at startup, and
+      derive the cipher key via HKDF / PBKDF2 with a per-record salt.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-321: Use of Hard-coded Cryptographic Key"
+        - "CWE-798: Use of Hard-coded Credentials"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-crypto, javascript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+        - Hard-coded Credentials
+    patterns:
+      - pattern-either:
+          # `||` operator
+          - pattern: |
+              $CRYPTO.createCipheriv($ALGO, process.env.$ENV || "$LITERAL", ...)
+          - pattern: |
+              $CRYPTO.createDecipheriv($ALGO, process.env.$ENV || "$LITERAL", ...)
+          - pattern: |
+              $CRYPTO.createHmac($ALGO, process.env.$ENV || "$LITERAL")
+          - pattern: |
+              $CRYPTO.createCipher($ALGO, process.env.$ENV || "$LITERAL")
+          # `??` nullish
+          - pattern: |
+              $CRYPTO.createCipheriv($ALGO, process.env.$ENV ?? "$LITERAL", ...)
+          - pattern: |
+              $CRYPTO.createDecipheriv($ALGO, process.env.$ENV ?? "$LITERAL", ...)
+          - pattern: |
+              $CRYPTO.createHmac($ALGO, process.env.$ENV ?? "$LITERAL")
+          # Ternary
+          - pattern: |
+              $CRYPTO.createHmac($ALGO, process.env.$ENV ? process.env.$ENV : "$LITERAL")
+          - pattern: |
+              $CRYPTO.createCipheriv($ALGO, process.env.$ENV ? process.env.$ENV : "$LITERAL", ...)
+          # Two-statement: separate-assign
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              if (!$K) { $K = "$LITERAL" }
+              ...
+              $CRYPTO.createHmac($ALGO, $K)
+          - pattern: |
+              let $K = process.env.$ENV
+              ...
+              if (!$K) { $K = "$LITERAL" }
+              ...
+              $CRYPTO.createHmac($ALGO, $K)
+          # Chained-var
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              $F = $K || "$LITERAL"
+              ...
+              $CRYPTO.createHmac($ALGO, $F)
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              $F = $K ?? "$LITERAL"
+              ...
+              $CRYPTO.createHmac($ALGO, $F)
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              $F = $K || "$LITERAL"
+              ...
+              $CRYPTO.createCipheriv($ALGO, $F, ...)
+      - metavariable-regex:
+          metavariable: $LITERAL
+          regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+
+  # Rule 3: env-fallback fed into KDF (HKDF / PBKDF2 / scrypt)
+  - id: narvy.javascript.crypto.hardcoded-env-fallback-to-kdf.hardcoded-env-fallback-to-kdf
+    message: >-
+      Hardcoded fallback secret '$LITERAL' is used as input keying material
+      (IKM) to a KDF. When the env var is unset the IKM reduces to a public
+      constant - defeats the entire KDF. Fail fast on missing env at app
+      startup (`assert process.env.X, 'X must be set'`).
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-321: Use of Hard-coded Cryptographic Key"
+        - "CWE-798: Use of Hard-coded Credentials"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-crypto, javascript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+        - Hard-coded Credentials
+    patterns:
+      - pattern-either:
+          # Direct call with `||`
+          - pattern: |
+              $CRYPTO.hkdfSync($ALGO, Buffer.from(process.env.$ENV || "$LITERAL", ...), ...)
+          - pattern: |
+              $CRYPTO.hkdfSync($ALGO, Buffer.from(process.env.$ENV || '$LITERAL', ...), ...)
+          - pattern: |
+              $CRYPTO.hkdfSync($ALGO, process.env.$ENV || "$LITERAL", ...)
+          - pattern: |
+              $CRYPTO.pbkdf2Sync(process.env.$ENV || "$LITERAL", ...)
+          - pattern: |
+              $CRYPTO.scryptSync(process.env.$ENV || "$LITERAL", ...)
+          # Direct call with `??`
+          - pattern: |
+              $CRYPTO.hkdfSync($ALGO, Buffer.from(process.env.$ENV ?? "$LITERAL", ...), ...)
+          - pattern: |
+              $CRYPTO.hkdfSync($ALGO, process.env.$ENV ?? "$LITERAL", ...)
+          - pattern: |
+              $CRYPTO.pbkdf2Sync(process.env.$ENV ?? "$LITERAL", ...)
+          - pattern: |
+              $CRYPTO.scryptSync(process.env.$ENV ?? "$LITERAL", ...)
+          # Ternary
+          - pattern: |
+              $CRYPTO.pbkdf2Sync(process.env.$ENV ? process.env.$ENV : "$LITERAL", ...)
+          - pattern: |
+              $CRYPTO.scryptSync(process.env.$ENV ? process.env.$ENV : "$LITERAL", ...)
+          # Two-step pattern: assign IKM from env-fallback, then use in KDF
+          - pattern: |
+              $IKM = Buffer.from(process.env.$ENV || "$LITERAL", ...)
+              ...
+              $CRYPTO.hkdfSync($ALGO, $IKM, ...)
+          - pattern: |
+              $IKM = Buffer.from(process.env.$ENV ?? "$LITERAL", ...)
+              ...
+              $CRYPTO.hkdfSync($ALGO, $IKM, ...)
+          # Separate-assign feeding KDF
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              if (!$K) { $K = "$LITERAL" }
+              ...
+              $CRYPTO.pbkdf2Sync($K, ...)
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              if (!$K) { $K = "$LITERAL" }
+              ...
+              $CRYPTO.hkdfSync($ALGO, $K, ...)
+          # Chained-var feeding KDF
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              $F = $K || "$LITERAL"
+              ...
+              $CRYPTO.pbkdf2Sync($F, ...)
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              $F = $K || "$LITERAL"
+              ...
+              $CRYPTO.hkdfSync($ALGO, $F, ...)
+      - metavariable-regex:
+          metavariable: $LITERAL
+          regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+
+  # Rule 4: single-hash-as-KDF (weak KDF - CWE-916)
+  - id: narvy.javascript.crypto.single-hash-as-kdf.single-hash-as-kdf
+    message: >-
+      A single SHA-1 / SHA-256 / MD5 round is used to derive an encryption
+      key from `process.env.$ENV`. This is NOT a key-derivation function:
+      brute-force attacks can recompute billions of candidates per second on
+      modern GPUs. Use HKDF (crypto.hkdfSync, RFC 5869) for high-entropy
+      inputs, PBKDF2 / scrypt / Argon2 for low-entropy passwords.
+      Per-tenant salt is mandatory.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-916: Use of Password Hash With Insufficient Computational Effort"
+        - "CWE-326: Inadequate Encryption Strength"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-crypto, javascript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $CRYPTO.createCipheriv($ALGO, $CRYPTO.createHash($H).update(process.env.$ENV).digest(), ...)
+          - pattern: |
+              $CRYPTO.createCipheriv($ALGO, $CRYPTO.createHash($H).update(process.env.$ENV || $X).digest(), ...)
+          - pattern: |
+              $CRYPTO.createCipheriv($ALGO, $CRYPTO.createHash($H).update(process.env.$ENV ?? $X).digest(), ...)
+          - pattern: |
+              $CRYPTO.createDecipheriv($ALGO, $CRYPTO.createHash($H).update(process.env.$ENV).digest(), ...)
+          - pattern: |
+              $CRYPTO.createDecipheriv($ALGO, $CRYPTO.createHash($H).update(process.env.$ENV || $X).digest(), ...)
+          - pattern: |
+              $CRYPTO.createDecipheriv($ALGO, $CRYPTO.createHash($H).update(process.env.$ENV ?? $X).digest(), ...)
+          - pattern: |
+              function $F() {
+                return $CRYPTO.createHash($H)
+                  .update(process.env.$ENV || $X)
+                  .digest()
+              }
+          - pattern: |
+              function $F() {
+                return $CRYPTO.createHash($H).update(process.env.$ENV || $X).digest()
+              }
+          - pattern: |
+              function $F() {
+                return $CRYPTO.createHash($H)
+                  .update(process.env.$ENV ?? $X)
+                  .digest()
+              }
+      - metavariable-regex:
+          metavariable: $H
+          regex: ^['"](md5|sha1|sha-?1|sha256|sha-?256)['"]$
+
+  # Rule 5 (NEW): env-fallback fed into jwt.sign / jwt.verify
+  - id: narvy.javascript.crypto.hardcoded-env-fallback-to-jwt-sign.hardcoded-env-fallback-to-jwt-sign
+    message: >-
+      Hardcoded fallback secret '$LITERAL' is used as the JWT signing key
+      when `process.env.$ENV` is unset. If the env var is missing in any
+      deployment (local dev, CI, misconfigured prod), tokens are signed
+      with a public constant - anyone reading this source can mint valid
+      tokens. THE canonical real-world `jwt.sign(...)` bug. Fix: fail fast
+      at app startup if the secret env var is absent
+      (`assert process.env.$ENV, 'JWT_SECRET must be set'`).
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-321: Use of Hard-coded Cryptographic Key"
+        - "CWE-798: Use of Hard-coded Credentials"
+        - "CWE-547: Use of Hard-coded, Security-relevant Constants"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+        - "A07:2021 - Identification and Authentication Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [jsonwebtoken, jwt, javascript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+        - Hard-coded Credentials
+    patterns:
+      - pattern-either:
+          # jwt.sign / jsonwebtoken.sign - `||` operator
+          - pattern: |
+              $JWT.sign($PAYLOAD, process.env.$ENV || "$LITERAL", ...)
+          - pattern: |
+              $JWT.sign($PAYLOAD, process.env.$ENV || "$LITERAL")
+          - pattern: |
+              $JWT.sign($PAYLOAD, process.env.$ENV || '$LITERAL', ...)
+          - pattern: |
+              $JWT.sign($PAYLOAD, process.env.$ENV || '$LITERAL')
+          # jwt.sign - `??` nullish
+          - pattern: |
+              $JWT.sign($PAYLOAD, process.env.$ENV ?? "$LITERAL", ...)
+          - pattern: |
+              $JWT.sign($PAYLOAD, process.env.$ENV ?? "$LITERAL")
+          # jwt.verify - `||`
+          - pattern: |
+              $JWT.verify($TOKEN, process.env.$ENV || "$LITERAL", ...)
+          - pattern: |
+              $JWT.verify($TOKEN, process.env.$ENV || "$LITERAL")
+          - pattern: |
+              $JWT.verify($TOKEN, process.env.$ENV || '$LITERAL')
+          # jwt.verify - `??`
+          - pattern: |
+              $JWT.verify($TOKEN, process.env.$ENV ?? "$LITERAL", ...)
+          - pattern: |
+              $JWT.verify($TOKEN, process.env.$ENV ?? "$LITERAL")
+          # Ternary
+          - pattern: |
+              $JWT.sign($PAYLOAD, process.env.$ENV ? process.env.$ENV : "$LITERAL", ...)
+          - pattern: |
+              $JWT.verify($TOKEN, process.env.$ENV ? process.env.$ENV : "$LITERAL", ...)
+          # Separate-assign feeding jwt.sign
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              if (!$K) { $K = "$LITERAL" }
+              ...
+              $JWT.sign($PAYLOAD, $K, ...)
+          # Chained-var feeding jwt.sign
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              $F = $K || "$LITERAL"
+              ...
+              $JWT.sign($PAYLOAD, $F, ...)
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              $F = $K ?? "$LITERAL"
+              ...
+              $JWT.sign($PAYLOAD, $F, ...)
+      - metavariable-regex:
+          metavariable: $LITERAL
+          regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+
+  # Rule 6 (NEW): env-fallback fed into Web Crypto API (crypto.subtle)
+  - id: narvy.javascript.crypto.hardcoded-env-fallback-to-web-crypto.hardcoded-env-fallback-to-web-crypto
+    message: >-
+      Hardcoded fallback secret '$LITERAL' is fed into the Web Crypto API
+      (crypto.subtle.*). Common in Cloudflare Workers, Deno, and modern
+      Node 18+ runtimes. If the env var is unset the key material reduces
+      to a public constant - defeats the entire crypto operation. Fail
+      fast on missing env at startup.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-321: Use of Hard-coded Cryptographic Key"
+        - "CWE-798: Use of Hard-coded Credentials"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [web-crypto, cloudflare-workers, deno, javascript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+        - Hard-coded Credentials
+    patterns:
+      - pattern-either:
+          # crypto.subtle.importKey called directly with env-fallback string
+          - pattern: |
+              $SUBTLE.importKey($FORMAT, process.env.$ENV || "$LITERAL", ...)
+          - pattern: |
+              $SUBTLE.importKey($FORMAT, process.env.$ENV ?? "$LITERAL", ...)
+          # Wrapped in TextEncoder().encode(...) (the canonical browser shape)
+          - pattern: |
+              $SUBTLE.importKey($FORMAT, new TextEncoder().encode(process.env.$ENV || "$LITERAL"), ...)
+          - pattern: |
+              $SUBTLE.importKey($FORMAT, new TextEncoder().encode(process.env.$ENV ?? "$LITERAL"), ...)
+          - pattern: |
+              $SUBTLE.importKey($FORMAT, new TextEncoder().encode(process.env.$ENV || '$LITERAL'), ...)
+          - pattern: |
+              $SUBTLE.importKey($FORMAT, new TextEncoder().encode(process.env.$ENV ?? '$LITERAL'), ...)
+          # Two-statement: encode into local, then importKey
+          - pattern: |
+              $RAW = new TextEncoder().encode(process.env.$ENV || "$LITERAL")
+              ...
+              $SUBTLE.importKey($FORMAT, $RAW, ...)
+          - pattern: |
+              $RAW = new TextEncoder().encode(process.env.$ENV ?? "$LITERAL")
+              ...
+              $SUBTLE.importKey($FORMAT, $RAW, ...)
+          # Separate-assign feeding Web Crypto
+          - pattern: |
+              $K = process.env.$ENV
+              ...
+              if (!$K) { $K = "$LITERAL" }
+              ...
+              $SUBTLE.importKey($FORMAT, new TextEncoder().encode($K), ...)
+      - metavariable-regex:
+          metavariable: $LITERAL
+          regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+
+  # Rule 7: bare-literal secret reaching a JWT sign/verify call (no env var
+  # at all). Covers jsonwebtoken, jose and passport-jwt in one taint rule.
+  - id: narvy.javascript.crypto.hardcoded-jwt-sign-secret.hardcoded-jwt-sign-secret
+    message: >-
+      A hardcoded string literal secret reaches a JWT signing or
+      verification call (jsonwebtoken, jose, or passport-jwt). The literal
+      is a public constant baked into the source - anyone who reads it can
+      forge valid tokens (CWE-321 / CWE-798). Load the secret from an
+      environment variable or a secrets manager, and fail startup if it is
+      missing.
+    severity: ERROR
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-321: Use of Hard-coded Cryptographic Key"
+        - "CWE-798: Use of Hard-coded Credentials"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+        - "A07:2021 - Identification and Authentication Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [jsonwebtoken, jose, passport-jwt, jwt, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+        - Hard-coded Credentials
+    pattern-sources:
+      # Bare literal reaching a JWT secret argument; narrow sinks keep it off other strings.
+      - pattern: '"..."'
+    pattern-sinks:
+      # jsonwebtoken sign/verify; $JWT name-constrained to jwt/jsonwebtoken.
+      - patterns:
+          - pattern-either:
+              - pattern: $JWT.sign($PAYLOAD, $SECRET, ...)
+              - pattern: $JWT.sign($PAYLOAD, $SECRET)
+              - pattern: $JWT.verify($TOKEN, $SECRET, ...)
+              - pattern: $JWT.verify($TOKEN, $SECRET)
+          - focus-metavariable: $SECRET
+          - metavariable-regex:
+              metavariable: $JWT
+              regex: (?i)^(jwt|jsonwebtoken|jsonWebToken)$
+      # jose: new SignJWT(payload)....sign(secretBytes), secret wrapped
+      # as a Uint8Array via TextEncoder/Buffer (jose's documented shape).
+      - patterns:
+          - pattern-either:
+              - pattern: $CHAIN.sign(new TextEncoder().encode($SECRET))
+              - pattern: $CHAIN.sign(Buffer.from($SECRET))
+          - focus-metavariable: $SECRET
+      # passport-jwt: new JwtStrategy({ secretOrKey: secret, ... }, cb).
+      - patterns:
+          - pattern: |
+              new JwtStrategy({..., secretOrKey: $SECRET, ...}, ...)
+          - focus-metavariable: $SECRET
+
+# JWT SESSION
+
+  - id: narvy.javascript.jwt.sign-alg-none.sign-alg-none
+    message: >-
+      A JWT is signed with algorithm 'none'. A 'none'-algorithm token has
+      no signature at all - anyone can craft a token with arbitrary
+      claims and it will pass verification on a server that also
+      accepts 'none' (CWE-347). Never use algorithm 'none'; sign with
+      HS256/RS256 and a properly managed secret or key pair.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-347: Improper Verification of Cryptographic Signature"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [jsonwebtoken, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Improper Authentication
+      references:
+        - https://cwe.mitre.org/data/definitions/347.html
+    patterns:
+      - pattern-either:
+          - pattern: 'jwt.sign($PAYLOAD, ..., {..., algorithm: "none", ...})'
+          - pattern: jwt.sign($PAYLOAD, null, ...)
+          - pattern: jwt.sign($PAYLOAD, "", ...)
+
+  - id: narvy.javascript.jwt.verify-missing-algorithms-allowlist.verify-missing-algorithms-allowlist
+    message: >-
+      jwt.verify is called without an `algorithms` allow-list in its
+      options. Without pinning the accepted algorithm(s), a library that
+      supports both symmetric (HS256) and asymmetric (RS256) signing can
+      be tricked into verifying an HS256 token that was HMAC-signed
+      using the server's own RSA public key as the secret - a well-known
+      JWT algorithm-confusion forgery (CWE-347). Always pass an explicit
+      `algorithms: ['HS256']` (or whichever single algorithm is
+      expected) to jwt.verify.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-347: Improper Verification of Cryptographic Signature"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [jsonwebtoken, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Improper Authentication
+    patterns:
+      - pattern-either:
+          - pattern: jwt.verify($TOKEN, $SECRET)
+          - pattern: jwt.verify($TOKEN, $SECRET, {...})
+      - pattern-not: 'jwt.verify($TOKEN, $SECRET, {..., algorithms: [...], ...})'
+
+  - id: narvy.javascript.session.cookie-secure-explicitly-disabled.cookie-secure-explicitly-disabled
+    message: >-
+      A session cookie is configured with `secure: false`. This allows
+      the session cookie to be sent over plain HTTP, exposing it to
+      network eavesdroppers who can then hijack the session (CWE-614).
+      Set `secure: true` (typically gated on NODE_ENV === 'production'
+      for local HTTP development) so the cookie is only ever sent over
+      HTTPS.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-614: Sensitive Cookie Without 'Secure' Attribute"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: MEDIUM
+      confidence: HIGH
+      vulnerability_class:
+        - Improper Authentication
+    patterns:
+      - pattern-either:
+          - pattern: |
+              session({..., cookie: {..., secure: false, ...}, ...})
+          - pattern: |
+              {..., cookie: {..., secure: false, ...}, ...}
+
+  # Rule 1b: cookie security options omitted, not just false; scoped to session() calls.
+  - id: narvy.javascript.session.cookie-security-options-omitted.cookie-security-options-omitted
+    message: >-
+      express-session is configured with the cookie security options
+      (secure / httpOnly / sameSite) either entirely absent from the
+      `cookie` block or the `cookie` block itself absent from the
+      session() config. Express defaults these to insecure values
+      (secure defaults off, sameSite defaults off), so silence here is
+      silently insecure-by-default, not a neutral choice (CWE-614 /
+      CWE-1004). Set an explicit `cookie: { secure: true, httpOnly:
+      true, sameSite: 'strict' }` block (gate `secure` on
+      NODE_ENV === 'production' for local HTTP dev).
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-614: Sensitive Cookie Without 'Secure' Attribute"
+        - "CWE-1004: Sensitive Cookie Without 'HttpOnly' Flag"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Improper Authentication
+    patterns:
+      - pattern: session($OPTS)
+      - pattern-either:
+          # secure never mentioned in the cookie block (block itself may
+          # be missing entirely - that also satisfies "not mentioned").
+          - patterns:
+              - pattern: session($OPTS)
+              - pattern-not: |
+                  session({..., cookie: {..., secure: $S, ...}, ...})
+          # httpOnly never mentioned.
+          - patterns:
+              - pattern: session($OPTS)
+              - pattern-not: |
+                  session({..., cookie: {..., httpOnly: $H, ...}, ...})
+          # sameSite never mentioned.
+          - patterns:
+              - pattern: session($OPTS)
+              - pattern-not: |
+                  session({..., cookie: {..., sameSite: $SS, ...}, ...})
+
+# MISC SECURITY
+
+  # Rule 1: prototype pollution via merge of request body
+  - id: narvy.javascript.misc.prototype-pollution-merge-reqbody.prototype-pollution-merge-reqbody
+    message: >-
+      Request-derived data (`req.body` / `req.query` / `req.params`) is
+      merged into an object via a deep-merge/extend helper or
+      `Object.assign`. If the merge implementation does not block
+      `__proto__` / `constructor.prototype` keys, an attacker can pollute
+      `Object.prototype` and change behavior application-wide (CWE-1321).
+      Use a merge library with prototype-pollution protection (lodash
+      >=4.17.21 with a key filter, or a schema-validated merge) and never
+      merge raw request bodies directly.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-1321: Improperly Controlled Modification of Object Prototype Attributes ('Prototype Pollution')"
+      owasp:
+        - "A08:2021 - Software and Data Integrity Failures"
+      category: security
+      subcategory: [audit]
+      technology: [javascript, typescript, express, node]
+      likelihood: LOW
+      impact: HIGH
+      confidence: LOW
+      vulnerability_class:
+        - Improper Input Validation
+    patterns:
+      - pattern-either:
+          - pattern: $_.merge($TARGET, $REQ.body)
+          - pattern: $_.merge($TARGET, $REQ.query)
+          - pattern: $_.extend($TARGET, $REQ.body)
+          - pattern: $_.extend(true, $TARGET, $REQ.body)
+          - pattern: Object.assign($TARGET, $REQ.body)
+          - pattern: merge($TARGET, $REQ.body)
+          - pattern: deepmerge($TARGET, $REQ.body)
+
+  # Rule 2: ReDoS - RegExp from unsanitized input; focus pins the PATTERN arg.
+  - id: narvy.javascript.misc.redos-dynamic-regexp.redos-dynamic-regexp
+    message: >-
+      A request-derived value (`req.body` / `req.query` / `req.params`)
+      flows into the pattern argument of `new RegExp()`. An attacker who
+      controls the pattern can supply a catastrophically-backtracking regex,
+      causing a denial of service when it is later evaluated (ReDoS,
+      CWE-1333). Validate/allow-list the pattern, cap its length, escape it
+      with a regex-escape helper, or run matching with a timeout / a
+      linear-time engine (e.g. re2).
+    severity: WARNING
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-1333: Inefficient Regular Expression Complexity"
+        - "CWE-400: Uncontrolled Resource Consumption"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [audit]
+      technology: [javascript, typescript]
+      likelihood: LOW
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Denial-of-Service (DoS)
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.body
+              - pattern: $REQ.query
+              - pattern: $REQ.params
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|_req|ctx|httpRequest|httpReq)$
+      - patterns:
+          - pattern: $REQ.$KIND.$X
+          - metavariable-regex:
+              metavariable: $KIND
+              regex: ^(body|params|query)$
+    pattern-sanitizers:
+      # Regex-escaping the value makes every metacharacter literal, which
+      # removes the attacker's ability to introduce backtracking.
+      - pattern: escapeRegExp(...)
+      - pattern: escapeRegex(...)
+      - pattern: escapeStringRegexp(...)
+      - pattern: $M.escapeRegExp(...)
+      - pattern: $M.escapeRegex(...)
+      - pattern: RegExp.escape(...)
+      - pattern: parseInt(...)
+      - pattern: Number(...)
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (<... $ALLOW.includes(...) ...>) { ... }
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$ALLOW.includes($V)) return ...;
+              ...
+    pattern-sinks:
+      # First argument only - see the conversion note above.
+      - patterns:
+          - pattern: new RegExp($SINK, ...)
+          - focus-metavariable: $SINK
+
+  # Rule 3: mass assignment via ORM create/update of raw request body
+  - id: narvy.javascript.misc.mass-assignment-orm-reqbody.mass-assignment-orm-reqbody
+    message: >-
+      An ORM `.create()` / `.update()` call is passed the raw request body
+      directly, with no field allow-list. If the model has
+      security-sensitive fields (e.g. `role`, `isAdmin`, `verified`,
+      `balance`), an attacker can set them by adding extra JSON keys to
+      the request (mass assignment, CWE-915). Explicitly whitelist
+      permitted fields before passing them to the ORM.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes"
+      owasp:
+        - "A08:2021 - Software and Data Integrity Failures"
+      category: security
+      subcategory: [audit]
+      technology: [javascript, typescript, mongoose, sequelize, express]
+      likelihood: MEDIUM
+      impact: MEDIUM
+      confidence: LOW
+      vulnerability_class:
+        - Improper Access Control
+    patterns:
+      - pattern-either:
+          - pattern: $MODEL.create($REQ.body)
+          - pattern: $MODEL.update($REQ.body, ...)
+          - pattern: $MODEL.findByIdAndUpdate($ID, $REQ.body, ...)
+          - pattern: $MODEL.findOneAndUpdate($COND, $REQ.body, ...)
+
+  # Rule 4: world-writable file permissions
+  - id: narvy.javascript.misc.insecure-file-permission.insecure-file-permission
+    message: >-
+      `fs.chmod` / `fs.chmodSync` sets world-writable (and often
+      world-readable) permissions (0o777 / 0o666 / 0777 / 0666). Any local
+      user or process can then modify or read this file, which is
+      dangerous for config files, key material, or scripts that get
+      executed later (CWE-732). Use the narrowest mode that works, e.g.
+      0o600 for secrets or 0o644 for regular files.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-732: Incorrect Permission Assignment for Critical Resource"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+      category: security
+      subcategory: [audit]
+      technology: [javascript, typescript, node]
+      likelihood: LOW
+      impact: MEDIUM
+      confidence: HIGH
+      vulnerability_class:
+        - Improper Access Control
+    patterns:
+      - pattern-either:
+          - pattern: fs.chmod($PATH, 0o777, ...)
+          - pattern: fs.chmod($PATH, 0777, ...)
+          - pattern: fs.chmod($PATH, 0o666, ...)
+          - pattern: fs.chmod($PATH, 0666, ...)
+          - pattern: fs.chmodSync($PATH, 0o777)
+          - pattern: fs.chmodSync($PATH, 0777)
+          - pattern: fs.chmodSync($PATH, 0o666)
+          - pattern: fs.chmodSync($PATH, 0666)
+          - pattern: fsPromises.chmod($PATH, 0o777)
+          - pattern: fsPromises.chmod($PATH, 0o666)
+
+# OPEN REDIRECT
+
+  # 1. Server-side: res.redirect with an unvalidated request value.
+  - id: narvy.javascript.openredirect.res-redirect-request-value.res-redirect-request-value
+    message: >-
+      res.redirect is called with a request-derived value used directly
+      as the redirect target, with no allow-list or same-origin check.
+      An attacker can craft a link that redirects victims to an
+      attacker-controlled domain, useful for phishing after a trusted
+      click (CWE-601). Validate that the target is a relative path or
+      matches an explicit allow-list of hosts before redirecting.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Open Redirect
+      references:
+        - https://cwe.mitre.org/data/definitions/601.html
+    patterns:
+      - pattern-either:
+          - pattern: $RES.redirect($REQ.$KIND.$X)
+          - pattern: $RES.redirect($CODE, $REQ.$KIND.$X)
+          - pattern: |
+              $V = $REQ.$KIND.$X
+              ...
+              $RES.redirect($V)
+          - pattern: |
+              $V = $REQ.$KIND.$X
+              ...
+              $RES.redirect($CODE, $V)
+      - metavariable-regex:
+          metavariable: $KIND
+          regex: ^(query|params|body)$
+      - pattern-not-inside: |
+          if (<... $ALLOWLIST.includes(...) ...>) { ... }
+      - pattern-not-inside: |
+          if (<... $V.startsWith("/") ...>) { ... }
+
+  # 2. Client-side: location assigned from a URL parameter (DOM open
+  #    redirect).
+  - id: narvy.javascript.openredirect.dom-location-from-url-param.dom-location-from-url-param
+    message: >-
+      window.location (or .href) is assigned a value read straight from
+      a URL query/hash parameter. A crafted link can point this at an
+      attacker-controlled domain, i.e. DOM-based open redirect
+      (CWE-601), and depending on how the value reaches the sink this
+      can also enable javascript: URI execution. Validate the target is
+      a relative, same-origin path before assigning it.
+    severity: WARNING
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript, dom]
+      likelihood: LOW
+      impact: MEDIUM
+      confidence: LOW
+      vulnerability_class:
+        - Open Redirect
+    pattern-sources:
+      - pattern: new URLSearchParams(location.search).get(...)
+      - pattern: new URLSearchParams(window.location.search).get(...)
+      - pattern: location.hash
+      - pattern: window.location.hash
+    pattern-sinks:
+      - pattern: window.location = $SINK
+      - pattern: window.location.href = $SINK
+      - pattern: location.href = $SINK
+      - pattern: window.location.assign($SINK)
+      - pattern: window.location.replace($SINK)
+
+# PATH TRAVERSAL
+
+  # 1. fs.* sink fed by a path built from request data.
+  - id: narvy.javascript.pathtraversal.fs-read-write-tainted-path.fs-read-write-tainted-path
+    message: >-
+      A filesystem call (readFile/writeFile/unlink/createReadStream) is
+      given a path built from request data (path.join with a req.*
+      segment, or direct string concatenation). Without validation an
+      attacker can supply `../../` sequences to read or write files
+      outside the intended directory (CWE-22). Resolve the path with
+      path.resolve, then verify it still starts with the intended base
+      directory before using it, or reject any segment containing `..`.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+      category: security
+      subcategory: [vuln]
+      technology: [nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Path Traversal
+      references:
+        - https://cwe.mitre.org/data/definitions/22.html
+    patterns:
+      - pattern-either:
+          - pattern: $FS.readFile(path.join($BASE, $REQ.$KIND.$X), ...)
+          - pattern: $FS.readFileSync(path.join($BASE, $REQ.$KIND.$X), ...)
+          - pattern: $FS.writeFile(path.join($BASE, $REQ.$KIND.$X), ...)
+          - pattern: $FS.writeFileSync(path.join($BASE, $REQ.$KIND.$X), ...)
+          - pattern: $FS.unlink(path.join($BASE, $REQ.$KIND.$X), ...)
+          - pattern: $FS.unlinkSync(path.join($BASE, $REQ.$KIND.$X))
+          - pattern: $FS.createReadStream(path.join($BASE, $REQ.$KIND.$X))
+          - pattern: $FS.readFile("$DIR" + $REQ.$KIND.$X, ...)
+          - pattern: $FS.readFileSync("$DIR" + $REQ.$KIND.$X)
+          - pattern: $FS.readFile(`$DIR${$REQ.$KIND.$X}`, ...)
+          - pattern: $FS.readFileSync(`$DIR${$REQ.$KIND.$X}`)
+      - metavariable-regex:
+          metavariable: $KIND
+          regex: ^(query|params|body|headers|cookies)$
+      - pattern-not-inside: |
+          if (<... $REQ.$KIND.$X.includes("..") ...>) { ... }
+      - pattern-not-inside: |
+          if (<... !$RESOLVED.startsWith($BASE2) ...>) { ... }
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+
+  # 2. res.sendFile with a path built from request data.
+  - id: narvy.javascript.pathtraversal.sendfile-tainted-path.sendfile-tainted-path
+    message: >-
+      res.sendFile is called with a path built from a request field via
+      path.join, with no visible containment check. An attacker can
+      submit `..` segments in the request field to read files outside
+      the served directory (CWE-22). Use `root` option combined with a
+      validated, normalized relative path, and reject values containing
+      `..`.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Path Traversal
+    patterns:
+      - pattern: $RES.sendFile(path.join($BASE, $REQ.$KIND.$X), ...)
+      - metavariable-regex:
+          metavariable: $KIND
+          regex: ^(query|params|body)$
+      - pattern-not-inside: |
+          if (<... $REQ.$KIND.$X.includes("..") ...>) { ... }
+
+# POSTMESSAGE
+
+  - id: narvy.javascript.postmessage.wildcard-target-origin.wildcard-target-origin
+    message: >-
+      postMessage is called with "*" as the target origin. The message
+      is delivered to whatever origin the target window currently has,
+      which an attacker can control by first navigating the window/frame
+      to their own page. If the message carries a token, session data,
+      or any sensitive value, this leaks it to an attacker-controlled
+      origin (CWE-346). Pass the exact expected origin instead of "*".
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-346: Origin Validation Error"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript, dom]
+      likelihood: LOW
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Other
+      references:
+        - https://cwe.mitre.org/data/definitions/346.html
+        - https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage#security_concerns
+    patterns:
+      - pattern-either:
+          - pattern: $TARGET.postMessage($DATA, "*")
+          - pattern: $TARGET.postMessage($DATA, '*')
+
+  - id: narvy.javascript.postmessage.handler-missing-origin-check.handler-missing-origin-check
+    message: >-
+      A "message" event handler is registered but never checks
+      event.origin. Any page that can obtain a reference to this window
+      (an iframe it embeds, a window it opened) can send it a message,
+      and without an origin check the handler will treat that message as
+      trusted (CWE-346). Validate event.origin against an exact expected
+      value before acting on event.data.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-346: Origin Validation Error"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript, dom]
+      likelihood: LOW
+      impact: MEDIUM
+      confidence: LOW
+      vulnerability_class:
+        - Other
+    patterns:
+      - pattern-either:
+          - pattern: |
+              window.addEventListener("message", function ($EVT) { ... })
+          - pattern: |
+              window.addEventListener("message", ($EVT) => { ... })
+          - pattern: |
+              addEventListener("message", function ($EVT) { ... })
+          - pattern: |
+              addEventListener("message", ($EVT) => { ... })
+      - pattern-not: |
+          window.addEventListener("message", function ($EVT) { <... $EVT.origin ...> })
+      - pattern-not: |
+          window.addEventListener("message", ($EVT) => { <... $EVT.origin ...> })
+      - pattern-not: |
+          addEventListener("message", function ($EVT) { <... $EVT.origin ...> })
+      - pattern-not: |
+          addEventListener("message", ($EVT) => { <... $EVT.origin ...> })
+
+# SQL CONCAT
+
+  # Rule 2a: string-concat user input into .query/.execute/.raw (taint); focus $SINK, SQL-looking regex, receiver-scoped.
+  - id: narvy.javascript.sqli.user-input-concat-query.user-input-concat-query
+    message: >-
+      User input from the request flows into a SQL string built by
+      CONCATENATION and passed to a query/execute/raw sink. Classic SQL
+      injection (CWE-89). Use a parameterized query: pass user input as the
+      2nd arg of .query(sql, [params]) or use a query builder / ORM with
+      bound parameters.
+    severity: ERROR
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+        - "A01:2017 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [pg, mysql, mysql2, sqlite3, knex, sequelize, typeorm, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Improper Validation
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://owasp.org/www-community/attacks/SQL_Injection
+    pattern-sources:
+      # Whole request container, so destructuring propagates taint.
+      # Receiver name constrained - see PRECISION GUARD 4 above.
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.body
+              - pattern: $REQ.query
+              - pattern: $REQ.params
+              - pattern: $REQ.headers
+              - pattern: $REQ.cookies
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|_req|ctx|httpRequest|httpReq)$
+      # Two-level access keeps the pre-taint rule's unconstrained receiver.
+      - patterns:
+          - pattern: $REQ.$KIND.$X
+          - metavariable-regex:
+              metavariable: $KIND
+              regex: ^(body|params|query|headers|cookies)$
+      # AWS Lambda proxy-integration handler event.
+      - patterns:
+          - pattern: $EVENT.$EKIND
+          - metavariable-regex:
+              metavariable: $EKIND
+              regex: ^(queryStringParameters|pathParameters|multiValueQueryStringParameters|multiValueHeaders)$
+      - pattern: JSON.parse($EVENT.body)
+      # Raw (unparsed) Lambda body. Receiver pinned to event-shaped names,
+      # because a bare `$X.body` also matches an OUTBOUND response body.
+      - patterns:
+          - pattern: $EVENT.body
+          - metavariable-regex:
+              metavariable: $EVENT
+              regex: ^(event|evt|_event|lambdaEvent|apiEvent)$
+    pattern-sanitizers:
+      # Numeric coercion makes SQL metacharacters unrepresentable.
+      - pattern: parseInt(...)
+      - pattern: parseFloat(...)
+      - pattern: Number(...)
+      - pattern: BigInt(...)
+      # Driver-provided escaping (mysql/mysql2 escape+escapeId, pg
+      # escapeLiteral/escapeIdentifier, SqlString.escape, knex .escape).
+      - pattern: escape(...)
+      - pattern: $M.escape(...)
+      - pattern: $M.escapeId(...)
+      - pattern: $M.escapeLiteral(...)
+      - pattern: $M.escapeIdentifier(...)
+      # Allow-list / validator guards (wrapping-if and negated early-return).
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (<... $ALLOW.includes(...) ...>) { ... }
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$ALLOW.includes($V)) { ... }
+              ...
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$ALLOW.includes($V)) return ...;
+              ...
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$RE.test($V)) { ... }
+              ...
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$RE.test($V)) return ...;
+              ...
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CONN.query($SINK, ...)
+              - pattern: $CONN.execute($SINK, ...)
+              - pattern: $CONN.raw($SINK, ...)
+          - focus-metavariable: $SINK
+          # Concatenation only; the template-literal shape is the sibling
+          # rule user-input-template-query.
+          - metavariable-pattern:
+              metavariable: $SINK
+              pattern: $A + $B
+          - metavariable-regex:
+              metavariable: $SINK
+              regex: '(?is).*\b(select|insert|update|delete|drop|alter|create|merge|truncate)\b.*'
+
+  # Rule 2b: template-literal user input into .query/.execute/.raw; tagged templates not matched.
+  - id: narvy.javascript.sqli.user-input-template-query.user-input-template-query
+    message: >-
+      User input from the request is interpolated into a template-literal
+      SQL string passed to a query/execute/raw sink. SQL injection (CWE-89).
+      Use parameterized queries with positional placeholders ($1, ?).
+    severity: ERROR
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [pg, mysql, mysql2, sqlite3, knex, sequelize, typeorm, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Improper Validation
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.body
+              - pattern: $REQ.query
+              - pattern: $REQ.params
+              - pattern: $REQ.headers
+              - pattern: $REQ.cookies
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|_req|ctx|httpRequest|httpReq)$
+      - patterns:
+          - pattern: $REQ.$KIND.$X
+          - metavariable-regex:
+              metavariable: $KIND
+              regex: ^(body|params|query|headers|cookies)$
+      - patterns:
+          - pattern: $EVENT.$EKIND
+          - metavariable-regex:
+              metavariable: $EKIND
+              regex: ^(queryStringParameters|pathParameters|multiValueQueryStringParameters|multiValueHeaders)$
+      - pattern: JSON.parse($EVENT.body)
+      # Raw (unparsed) Lambda body. Receiver pinned to event-shaped names,
+      # because a bare `$X.body` also matches an OUTBOUND response body.
+      - patterns:
+          - pattern: $EVENT.body
+          - metavariable-regex:
+              metavariable: $EVENT
+              regex: ^(event|evt|_event|lambdaEvent|apiEvent)$
+    pattern-sanitizers:
+      - pattern: parseInt(...)
+      - pattern: parseFloat(...)
+      - pattern: Number(...)
+      - pattern: BigInt(...)
+      - pattern: escape(...)
+      - pattern: $M.escape(...)
+      - pattern: $M.escapeId(...)
+      - pattern: $M.escapeLiteral(...)
+      - pattern: $M.escapeIdentifier(...)
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (<... $ALLOW.includes(...) ...>) { ... }
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$ALLOW.includes($V)) { ... }
+              ...
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$ALLOW.includes($V)) return ...;
+              ...
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$RE.test($V)) { ... }
+              ...
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$RE.test($V)) return ...;
+              ...
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CONN.query($SINK, ...)
+              - pattern: $CONN.execute($SINK, ...)
+              - pattern: $CONN.raw($SINK, ...)
+          - focus-metavariable: $SINK
+          # Template-literal shape and the SQL-looking check in one regex.
+          - metavariable-regex:
+              metavariable: $SINK
+              regex: '(?is)^`.*\b(select|insert|update|delete|drop|alter|create|merge|truncate)\b.*'
+
+  # Rule 2c: SQL built into a variable then passed to sink; syntactic, requires request data + a SQL keyword in one RHS.
+  - id: narvy.javascript.sqli.user-input-concat-query-var-indirect.user-input-concat-query-var-indirect
+    message: >-
+      A SQL string that concatenates / interpolates request data
+      (query/params/body/headers/cookies) is built into a variable and then
+      passed to a query/execute/raw sink. SQL injection (CWE-89), with one
+      level of variable indirection. Use a parameterized query: pass user
+      input as bound parameters, e.g. .query(sql, [params]).
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [pg, mysql, mysql2, sqlite3, knex, sequelize, typeorm, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Improper Validation
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+        - https://owasp.org/www-community/attacks/SQL_Injection
+    patterns:
+      - pattern-either:
+          # concatenation carrying request data + a SQL-keyword string
+          - patterns:
+              - pattern: |
+                  $Q = <... $REQ.$KIND.$X ...>
+                  ...
+                  $CONN.$M($Q, ...)
+              - pattern: |
+                  $Q = <... "$SQL" ...>
+                  ...
+                  $CONN.$M($Q, ...)
+              - metavariable-regex:
+                  metavariable: $SQL
+                  regex: '(?is).*\b(select|insert|update|delete|drop|alter|create|merge|truncate)\b.*'
+          # template literal carrying request data
+          - patterns:
+              - pattern: |
+                  $Q = <... $REQ.$KIND.$X ...>
+                  ...
+                  $CONN.$M($Q, ...)
+              - pattern: |
+                  $Q = `...${...}...`
+                  ...
+                  $CONN.$M($Q, ...)
+      - metavariable-regex:
+          metavariable: $KIND
+          regex: ^(query|params|body|headers|cookies)$
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: ^(req|request|_req|ctx|httpRequest|httpReq)$
+      - metavariable-regex:
+          metavariable: $M
+          regex: ^(query|execute|raw)$
+
+# SQLI ORM
+
+  - id: narvy.javascript.sqli.sequelize-literal-tainted.sequelize-literal-tainted
+    message: >-
+      sequelize.literal is called with a SQL fragment built from request
+      data. literal() inserts its argument into the query completely
+      unescaped - it exists specifically to bypass Sequelize's
+      parameterization, so request data reaching it is direct SQL
+      injection (CWE-89). Use a parameterized where-clause or bind
+      variables instead of sequelize.literal for anything derived from
+      user input.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [sequelize, nodejs, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - SQL Injection
+      references:
+        - https://cwe.mitre.org/data/definitions/89.html
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: sequelize.literal("$SQL" + $REQ.$KIND.$X + ...)
+                  - pattern: sequelize.literal(`...${$REQ.$KIND.$X}...`)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      sequelize.literal("$SQL" + $V + ...)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      sequelize.literal(`...${$V}...`)
+              - metavariable-regex:
+                  metavariable: $KIND
+                  regex: ^(query|params|body|headers|cookies)$
+          # AWS Lambda handler taint source (see user-input-concat-query for
+          # the nesting rationale).
+          - patterns:
+              - pattern-either:
+                  - pattern: sequelize.literal("$SQL" + $EVENT.$EKIND.$X + ...)
+                  - pattern: sequelize.literal(`...${$EVENT.$EKIND.$X}...`)
+                  - pattern: |
+                      $V = $EVENT.$EKIND.$X
+                      ...
+                      sequelize.literal("$SQL" + $V + ...)
+                  - pattern: |
+                      $V = $EVENT.$EKIND.$X
+                      ...
+                      sequelize.literal(`...${$V}...`)
+              - metavariable-regex:
+                  metavariable: $EKIND
+                  regex: ^(queryStringParameters|pathParameters|headers|multiValueQueryStringParameters|multiValueHeaders)$
+          - pattern: sequelize.literal("$SQL" + JSON.parse($EVENT.body).$X + ...)
+
+  - id: narvy.javascript.sqli.mongoose-where-tainted.mongoose-where-tainted
+    message: >-
+      A Mongoose query's `$where` clause is built from request data.
+      $where runs its string as server-side JavaScript against every
+      document in the collection, so request-controlled input here is
+      effectively server-side code injection through the database layer
+      (CWE-943 / CWE-94), not just NoSQL injection. Remove $where and
+      express the same condition with regular MongoDB query operators.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-943: Improper Neutralization of Special Elements in Data Query Logic"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [mongoose, mongodb, nodejs, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - SQL Injection
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      {..., $where: "$JS" + $REQ.$KIND.$X + ..., ...}
+                  - pattern: |
+                      {..., $where: `...${$REQ.$KIND.$X}...`, ...}
+              - metavariable-regex:
+                  metavariable: $KIND
+                  regex: ^(query|params|body|headers|cookies)$
+          # AWS Lambda handler taint source (see user-input-concat-query for
+          # the nesting rationale).
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      {..., $where: "$JS" + $EVENT.$EKIND.$X + ..., ...}
+                  - pattern: |
+                      {..., $where: `...${$EVENT.$EKIND.$X}...`, ...}
+              - metavariable-regex:
+                  metavariable: $EKIND
+                  regex: ^(queryStringParameters|pathParameters|headers|multiValueQueryStringParameters|multiValueHeaders)$
+
+# SSRF REQUEST
+
+  - id: narvy.javascript.ssrf.request-url-from-user.request-url-from-user
+    message: >-
+      A request-derived value flows into an outbound HTTP client (http/https
+      get/request, axios, fetch, got, node-fetch, request) as the target URL.
+      An attacker controlling this value can force the server to make requests
+      to internal services (cloud metadata, localhost admin ports), i.e.
+      Server-Side Request Forgery (CWE-918). Validate the URL against an
+      allow-list of hosts/schemes before the request.
+    severity: ERROR
+    languages:
+      - javascript
+      - typescript
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp:
+        - "A10:2021 - Server-Side Request Forgery (SSRF)"
+      category: security
+      confidence: MEDIUM
+      references:
+        - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+    pattern-sources:
+      - pattern: req.query.$Q
+      - pattern: req.params.$P
+      - pattern: req.body.$B
+      - pattern: req.headers.$H
+      - pattern: req.query
+      - pattern: req.params
+      - pattern: request.query.$Q
+      - pattern: request.params.$P
+      - pattern: $CTX.request.query.$Q
+    pattern-sanitizers:
+      # An allow-list / URL-validator guard (safeFetch wrappers, host/scheme
+      # validators) is the canonical SSRF mitigation and kills the taint.
+      - pattern: safeFetch(...)
+      - pattern: isAllowedUrl(...)
+      - pattern: isAllowedHost(...)
+      - pattern: isSafeUrl(...)
+      - pattern: validateUrl(...)
+      - pattern: validateHost(...)
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (<... $ALLOW.includes(...) ...>) { ... }
+    pattern-sinks:
+      # Every sink pins focus $SINK to the URL arg; $HTTP scoped to http/https.
+      - patterns:
+          - pattern: $HTTP.get($SINK, ...)
+          - focus-metavariable: $SINK
+          - metavariable-regex:
+              metavariable: $HTTP
+              regex: ^(http|https)$
+      - patterns:
+          - pattern: $HTTP.request($SINK, ...)
+          - focus-metavariable: $SINK
+          - metavariable-regex:
+              metavariable: $HTTP
+              regex: ^(http|https)$
+      - patterns:
+          - pattern: axios($SINK, ...)
+          - focus-metavariable: $SINK
+      - patterns:
+          - pattern: axios.get($SINK, ...)
+          - focus-metavariable: $SINK
+      - patterns:
+          - pattern: axios.request($SINK, ...)
+          - focus-metavariable: $SINK
+      - patterns:
+          - pattern: fetch($SINK, ...)
+          - focus-metavariable: $SINK
+      - patterns:
+          - pattern: got($SINK, ...)
+          - focus-metavariable: $SINK
+      - patterns:
+          - pattern: got.get($SINK, ...)
+          - focus-metavariable: $SINK
+      # Scope request($SINK, ...) to a request/needle/node-fetch client assigned to a local.
+      - patterns:
+          - pattern: $REQ($SINK, ...)
+          - focus-metavariable: $SINK
+          - metavariable-pattern:
+              metavariable: $REQ
+              patterns:
+                - pattern-either:
+                    - pattern: request
+                    - pattern: needle
+          - pattern-inside: |
+              $REQ = require("...");
+              ...
+      - patterns:
+          - pattern: needle($M, $SINK, ...)
+          - focus-metavariable: $SINK
+      # needle method-style helpers; identifier must be a local from require("needle").
+      - patterns:
+          - pattern: $NEEDLE.$METHOD($SINK, ...)
+          - focus-metavariable: $SINK
+          - metavariable-regex:
+              metavariable: $METHOD
+              regex: ^(get|post|put|patch|delete|head)$
+          - metavariable-pattern:
+              metavariable: $NEEDLE
+              patterns:
+                - pattern: needle
+          - pattern-inside: |
+              $NEEDLE = require("needle");
+              ...
+
+# SSTI
+
+  - id: narvy.javascript.ssti.template-engine-compiles-request-data.template-engine-compiles-request-data
+    message: >-
+      A request-derived value is passed as the TEMPLATE STRING to a
+      template engine's render/compile function (ejs, handlebars, pug,
+      lodash template, Mustache). These engines evaluate JS expressions
+      found inside the template source, so an attacker-controlled
+      template string means arbitrary server-side code execution
+      (CWE-1336 / effectively CWE-94). Never compile a template from
+      request data - only bind request data as template variables into a
+      fixed, trusted template.
+    severity: ERROR
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-1336: Improper Neutralization of Special Elements Used in a Template Engine"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [ejs, handlebars, pug, lodash, mustache, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Code Injection
+      references:
+        - https://cwe.mitre.org/data/definitions/1336.html
+        - https://portswigger.net/web-security/server-side-template-injection
+    pattern-sources:
+      - pattern: req.query.$Q
+      - pattern: req.params.$P
+      - pattern: req.body.$B
+    pattern-sinks:
+      - pattern: ejs.render($SINK, ...)
+      - pattern: ejs.compile($SINK, ...)
+      - pattern: handlebars.compile($SINK, ...)
+      - pattern: Handlebars.compile($SINK, ...)
+      - pattern: pug.render($SINK, ...)
+      - pattern: pug.compile($SINK, ...)
+      - pattern: _.template($SINK)
+      - pattern: Mustache.render($SINK, ...)
+
+  - id: narvy.javascript.ssti.res-render-view-name-from-request.res-render-view-name-from-request
+    message: >-
+      The view name passed to res.render is taken directly from a
+      request field. An attacker who controls the view name can render
+      views not meant to be reachable directly, and on engines/setups
+      that resolve the name to a filesystem path this can be combined
+      with path traversal to render arbitrary files as a template
+      (CWE-73). Restrict the view name to a fixed allow-list instead of
+      passing the request value through.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-73: External Control of File Name or Path"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, javascript, typescript]
+      likelihood: LOW
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Code Injection
+    patterns:
+      - pattern-either:
+          - pattern: $RES.render($REQ.$KIND.$X, ...)
+          - pattern: |
+              $V = $REQ.$KIND.$X
+              ...
+              $RES.render($V, ...)
+      - metavariable-regex:
+          metavariable: $KIND
+          regex: ^(query|params|body)$
+
+# WEAK CRYPTO CIPHER
+
+  # Rule 1: weak cipher algorithm / ECB mode
+  - id: narvy.javascript.crypto.weak-cipher-createcipheriv.weak-cipher-createcipheriv
+    message: >-
+      Weak or broken cipher algorithm passed to crypto.createCipheriv /
+      createCipher. DES and RC4 are cryptographically broken; ECB mode
+      leaks plaintext structure regardless of the underlying block cipher.
+      Use AES-256-GCM (authenticated encryption) instead. CWE-327.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+        - "CWE-329: Generation of Predictable IV with CBC Mode"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-crypto, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createCipheriv("$ALGO", ...)
+          - pattern: crypto.createCipheriv('$ALGO', ...)
+          - pattern: crypto.createCipher("$ALGO", ...)
+          - pattern: crypto.createCipher('$ALGO', ...)
+          - pattern: $CRYPTO.createCipheriv("$ALGO", ...)
+          - pattern: $CRYPTO.createCipheriv('$ALGO', ...)
+      - metavariable-regex:
+          metavariable: $ALGO
+          regex: ^(?i).*(des|rc4|arcfour|-ecb|^ecb).*$
+
+  # Rule 1b: GCM decipher never finalized; without .final() tampered ciphertext decrypts.
+  - id: narvy.javascript.crypto.gcm-decrypt-missing-final.gcm-decrypt-missing-final
+    message: >-
+      A GCM-mode decipher is created and fed ciphertext via .update(), but
+      .final() is never called on it. In Node's crypto module the GCM
+      authentication tag is only checked when .final() runs - it throws if
+      the tag doesn't match the ciphertext. Skipping .final() means
+      tampered ciphertext is silently accepted as if it were genuine
+      (CWE-354). Always call .final() on a GCM decipher and let it throw.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-354: Improper Validation of Integrity Check Value"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-crypto, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern: $CRYPTO.createDecipheriv("$ALGO", ...)
+      - metavariable-regex:
+          metavariable: $ALGO
+          regex: (?i).*gcm.*
+      - pattern-not-inside: |
+          $DECIPHER = $CRYPTO.createDecipheriv("$ALGO", ...)
+          ...
+          $DECIPHER.final(...)
+
+  # Rule 1c: deprecated createCipher/createDecipher derives a static IV from the key.
+  - id: narvy.javascript.crypto.deprecated-cipher-static-iv.deprecated-cipher-static-iv
+    message: >-
+      crypto.createCipher()/createDecipher() is deprecated and derives the
+      IV internally from the key material via an undocumented KDF instead
+      of accepting an explicit, random IV. The same key therefore always
+      produces the same derived IV, so encrypting the same plaintext twice
+      with the same key yields the same ciphertext, and CBC-mode chosen-
+      plaintext attacks become possible (CWE-329). Use createCipheriv() /
+      createDecipheriv() with a fresh, cryptographically random IV per
+      encryption instead.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-329: Generation of Predictable IV with CBC Mode"
+        - "CWE-330: Use of Insufficiently Random Values"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-crypto, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createCipher($ALGO, ...)
+          - pattern: crypto.createDecipher($ALGO, ...)
+          - pattern: $CRYPTO.createCipher($ALGO, ...)
+          - pattern: $CRYPTO.createDecipher($ALGO, ...)
+
+  # Rule 1d: GCM auth tag from request data used without a length check.
+  - id: narvy.javascript.crypto.gcm-tag-unvalidated-length.gcm-tag-unvalidated-length
+    message: >-
+      A GCM auth tag taken directly from request data is passed to
+      setAuthTag() with no length check beforehand. GCM's forgery
+      resistance depends on the full-length tag (16 bytes); an
+      attacker-supplied truncated tag has a much higher chance of
+      passing verification by luck, and some deployments accept
+      whatever length is given (CWE-327). Reject the request unless the
+      tag is exactly the expected length (normally 16 bytes) before
+      calling setAuthTag().
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-crypto, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: $DECIPHER.setAuthTag(Buffer.from($REQ.$KIND.$X, ...))
+          - pattern: $DECIPHER.setAuthTag($REQ.$KIND.$X)
+      - metavariable-regex:
+          metavariable: $KIND
+          regex: ^(query|params|body|headers|cookies)$
+      - pattern-not-inside: |
+          if (<... $LEN.length ...>) { ... }
+
+  # Rule 2: Math.random() feeding a token / secret / password variable
+  - id: narvy.javascript.crypto.math-random-security-token.math-random-security-token
+    message: >-
+      `Math.random()` is assigned to a variable whose name indicates
+      security-sensitive use (token, secret, password, otp, session, nonce,
+      apikey, csrf). Math.random() is not cryptographically secure - its
+      output is predictable from a handful of samples. Use
+      `crypto.randomBytes()` / `crypto.randomUUID()` for anything
+      security-relevant. CWE-338.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-338: Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)"
+        - "CWE-330: Use of Insufficiently Random Values"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [audit]
+      technology: [javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Insufficient Entropy
+    patterns:
+      - pattern-either:
+          - pattern: const $TOKEN = Math.random()
+          - pattern: let $TOKEN = Math.random()
+          - pattern: var $TOKEN = Math.random()
+          - pattern: $TOKEN = Math.random()
+      - metavariable-regex:
+          metavariable: $TOKEN
+          regex: (?i)(token|secret|password|passwd|pwd|otp|session|nonce|apikey|api_key|csrf|auth)
+
+  # Rule 3: undersized RSA key generation
+  - id: narvy.javascript.crypto.weak-rsa-keysize.weak-rsa-keysize
+    message: >-
+      RSA key pair generated with `modulusLength` below 2048 bits. Keys
+      under 2048 bits are considered breakable with modern compute and are
+      rejected by NIST guidance for new key generation. Use at least 2048
+      (prefer 3072/4096) for RSA, or switch to an elliptic-curve algorithm.
+      CWE-326.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-326: Inadequate Encryption Strength"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [audit]
+      technology: [node-crypto, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: 'crypto.generateKeyPair("rsa", { modulusLength: $N, ... }, ...)'
+          - pattern: 'crypto.generateKeyPairSync("rsa", { modulusLength: $N, ... }, ...)'
+      - metavariable-comparison:
+          metavariable: $N
+          comparison: $N < 2048
+
+# WEAK CRYPTO
+
+  # Rule 1a: Node crypto.createHash('md5' | 'sha1')
+  - id: narvy.javascript.crypto.weak-hash-create-hash.weak-hash-create-hash
+    message: >-
+      Weak hash MD5/SHA1 used via crypto.createHash. Both algorithms are
+      cryptographically broken (MD5 collision, SHA1 collision). Use SHA-256
+      or stronger for integrity. For password hashing use scrypt, Argon2,
+      or PBKDF2 with high iteration count. CWE-327.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+        - "A03:2017 - Sensitive Data Exposure"
+      category: security
+      subcategory: [vuln]
+      technology: [node-crypto, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+      references:
+        - https://cwe.mitre.org/data/definitions/327.html
+        - https://tools.ietf.org/html/rfc6151
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createHash("$ALGO")
+          - pattern: crypto.createHash('$ALGO')
+          - pattern: $CRYPTO.createHash("$ALGO")
+          - pattern: $CRYPTO.createHash('$ALGO')
+      - metavariable-regex:
+          metavariable: $ALGO
+          regex: ^(?i)(md5|md4|md2|sha-?1)$
+
+  # Rule 1b: crypto-js MD5 / SHA1 module method
+  - id: narvy.javascript.crypto.weak-hash-crypto-js.weak-hash-crypto-js
+    message: >-
+      Weak hash MD5/SHA1 used via crypto-js. Both algorithms are
+      cryptographically broken. Use crypto-js SHA-256 / SHA-512 or
+      stronger. CWE-327.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [crypto-js, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: $CRYPTOJS.MD5(...)
+          - pattern: $CRYPTOJS.SHA1(...)
+          - pattern: $CRYPTOJS.HmacMD5(...)
+          - pattern: $CRYPTOJS.HmacSHA1(...)
+
+  # Rule 1c: node-forge md5 / sha1
+  - id: narvy.javascript.crypto.weak-hash-forge.weak-hash-forge
+    message: >-
+      Weak hash MD5/SHA1 used via node-forge. Both algorithms are
+      cryptographically broken. Use forge.md.sha256.create() or stronger.
+      CWE-327.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-forge, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: $FORGE.md.md5.create()
+          - pattern: $FORGE.md.sha1.create()
+          - pattern: forge.md.md5.create()
+          - pattern: forge.md.sha1.create()
+
+  # Rule 1d: Web Crypto subtle.digest with SHA-1
+  - id: narvy.javascript.crypto.weak-hash-web-crypto.weak-hash-web-crypto
+    message: >-
+      Weak hash SHA-1 used via Web Crypto API (crypto.subtle.digest).
+      SHA-1 is collision-broken. Use 'SHA-256' or 'SHA-512' instead.
+      CWE-327.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [web-crypto, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: $SUBTLE.digest("$ALGO", ...)
+          - pattern: $SUBTLE.digest('$ALGO', ...)
+      - metavariable-regex:
+          metavariable: $ALGO
+          regex: ^(?i)(sha-?1|md5)$
+
+# WEAK TLS
+
+  - id: narvy.javascript.tls.reject-unauthorized-disabled.reject-unauthorized-disabled
+    message: >-
+      TLS certificate validation is disabled via `rejectUnauthorized:
+      false`. This accepts ANY certificate, including a self-signed one
+      presented by an attacker performing a man-in-the-middle attack,
+      defeating the entire purpose of TLS (CWE-295). Remove this option;
+      if a private/internal CA is in use, add its certificate to the
+      trust store (the `ca` option) instead of disabling verification.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-295: Improper Certificate Validation"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+      references:
+        - https://cwe.mitre.org/data/definitions/295.html
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.js"
+        - "**/*.test.ts"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              {..., rejectUnauthorized: false, ...}
+          - pattern: 'new https.Agent({..., rejectUnauthorized: false, ...})'
+          - pattern: 'new tls.TLSSocket(..., {..., rejectUnauthorized: false, ...})'
+
+  - id: narvy.javascript.tls.node-tls-reject-unauthorized-env-disabled.node-tls-reject-unauthorized-env-disabled
+    message: >-
+      NODE_TLS_REJECT_UNAUTHORIZED is set to '0' at runtime. This
+      disables certificate validation for EVERY TLS connection made by
+      the Node process for as long as this remains set, not just one
+      request (CWE-295). Remove this and fix the underlying certificate
+      problem (add the CA to the trust store, or fix the hostname/cert
+      mismatch) instead of disabling verification process-wide.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-295: Improper Certificate Validation"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+          - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+          - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = 0
+
+  - id: narvy.javascript.tls.min-version-pinned-obsolete.min-version-pinned-obsolete
+    message: >-
+      TLS minVersion (or secureProtocol) is pinned to an obsolete
+      protocol (SSLv3 or TLSv1/TLSv1.0/TLSv1.1). These protocol versions
+      have known cryptographic weaknesses (POODLE, BEAST) and are
+      disallowed by modern compliance baselines (CWE-327). Set minVersion
+      to 'TLSv1.2' or 'TLSv1.3'.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      owasp:
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [nodejs, javascript, typescript]
+      likelihood: LOW
+      impact: MEDIUM
+      confidence: HIGH
+      vulnerability_class:
+        - Cryptographic Issues
+    patterns:
+      - pattern-either:
+          - pattern: |
+              {..., minVersion: "$V", ...}
+          - pattern: |
+              {..., secureProtocol: "$V", ...}
+      - metavariable-regex:
+          metavariable: $V
+          regex: (?i)^(SSLv2|SSLv3|SSLv23_method|TLSv1|TLSv1_method|TLSv1\.0|TLSv1\.1|TLSv1_1_method)$
+
+# XSS DOM
+
+  # Rule 1: innerHTML / outerHTML assignment
+  - id: narvy.javascript.xss.dom-innerhtml-assign.dom-innerhtml-assign
+    message: >-
+      Assignment to `.innerHTML` / `.outerHTML` with a non-literal value.
+      The browser parses this value as HTML, so if it contains
+      attacker-controlled data this is DOM-based XSS (CWE-79). Use
+      `.textContent` for plain text, or sanitize with DOMPurify before
+      assigning.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript, dom]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = $X
+          - pattern: $EL.outerHTML = $X
+      - pattern-not: $EL.innerHTML = "..."
+      - pattern-not: $EL.outerHTML = "..."
+      - pattern-not: $EL.innerHTML = `...`
+      - pattern-not: $EL.outerHTML = `...`
+      - pattern-not: $EL.innerHTML = ""
+      - pattern-not: $EL.innerHTML = $SANITIZER.sanitize(...)
+      - pattern-not: $EL.outerHTML = $SANITIZER.sanitize(...)
+      # Exclude sanitizer-named calls and SCREAMING_SNAKE_CASE markup constants (naming heuristic, RE2-safe).
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $EL.innerHTML = $SAN(...)
+                - pattern: $EL.outerHTML = $SAN(...)
+                - pattern: $EL.innerHTML = await $SAN(...)
+                - pattern: $EL.outerHTML = await $SAN(...)
+            - metavariable-regex:
+                metavariable: $SAN
+                regex: (?i).*(saniti[sz]|purif|dompurify|xss[_-]?clean|clean[_-]?html|html[_-]?clean|escape[_-]?html|html[_-]?escape|encode[_-]?html|html[_-]?encode|safe[_-]?html|html[_-]?safe).*
+      # -- sanitizer-named method call (optionally awaited).
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $EL.innerHTML = $O.$SAN(...)
+                - pattern: $EL.outerHTML = $O.$SAN(...)
+                - pattern: $EL.innerHTML = await $O.$SAN(...)
+                - pattern: $EL.outerHTML = await $O.$SAN(...)
+            - metavariable-regex:
+                metavariable: $SAN
+                regex: (?i).*(saniti[sz]|purif|xss[_-]?clean|clean[_-]?html|html[_-]?clean|escape[_-]?html|html[_-]?escape|encode[_-]?html|html[_-]?encode|safe[_-]?html|html[_-]?safe).*
+      # -- module CONSTANT of static markup (SCREAMING_SNAKE_CASE identifier).
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $EL.innerHTML = $CONST
+                - pattern: $EL.outerHTML = $CONST
+            - metavariable-regex:
+                metavariable: $CONST
+                regex: ^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$
+      # Exclude static icon/SVG constants and no-input builders (icon/SVG naming) so real data flow still fires.
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $EL.innerHTML = $ICONS.$ICO
+                - pattern: $EL.outerHTML = $ICONS.$ICO
+            - metavariable-regex:
+                metavariable: $ICONS
+                regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
+      # Static icon constant concatenated with a string literal:
+      # `tag.innerHTML = IC.crown + ' Owner'` (either operand order).
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $EL.innerHTML = $ICONS.$ICO + "..."
+                - pattern: $EL.innerHTML = "..." + $ICONS.$ICO
+                - pattern: $EL.outerHTML = $ICONS.$ICO + "..."
+                - pattern: $EL.outerHTML = "..." + $ICONS.$ICO
+            - metavariable-regex:
+                metavariable: $ICONS
+                regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
+      # Ternary between two icon constants of the SAME registry object:
+      # `btn.innerHTML = muted ? IC.micOff : IC.mic`.
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: "$EL.innerHTML = $C ? $ICONS.$A : $ICONS.$B"
+                - pattern: "$EL.outerHTML = $C ? $ICONS.$A : $ICONS.$B"
+            - metavariable-regex:
+                metavariable: $ICONS
+                regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
+      # No-input static icon/SVG builder call, gated on the method name.
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $EL.innerHTML = $O.$M(...)
+                - pattern: $EL.outerHTML = $O.$M(...)
+                - pattern: $EL.innerHTML = $M(...)
+                - pattern: $EL.outerHTML = $M(...)
+            - metavariable-regex:
+                metavariable: $M
+                regex: (?i).*(icon|svg|glyph|chevron|arrow|caret|spinner).*
+
+  # Rule 2: insertAdjacentHTML
+  - id: narvy.javascript.xss.insert-adjacent-html.insert-adjacent-html
+    message: >-
+      `insertAdjacentHTML()` with a non-literal HTML fragment. Like
+      `innerHTML`, this parses the string as HTML markup. If the fragment
+      contains attacker-controlled data this is DOM-based XSS (CWE-79).
+      Sanitize with DOMPurify first, or build the DOM with `createElement`
+      / `textContent` instead.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript, dom]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern: $EL.insertAdjacentHTML($POS, $X)
+      - pattern-not: $EL.insertAdjacentHTML($POS, "...")
+      - pattern-not: $EL.insertAdjacentHTML($POS, `...`)
+      - pattern-not: $EL.insertAdjacentHTML($POS, $SANITIZER.sanitize(...))
+
+  # Rule 3: document.write / document.writeln
+  - id: narvy.javascript.xss.document-write.document-write
+    message: >-
+      `document.write()` / `document.writeln()` with a non-literal argument.
+      The string is parsed and injected directly into the page HTML stream.
+      If it contains attacker-controlled data this is DOM-based XSS
+      (CWE-79). Avoid `document.write`; use DOM APIs with `.textContent`,
+      or sanitize the content first.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript, dom]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern-either:
+          - pattern: document.write($X)
+          - pattern: document.writeln($X)
+      - pattern-not: document.write("...")
+      - pattern-not: document.writeln("...")
+      - pattern-not: document.write(`...`)
+      - pattern-not: document.writeln(`...`)
+
+  # Rule 4: jQuery .html()
+  - id: narvy.javascript.xss.jquery-html.jquery-html
+    message: >-
+      jQuery `.html()` called with a non-literal argument. Unlike `.text()`,
+      `.html()` parses its argument as markup. If the value is
+      attacker-controlled this is DOM-based XSS (CWE-79). Use `.text()` for
+      plain text, or sanitize with DOMPurify before passing to `.html()`.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript, jquery]
+      likelihood: MEDIUM
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern-either:
+          - pattern: $(...).html($X)
+          - pattern: $EL.html($X)
+      - pattern-not: $(...).html("...")
+      - pattern-not: $EL.html("...")
+      - pattern-not: $(...).html()
+      - pattern-not: $EL.html()
+      - pattern-not: $EL.html($SANITIZER.sanitize(...))
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-not: "..."
+
+  # Rule 5: React dangerouslySetInnerHTML without a recognized sanitizer
+  - id: narvy.javascript.xss.react-dangerously-set-innerhtml.react-dangerously-set-innerhtml
+    message: >-
+      `dangerouslySetInnerHTML` is set to a value that does not come from a
+      recognized sanitizer call (DOMPurify.sanitize / sanitizeHtml). React
+      does not escape this value; it is injected as raw HTML. If it
+      contains attacker-controlled data this is stored/reflected XSS
+      (CWE-79). Wrap the value with `DOMPurify.sanitize(...)` before use.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript, react]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern: '<$EL dangerouslySetInnerHTML={{__html: $X}} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{__html: "..."}} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{__html: DOMPurify.sanitize(...)}} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{__html: $ANY.sanitize(...)}} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{__html: sanitizeHtml(...)}} />'
+
+# XSS
+
+  # Reflected request value written into an HTML response (taint); focus $SINK, HTML-context regex; res.json/res.render excluded.
+  - id: narvy.javascript.xss.reflected-request-value-in-html-response.reflected-request-value-in-html-response
+    message: >-
+      A request value (query/params/body/headers/cookies) reaches an HTML
+      string passed to res.send/res.write/res.end with no escaping. Reflected
+      Cross-Site Scripting (CWE-79). Escape the value for HTML context (a
+      templating engine's auto-escaping, or a helper like `escape-html`)
+      before writing it into the response body.
+    severity: ERROR
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.body
+              - pattern: $REQ.query
+              - pattern: $REQ.params
+              - pattern: $REQ.cookies
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|_req|ctx|httpRequest|httpReq)$
+      - patterns:
+          - pattern: $REQ.$KIND.$X
+          - metavariable-regex:
+              metavariable: $KIND
+              regex: ^(body|params|query|headers|cookies)$
+    pattern-sanitizers:
+      - pattern: escapeHtml(...)
+      - pattern: escapeHTML(...)
+      - pattern: escape(...)
+      - pattern: $M.escapeHtml(...)
+      - pattern: $M.escapeHTML(...)
+      - pattern: $M.escape(...)
+      - pattern: sanitizeHtml(...)
+      - pattern: $M.sanitize(...)
+      - pattern: $M.sanitizeHtml(...)
+      - pattern: encodeURIComponent(...)
+      - pattern: encodeURI(...)
+      - pattern: parseInt(...)
+      - pattern: Number(...)
+      # JSON.stringify output is used for embedding data, not raw markup.
+      - pattern: JSON.stringify(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $RES.send($SINK, ...)
+              - pattern: $RES.write($SINK, ...)
+              - pattern: $RES.end($SINK, ...)
+          - focus-metavariable: $SINK
+          - metavariable-regex:
+              metavariable: $SINK
+              regex: '(?s).*<\s*[a-zA-Z!/].*'
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.js"
+        - "**/*.test.ts"
+
+  # Rule 6b: reflected value built into a variable then written to response; requires request value + HTML markup in one RHS.
+  - id: narvy.javascript.xss.reflected-request-value-in-html-response-var-indirect.reflected-request-value-in-html-response-var-indirect
+    message: >-
+      A request value (query/params/body/headers/cookies) is concatenated /
+      interpolated into an HTML string held in a variable and then written
+      to the response via res.send/res.write/res.end. Reflected Cross-Site
+      Scripting (CWE-79), with one level of variable indirection. Escape the
+      value for the HTML context before writing it into the response.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [express, nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+      references:
+        - https://cwe.mitre.org/data/definitions/79.html
+    patterns:
+      - pattern-either:
+          # concatenation carrying request data + an HTML-markup string
+          - patterns:
+              - pattern: |
+                  $H = <... $REQ.$KIND.$X ...>
+                  ...
+                  $RES.$M($H, ...)
+              - pattern: |
+                  $H = <... "$MARKUP" ...>
+                  ...
+                  $RES.$M($H, ...)
+              - metavariable-regex:
+                  metavariable: $MARKUP
+                  regex: '(?s).*<\s*[a-zA-Z!/].*'
+          # template literal carrying request data, markup in its text
+          - patterns:
+              - pattern: |
+                  $H = `...${$REQ.$KIND.$X}...`
+                  ...
+                  $RES.$M($H, ...)
+              - pattern: |
+                  $H = $TMPL
+                  ...
+                  $RES.$M($H, ...)
+              - metavariable-regex:
+                  metavariable: $TMPL
+                  regex: '(?s).*<\s*[a-zA-Z!/].*'
+      - metavariable-regex:
+          metavariable: $KIND
+          regex: ^(body|params|query|headers|cookies)$
+      - metavariable-regex:
+          metavariable: $REQ
+          regex: ^(req|request|_req|ctx|httpRequest|httpReq)$
+      - metavariable-regex:
+          metavariable: $M
+          regex: ^(send|write|end)$
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.js"
+        - "**/*.test.ts"
+
+  # Rule 7: Angular DomSanitizer.
+  # bypassSecurityTrust*() with a non-literal argument.
+  - id: narvy.javascript.xss.angular-bypass-security-trust.angular-bypass-security-trust
+    message: >-
+      Angular's DomSanitizer.bypassSecurityTrust*() is called with a
+      non-literal value. These methods exist specifically to turn OFF
+      Angular's built-in sanitization for the value they wrap - marking
+      attacker-influenced data as "trusted" reintroduces DOM-based XSS
+      that Angular would otherwise have blocked (CWE-79). Sanitize the
+      value yourself first (or better, avoid needing to bypass
+      sanitization at all) before wrapping it.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [angular, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern-either:
+          - pattern: $SANITIZER.bypassSecurityTrustHtml($X)
+          - pattern: $SANITIZER.bypassSecurityTrustUrl($X)
+          - pattern: $SANITIZER.bypassSecurityTrustResourceUrl($X)
+          - pattern: $SANITIZER.bypassSecurityTrustScript($X)
+          - pattern: $SANITIZER.bypassSecurityTrustStyle($X)
+      - pattern-not: $SANITIZER.bypassSecurityTrustHtml("...")
+      - pattern-not: $SANITIZER.bypassSecurityTrustUrl("...")
+      - pattern-not: $SANITIZER.bypassSecurityTrustResourceUrl("...")
+      - pattern-not: $SANITIZER.bypassSecurityTrustScript("...")
+      - pattern-not: $SANITIZER.bypassSecurityTrustStyle("...")
+      - pattern-not: $SANITIZER.bypassSecurityTrustHtml(`...`)
+      - pattern-not: $SANITIZER.bypassSecurityTrustUrl(`...`)
+      - pattern-not: $SANITIZER.bypassSecurityTrustResourceUrl(`...`)
+      - pattern-not: $SANITIZER.bypassSecurityTrustScript(`...`)
+      - pattern-not: $SANITIZER.bypassSecurityTrustStyle(`...`)
+
+# XXE
+
+  - id: narvy.javascript.xxe.libxmljs-noent-enabled.libxmljs-noent-enabled
+    message: >-
+      libxmljs is called with `noent: true`, which turns on external
+      entity substitution while parsing XML. If the XML document being
+      parsed can be influenced by an attacker, this allows XML External
+      Entity injection (CWE-611): reading local files via a crafted
+      `<!ENTITY>` declaration, or triggering out-of-band requests from
+      the server. Remove `noent: true` unless entity substitution is
+      required, and if it is, first strip any `<!DOCTYPE` declaration
+      from untrusted input before parsing.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-611: Improper Restriction of XML External Entity Reference"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+        - "A04:2017 - XML External Entities (XXE)"
+      category: security
+      subcategory: [vuln]
+      technology: [libxmljs, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - XML Injection
+      references:
+        - https://cwe.mitre.org/data/definitions/611.html
+        - https://owasp.org/www-community/vulnerabilities/XML_External_Entity_(XXE)_Processing
+    patterns:
+      - pattern-either:
+          - pattern: '$LIBXML.parseXml($DATA, {..., noent: true, ...})'
+          - pattern: '$LIBXML.parseXmlString($DATA, {..., noent: true, ...})'
+
+  - id: narvy.javascript.xxe.libxmljs-dtd-load-enabled.libxmljs-dtd-load-enabled
+    message: >-
+      libxmljs is called with `dtdload: true` or `dtdvalid: true`, which
+      allows the parser to fetch an external DTD referenced in the
+      document. If the XML being parsed is attacker-controlled this
+      enables blind/out-of-band XXE (CWE-611): the server will make a
+      network or file request to a URL the attacker put in the DOCTYPE.
+      Remove dtdload/dtdvalid for untrusted input, or restrict outbound
+      network access from the parsing process.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-611: Improper Restriction of XML External Entity Reference"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [vuln]
+      technology: [libxmljs, javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - XML Injection
+    patterns:
+      - pattern-either:
+          - pattern: '$LIBXML.parseXml($DATA, {..., dtdload: true, ...})'
+          - pattern: '$LIBXML.parseXmlString($DATA, {..., dtdload: true, ...})'
+          - pattern: '$LIBXML.parseXml($DATA, {..., dtdvalid: true, ...})'
+          - pattern: '$LIBXML.parseXmlString($DATA, {..., dtdvalid: true, ...})'
+
+# COMMAND INJECTION
+
+  # 1. exec / execSync with request data concatenated into the command.
+  - id: narvy.javascript.cmdi.child-process-exec-concat.child-process-exec-concat
+    message: >-
+      A request-derived value is concatenated into the command string
+      passed to child_process.exec/execSync. exec runs the string through
+      a shell, so shell metacharacters in the request (`;`, `|`, `&&`,
+      backticks) let an attacker run arbitrary OS commands (CWE-78). Use
+      execFile/execFileSync with an argument array instead of a shell
+      string, or strictly allow-list the input.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [nodejs, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Command Injection
+      references:
+        - https://cwe.mitre.org/data/definitions/78.html
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: $CP.exec("$CMD" + $REQ.$KIND.$X + ..., ...)
+                  - pattern: $CP.exec(`...${$REQ.$KIND.$X}...`, ...)
+                  - pattern: $CP.execSync("$CMD" + $REQ.$KIND.$X + ...)
+                  - pattern: $CP.execSync(`...${$REQ.$KIND.$X}...`)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      $CP.exec("$CMD" + $V + ..., ...)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      $CP.exec(`...${$V}...`, ...)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      $CP.execSync("$CMD" + $V + ...)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      $CP.execSync(`...${$V}...`)
+                  # Destructured `const { exec } = require('child_process')` then bare exec(), gated on the taint shape.
+                  - pattern: exec("$CMD" + $REQ.$KIND.$X, ...)
+                  - pattern: exec("$CMD" + $REQ.$KIND.$X + ..., ...)
+                  - pattern: exec(`...${$REQ.$KIND.$X}...`, ...)
+                  # Taint last with nothing after it; covers receiver, destructured execSync, one level of indirection.
+                  - pattern: $CP.exec("$CMD" + $REQ.$KIND.$X, ...)
+                  - pattern: $CP.execSync("$CMD" + $REQ.$KIND.$X)
+                  - pattern: execSync("$CMD" + $REQ.$KIND.$X)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      $CP.exec("$CMD" + $V, ...)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      $CP.execSync("$CMD" + $V)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      exec("$CMD" + $V, ...)
+                  - pattern: |
+                      $V = $REQ.$KIND.$X
+                      ...
+                      execSync("$CMD" + $V)
+              - metavariable-regex:
+                  metavariable: $KIND
+                  regex: ^(query|params|body|headers|cookies)$
+          # AWS Lambda taint source: event.queryStringParameters/.pathParameters/.headers into the command string.
+          - patterns:
+              - pattern-either:
+                  - pattern: $CP.exec("$CMD" + $EVENT.$EKIND.$X + ..., ...)
+                  - pattern: $CP.exec(`...${$EVENT.$EKIND.$X}...`, ...)
+                  - pattern: $CP.execSync("$CMD" + $EVENT.$EKIND.$X + ...)
+                  - pattern: $CP.execSync(`...${$EVENT.$EKIND.$X}...`)
+                  - pattern: |
+                      $V = $EVENT.$EKIND.$X
+                      ...
+                      $CP.exec("$CMD" + $V + ..., ...)
+                  - pattern: |
+                      $V = $EVENT.$EKIND.$X
+                      ...
+                      $CP.execSync("$CMD" + $V + ...)
+                  - pattern: exec("$CMD" + $EVENT.$EKIND.$X, ...)
+                  - pattern: exec("$CMD" + $EVENT.$EKIND.$X + ..., ...)
+                  - pattern: exec(`...${$EVENT.$EKIND.$X}...`, ...)
+              - metavariable-regex:
+                  metavariable: $EKIND
+                  regex: ^(queryStringParameters|pathParameters|headers|multiValueQueryStringParameters|multiValueHeaders)$
+          # event.body is flat, own branch with no $EKIND regex.
+          - pattern-either:
+              - pattern: $CP.exec("$CMD" + $EVENT.body + ..., ...)
+              - pattern: $CP.exec("$CMD" + JSON.parse($EVENT.body).$X + ..., ...)
+
+  # 2. spawn/execFile with shell: true and a tainted command/argument.
+  - id: narvy.javascript.cmdi.spawn-shell-true-tainted.spawn-shell-true-tainted
+    message: >-
+      child_process.spawn/execFile is called with `shell: true` and a
+      command or argument derived from the request. With shell: true the
+      command line is interpreted by a shell, so request-controlled
+      shell metacharacters allow OS command injection (CWE-78). Drop
+      shell: true and pass the command and arguments as a plain array,
+      or allow-list the accepted values.
+    severity: ERROR
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [nodejs, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Command Injection
+    pattern-sources:
+      - pattern: req.query.$Q
+      - pattern: req.params.$P
+      - pattern: req.body.$B
+      # AWS Lambda taint source, additional to the Express req source above.
+      - pattern: event.queryStringParameters.$Q
+      - pattern: event.pathParameters.$P
+      - pattern: event.body
+      - pattern: event.headers.$H
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: '$CP.spawn($SINK, ..., {..., shell: true, ...})'
+              - pattern: '$CP.spawn($CMD, [..., $SINK, ...], {..., shell: true, ...})'
+              - pattern: '$CP.execFile($SINK, ..., {..., shell: true, ...})'
+
+  # 3. spawn/spawnSync with shell: true, untainted broad companion to the tainted rule.
+  - id: narvy.javascript.lang.security.spawn-shell-true.spawn-shell-true
+    message: >-
+      spawn / spawnSync called with `{shell: true}` runs the command
+      through a shell (sh / cmd.exe), enabling command injection if any
+      of the arguments are user-controlled. Drop `shell: true` and pass
+      arguments as an array - execve() bypasses the shell entirely.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-78: OS Command Injection"
+      owasp: ["A03:2021 - Injection"]
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Command Injection
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $CP.spawn($X, $Y, {..., shell: true, ...})
+          - pattern: |
+              $CP.spawnSync($X, $Y, {..., shell: true, ...})
+          - pattern: |
+              spawn($X, $Y, {..., shell: true, ...})
+          - pattern: |
+              spawnSync($X, $Y, {..., shell: true, ...})
+
+# Dynamic code execution (eval / new Function / vm module / setTimeout with
+# a string) is covered separately in code_injection.yml in this same pack.
+
+# CODE INJECTION
+
+  # Rule 1: eval() with non-literal argument
+  - id: narvy.javascript.code-injection.eval-non-literal.eval-non-literal
+    message: >-
+      `eval()` called with a non-literal argument. eval() executes its
+      argument as JavaScript with full privileges of the calling context.
+      If the value is attacker-influenced this is remote code execution
+      (CWE-94). Remove eval() and use JSON.parse for data, or a safe
+      dispatch table for logic selection.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Code Injection
+    patterns:
+      - pattern: eval($X)
+      - pattern-not: eval("...")
+      - pattern-not: eval(`...`)
+
+  # Rule 2: new Function(...) with non-literal body
+  - id: narvy.javascript.code-injection.dynamic-function-constructor.dynamic-function-constructor
+    message: >-
+      `new Function(...)` constructs and compiles a function from string
+      arguments at runtime - functionally equivalent to eval(). If any
+      argument (especially the final one, the function body) is
+      attacker-influenced this is remote code execution (CWE-94). Avoid
+      the Function constructor with dynamic input.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript]
+      likelihood: LOW
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Code Injection
+    patterns:
+      - pattern: new Function(...)
+      - pattern-not: new Function("...")
+      - pattern-not: new Function()
+
+  # Rule 3: vm module running non-literal script string
+  - id: narvy.javascript.code-injection.vm-run-non-literal.vm-run-non-literal
+    message: >-
+      Node `vm` module executes a non-literal script string
+      (runInNewContext / runInContext / runInThisContext). Although `vm`
+      is sandboxed for global scope, it is not a real security boundary
+      against a determined attacker and does not restrict CPU/memory. If
+      the script text is attacker-influenced this is code execution
+      (CWE-94). Never pass untrusted input to `vm.run*`.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript, node-vm]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Code Injection
+    patterns:
+      - pattern-either:
+          - pattern: vm.runInNewContext($X, ...)
+          - pattern: vm.runInContext($X, ...)
+          - pattern: vm.runInThisContext($X, ...)
+          - pattern: $VM.runInNewContext($X, ...)
+      - pattern-not: vm.runInNewContext("...", ...)
+      - pattern-not: vm.runInContext("...", ...)
+      - pattern-not: vm.runInThisContext("...", ...)
+
+  # Rule 4: setTimeout/setInterval with a string (implicit eval)
+  - id: narvy.javascript.code-injection.settimeout-string-arg.settimeout-string-arg
+    message: >-
+      `setTimeout` / `setInterval` called with a STRING as the first
+      argument instead of a function reference. The engine compiles and
+      runs the string as code (implicit eval) when the timer fires. If the
+      string is built from attacker-influenced data this is code injection
+      (CWE-94). Pass a function/arrow-function reference instead.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [javascript, typescript]
+      likelihood: LOW
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Code Injection
+    patterns:
+      - pattern-either:
+          - pattern: setTimeout($X + ..., $MS)
+          - pattern: setTimeout(`...${$Y}...`, $MS)
+          - pattern: setInterval($X + ..., $MS)
+          - pattern: setInterval(`...${$Y}...`, $MS)
+
+# ADDITIONAL COVERAGE: JWT verification, token storage, headless-browser
+# SSRF, javascript: URIs, jQuery markup sinks, unsafe deserialization, ReDoS.
+
+  # jwt.decode() where jwt.verify() belongs: fires only when the token is request-derived and no .verify() appears in the enclosing function.
+  - id: narvy.javascript.jwt.decode-without-verify.decode-without-verify
+    message: >-
+      A request-supplied JWT is parsed with `jwt.decode()` and no
+      `jwt.verify()` runs in the same function. `decode` does NOT check the
+      signature: an attacker can forge any claim (user id, role, expiry) by
+      editing the token payload. Authentication bypass / privilege
+      escalation (CWE-347). Use `jwt.verify(token, key, {algorithms: [...]})`
+      and read the claims from its return value.
+    severity: ERROR
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-347: Improper Verification of Cryptographic Signature"
+        - "CWE-287: Improper Authentication"
+      owasp:
+        - "A07:2021 - Identification and Authentication Failures"
+        - "A02:2021 - Cryptographic Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [jsonwebtoken, jwt, express, nodejs, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Improper Authentication
+      references:
+        - https://cwe.mitre.org/data/definitions/347.html
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.headers
+              - pattern: $REQ.cookies
+              - pattern: $REQ.body
+              - pattern: $REQ.query
+              - pattern: $REQ.get("...")
+              - pattern: $REQ.header("...")
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|_req|ctx|httpRequest|httpReq)$
+      - patterns:
+          - pattern: $REQ.$KIND.$X
+          - metavariable-regex:
+              metavariable: $KIND
+              regex: ^(body|params|query|headers|cookies)$
+    pattern-sinks:
+      - patterns:
+          - pattern: $JWT.decode($SINK, ...)
+          - focus-metavariable: $SINK
+          - metavariable-regex:
+              metavariable: $JWT
+              regex: ^(jwt|jsonwebtoken|jsonWebToken|JWT|jwtLib)$
+          # A .verify() anywhere in the function clears the finding; free $V receiver also matches wrappers.
+          - pattern-not-inside: |
+              function $F(...) {
+                ...
+                $V.verify(...)
+                ...
+              }
+          - pattern-not-inside: |
+              (...) => {
+                ...
+                $V.verify(...)
+                ...
+              }
+          - pattern-not-inside: |
+              async (...) => {
+                ...
+                $V.verify(...)
+                ...
+              }
+          - pattern-not-inside: |
+              $F(...) {
+                ...
+                $V.verify(...)
+                ...
+              }
+          - pattern-not-inside: |
+              try {
+                ...
+                $V.verify(...)
+                ...
+              } catch($E) {
+                ...
+              }
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.js"
+        - "**/*.test.ts"
+        - "**/*.spec.js"
+        - "**/*.spec.ts"
+
+  # Bearer/refresh token in localStorage: readable by any script, no expiry/HttpOnly/SameSite; key-name allow-list separates credentials from UI state.
+  - id: narvy.javascript.jwt.token-in-localstorage.token-in-localstorage
+    message: >-
+      An authentication token is written to `localStorage`. Anything stored
+      there is readable by every script on the origin, survives the browser
+      session, and cannot be protected with HttpOnly/SameSite - so a single
+      XSS anywhere on the site steals a long-lived credential (CWE-522).
+      Prefer an HttpOnly + Secure + SameSite cookie, or keep the access
+      token in memory only.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-522: Insufficiently Protected Credentials"
+        - "CWE-1004: Sensitive Cookie Without 'HttpOnly' Flag"
+      owasp:
+        - "A07:2021 - Identification and Authentication Failures"
+      category: security
+      subcategory: [audit]
+      technology: [browser, jwt, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Insecure Storage
+    patterns:
+      - pattern-either:
+          - pattern: localStorage.setItem("$KEY", $V)
+          - pattern: window.localStorage.setItem("$KEY", $V)
+          - pattern: $S.localStorage.setItem("$KEY", $V)
+          - pattern: localStorage["$KEY"] = $V
+          - pattern: window.localStorage["$KEY"] = $V
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: '(?i)^[a-z0-9_.-]*(jwt|access[_-]?token|id[_-]?token|refresh[_-]?token|bearer|auth[_-]?token|session[_-]?token|api[_-]?key)[a-z0-9_.-]*$'
+    paths:
+      exclude:
+        - "**/test/**"
+        - "**/tests/**"
+        - "**/__tests__/**"
+        - "**/*.test.js"
+        - "**/*.test.ts"
+        - "**/*.test.tsx"
+        - "**/*.spec.js"
+        - "**/*.spec.ts"
+        - "**/*.spec.tsx"
+
+  # Authorization decision on a client-side decoded (unverified) JWT claim; fires only when the claim drives a conditional and is authz-shaped.
+  - id: narvy.javascript.jwt.unverified-claim-authorization.unverified-claim-authorization
+    message: >-
+      An authorization decision is made on a claim read from a
+      client-side-DECODED JWT. `jwt-decode` / `decodeJwt` do not verify the
+      signature, so the user can edit the claim in their own token and take
+      the privileged branch (CWE-347). Client-side decoding is fine for
+      display, but every authorization check must happen server-side on a
+      signature-verified token.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-347: Improper Verification of Cryptographic Signature"
+        - "CWE-602: Client-Side Enforcement of Server-Side Security"
+      owasp:
+        - "A01:2021 - Broken Access Control"
+      category: security
+      subcategory: [vuln]
+      technology: [jwt-decode, jose, browser, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Improper Authorization
+    patterns:
+      - pattern-either:
+          - pattern: if (<... $DEC(...).$CLAIM ...>) { ... }
+          - pattern: |
+              $C = $DEC(...);
+              ...
+              if (<... $C.$CLAIM ...>) { ... }
+      - metavariable-regex:
+          metavariable: $DEC
+          regex: ^(jwtDecode|jwt_decode|jwtDecoder|decodeJwt|decodeToken|parseJwt)$
+      - metavariable-regex:
+          metavariable: $CLAIM
+          regex: ^(role|roles|isAdmin|is_admin|admin|scope|scopes|permissions|perms|privileges|isStaff|is_staff|groups)$
+
+  # SSRF via headless browser .goto()/.setContent(): the server fetches the URL; sanitizers mirror request-url-from-user.
+  - id: narvy.javascript.ssrf.headless-browser-tainted-url.headless-browser-tainted-url
+    message: >-
+      A request-derived value reaches a headless-browser navigation sink
+      (puppeteer / playwright `page.goto` or `page.setContent`). The SERVER's
+      browser fetches it, so an attacker can reach cloud metadata endpoints,
+      localhost admin ports and other internal services - Server-Side
+      Request Forgery (CWE-918). Validate the URL against an allow-list of
+      hosts and schemes, and run the browser with egress restricted.
+    severity: ERROR
+    languages: [javascript, typescript]
+    mode: taint
+    metadata:
+      cwe:
+        - "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp:
+        - "A10:2021 - Server-Side Request Forgery (SSRF)"
+      category: security
+      subcategory: [vuln]
+      technology: [puppeteer, playwright, nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Server-Side Request Forgery (SSRF)
+      references:
+        - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $REQ.body
+              - pattern: $REQ.query
+              - pattern: $REQ.params
+          - metavariable-regex:
+              metavariable: $REQ
+              regex: ^(req|request|_req|ctx|httpRequest|httpReq)$
+      - patterns:
+          - pattern: $REQ.$KIND.$X
+          - metavariable-regex:
+              metavariable: $KIND
+              regex: ^(body|params|query|headers|cookies)$
+    pattern-sanitizers:
+      - pattern: safeFetch(...)
+      - pattern: isAllowedUrl(...)
+      - pattern: isAllowedHost(...)
+      - pattern: isSafeUrl(...)
+      - pattern: validateUrl(...)
+      - pattern: validateHost(...)
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (<... $ALLOW.includes(...) ...>) { ... }
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$GUARD($V)) { ... }
+              ...
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$GUARD($V)) return ...;
+              ...
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$ALLOW.includes($V)) { ... }
+              ...
+      - patterns:
+          - pattern: $V
+          - pattern-inside: |
+              if (!$ALLOW.includes($V)) return ...;
+              ...
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $PAGE.goto($SINK, ...)
+              - pattern: $PAGE.setContent($SINK, ...)
+          - focus-metavariable: $SINK
+
+  # `javascript:` URI reaching an href/src sink; regex requires a dynamic part so void(0)/; literals are ignored.
+  - id: narvy.javascript.xss.javascript-uri-href-sink.javascript-uri-href-sink
+    message: >-
+      A `javascript:` URI with an interpolated/concatenated value is
+      assigned to an href/src sink. Whatever reaches the interpolation is
+      executed as script when the link is followed, so any
+      attacker-influenced value there is XSS (CWE-79). Build the handler in
+      JS (`addEventListener`) instead of encoding it into a URI, and never
+      assign a `javascript:` scheme from data.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [browser, react, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern-either:
+          - pattern: $EL.href = $X
+          - pattern: $EL.src = $X
+          - pattern: $EL.setAttribute("href", $X)
+          - pattern: $EL.setAttribute("src", $X)
+          - pattern: $EL.setAttribute("xlink:href", $X)
+          - pattern: <$TAG href={$X} ...>...</$TAG>
+          - pattern: <$TAG href={$X} ... />
+          - pattern: <$TAG src={$X} ...>...</$TAG>
+          - pattern: <$TAG src={$X} ... />
+      - metavariable-regex:
+          metavariable: $X
+          regex: '(?s)^["''`]\s*javascript\s*:.*(\$\{|["''`]\s*\+).*'
+
+  # jQuery markup-insertion sinks beyond .html(); guards: string/template arg, contains markup, at least one raw-data operand.
+  - id: narvy.javascript.xss.jquery-markup-insertion.jquery-markup-insertion
+    message: >-
+      A jQuery markup-insertion method is called with an HTML string built
+      by concatenation/interpolation. Like `.html()`, these methods PARSE
+      their string argument as markup, so any unescaped value in it is
+      DOM-based or stored XSS (CWE-79). Insert text with `.text()`, build
+      nodes with `$("<tag>").text(value)`, or sanitize with DOMPurify.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [jquery, browser, javascript, typescript]
+      likelihood: MEDIUM
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern: $EL.$M($ARG)
+      - metavariable-regex:
+          metavariable: $M
+          regex: ^(append|prepend|after|before|replaceWith|wrap|wrapInner)$
+      # Guard 1: a string/template expression, not a node or jQuery object.
+      - metavariable-regex:
+          metavariable: $ARG
+          regex: '(?s)^["''`].*'
+      # Guard 2: it actually contains markup.
+      - metavariable-regex:
+          metavariable: $ARG
+          regex: '(?s).*<\s*[a-zA-Z/].*'
+      # Guard 3: at least one raw-data operand, not only formatted/encoded call results.
+      - metavariable-regex:
+          metavariable: $ARG
+          regex: '(?s).*(\+\s*[A-Za-z_$][A-Za-z0-9_$.\[\]]*\s*(\+|$)|\$\{\s*[A-Za-z_$][A-Za-z0-9_$.\[\]]*\s*\}).*'
+      - pattern-not: $EL.$M($SAN.sanitize(...))
+      - pattern-not: $EL.$M(DOMPurify.sanitize(...))
+
+  # jQuery selector from a URL fragment; only the sentinel-stripped form (slice/substring/replace/URLSearchParams) can parse as HTML.
+  - id: narvy.javascript.xss.jquery-selector-from-url.jquery-selector-from-url
+    message: >-
+      A jQuery selector is built from a URL fragment/query value whose
+      leading `#`/`?` sentinel has been stripped. jQuery parses a string
+      starting with `<` as MARKUP rather than as a selector, so an attacker
+      controlling the fragment gets DOM-based XSS (CWE-79). Look the element
+      up explicitly (`document.getElementById(value)`) instead of passing
+      URL data to `$()`.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      owasp:
+        - "A03:2021 - Injection"
+      category: security
+      subcategory: [vuln]
+      technology: [jquery, browser, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Cross-Site-Scripting (XSS)
+    patterns:
+      - pattern-either:
+          - pattern: $($LOC.hash.$STRIP(...))
+          - pattern: $($LOC.search.$STRIP(...))
+          - pattern: $(decodeURIComponent($LOC.hash.$STRIP(...)))
+          - pattern: $(decodeURIComponent($LOC.search.$STRIP(...)))
+          - pattern: $(decodeURI($LOC.hash.$STRIP(...)))
+          - pattern: |
+              $V = $LOC.hash.$STRIP(...);
+              ...
+              $($V)
+          - pattern: |
+              $V = decodeURIComponent($LOC.hash.$STRIP(...));
+              ...
+              $($V)
+      - metavariable-regex:
+          metavariable: $STRIP
+          regex: ^(slice|substring|substr|replace|split)$
+
+  # node-serialize / serialize-to-js .unserialize() eval-s embedded functions (RCE); scoped to receivers imported from those packages.
+  - id: narvy.javascript.deserialization.node-serialize-unserialize.node-serialize-unserialize
+    message: >-
+      `unserialize()` from node-serialize / serialize-to-js is called on a
+      non-literal value. These libraries restore FUNCTIONS by evaluating the
+      serialized payload, so attacker-controlled input here is remote code
+      execution (CWE-502). Use `JSON.parse` and rebuild behaviour from data,
+      or a serializer that never evaluates code.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-502: Deserialization of Untrusted Data"
+        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      owasp:
+        - "A08:2021 - Software and Data Integrity Failures"
+      category: security
+      subcategory: [vuln]
+      technology: [node-serialize, serialize-to-js, nodejs, javascript, typescript]
+      likelihood: HIGH
+      impact: HIGH
+      confidence: HIGH
+      vulnerability_class:
+        - Insecure Deserialization
+      references:
+        - https://cwe.mitre.org/data/definitions/502.html
+    pattern-either:
+      - patterns:
+          - pattern: $S.unserialize($X)
+          - pattern-not: $S.unserialize("...")
+          - pattern-either:
+              - pattern-inside: |
+                  $S = require("node-serialize");
+                  ...
+              - pattern-inside: |
+                  $S = require("serialize-to-js");
+                  ...
+              - pattern-inside: |
+                  import $S from "node-serialize";
+                  ...
+              - pattern-inside: |
+                  import * as $S from "node-serialize";
+                  ...
+              - pattern-inside: |
+                  import $S from "serialize-to-js";
+                  ...
+              - pattern-inside: |
+                  import * as $S from "serialize-to-js";
+                  ...
+      - patterns:
+          - pattern-either:
+              - pattern: require("node-serialize").unserialize($X)
+              - pattern: require("serialize-to-js").unserialize($X)
+          - pattern-not: require("...").unserialize("...")
+
+  # Catastrophic-backtracking regex literal (static ReDoS): a quantified group holding a single quantified atom.
+  - id: narvy.javascript.misc.redos-nested-quantifier-literal.redos-nested-quantifier-literal
+    message: >-
+      Regex literal with a nested quantifier over a single atom (e.g.
+      `(a+)+`, `([a-z]+)*`). The engine can split the input between the
+      inner and outer quantifier in exponentially many ways, so a crafted
+      non-matching subject string hangs the event loop - catastrophic
+      backtracking / ReDoS (CWE-1333). Drop the redundant outer quantifier,
+      make the group unambiguous, or match with a linear-time engine (re2).
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-1333: Inefficient Regular Expression Complexity"
+        - "CWE-400: Uncontrolled Resource Consumption"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [audit]
+      technology: [javascript, typescript]
+      likelihood: LOW
+      impact: MEDIUM
+      confidence: MEDIUM
+      vulnerability_class:
+        - Denial-of-Service (DoS)
+    patterns:
+      - pattern-either:
+          - pattern: $RE.test(...)
+          - pattern: $RE.exec(...)
+          - pattern: $X.match($RE)
+          - pattern: $X.matchAll($RE)
+          - pattern: $X.replace($RE, ...)
+          - pattern: $X.replaceAll($RE, ...)
+          - pattern: $X.split($RE)
+          - pattern: $X.search($RE)
+          - pattern: new RegExp($RE)
+          - pattern: $V = $RE
+      - metavariable-regex:
+          metavariable: $RE
+          regex: '^/.*\((\?:)?(\[[^\]]+\]|\\[dwsSWD]|\.|[A-Za-z0-9])[+*]\)[+*][^+*?].*/[gimsuyd]*$'
+
+  # CORS allow-list regex with an unescaped dot matches attacker domains; regex-on-regex requires the dot followed by a letter, scoped to origin-shaped identifiers.
+  - id: narvy.javascript.cors.allowlist-regex-unescaped-dot.allowlist-regex-unescaped-dot
+    message: >-
+      CORS origin allow-list regex contains an UNESCAPED dot. `.` matches
+      any character, so `/^https://app.example.com$/` also accepts
+      `https://appXexampleYcom` - a hostname an attacker can register - and
+      the server will reflect it in Access-Control-Allow-Origin (CWE-942).
+      Escape the dots (`app\.example\.com`) and anchor the pattern with
+      `^`/`$`.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe:
+        - "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+        - "CWE-346: Origin Validation Error"
+      owasp:
+        - "A05:2021 - Security Misconfiguration"
+      category: security
+      subcategory: [vuln]
+      technology: [cors, express, nodejs, javascript, typescript]
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+        - Improper Access Control
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern: $RE.test($ORIGIN)
+                  - pattern: $ORIGIN.match($RE)
+                  - pattern: $RE.exec($ORIGIN)
+              - metavariable-regex:
+                  metavariable: $ORIGIN
+                  regex: '(?i)^_?(origin|reqorigin|requestorigin|referer|referrer|allowedorigin|targetorigin)$'
+          - pattern: "cors({..., origin: $RE, ...})"
+          - pattern: "cors({..., origin: [..., $RE, ...], ...})"
+      - metavariable-regex:
+          metavariable: $RE
+          regex: '^/.*[^\\]\.[a-zA-Z].*/[gimsuyd]*$'

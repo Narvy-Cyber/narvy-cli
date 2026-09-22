@@ -1,0 +1,108 @@
+rules:
+
+# Java unsafe deserialization: ObjectInputStream, Jackson polymorphic typing, JMS ObjectMessage.
+
+- id: narvy.java.deserialization.objectinputstream-readobject.objectinputstream-readobject
+  message: >-
+    `ObjectInputStream.readObject()` deserialises whatever class stream the
+    caller supplies. If the underlying stream can come from the network, a
+    file upload, or any other untrusted source, an attacker can smuggle a
+    gadget-chain payload that executes arbitrary code the moment it is
+    deserialised, before any application logic runs (CWE-502). Avoid native
+    Java serialization for untrusted input; use a data format with no code
+    execution surface (JSON/Protobuf), or wrap the stream in a
+    `ObjectInputFilter` allow-list of expected classes.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-502: Deserialization of Untrusted Data"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: new ObjectInputStream($SOCK.getInputStream()).readObject()
+        - pattern: |
+            $OIS = new ObjectInputStream($SOCK.getInputStream());
+            ...
+            $OIS.readObject();
+        - pattern: |
+            $OIS = new ObjectInputStream($ANY);
+            ...
+            $OIS.readObject();
+    - pattern-not: |
+        $OIS = new ObjectInputStream($ANY);
+        $OIS.setObjectInputFilter(...);
+        ...
+        $OIS.readObject();
+
+- id: narvy.java.deserialization.jackson-enable-default-typing.jackson-enable-default-typing
+  message: >-
+    Jackson's `ObjectMapper` has polymorphic default typing enabled
+    (`enableDefaultTyping`/`activateDefaultTyping`) with no restricted
+    `PolymorphicTypeValidator`. This embeds a `@class` field in the JSON that
+    tells Jackson which concrete class to instantiate, and an attacker who
+    controls the JSON can point it at a gadget class already on the
+    classpath to achieve remote code execution (CWE-502). Remove default
+    typing, or pass a `BasicPolymorphicTypeValidator` restricted to an
+    explicit allow-list of expected base types.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-502: Deserialization of Untrusted Data"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  patterns:
+    - pattern-either:
+        # Bare/legacy calls carry no validator at all - always permissive.
+        - pattern: $MAPPER.enableDefaultTyping()
+        - pattern: $MAPPER.enableDefaultTyping($X)
+        # Only the laissez-faire validator (accepts every class) is flagged; a scoped validator is left alone.
+        - pattern: $MAPPER.activateDefaultTyping(LaissezFaireSubTypeValidator.instance)
+        - pattern: $MAPPER.activateDefaultTyping(LaissezFaireSubTypeValidator.instance, ...)
+    # Exclude Spring Security's SecurityJackson2Modules.enableDefaultTyping: it installs typing behind an allow-list (mitigated form).
+    - pattern-not: SecurityJackson2Modules.enableDefaultTyping(...)
+    - pattern-not: $P.SecurityJackson2Modules.enableDefaultTyping(...)
+
+- id: narvy.java.deserialization.jms-objectmessage-getobject.jms-objectmessage-getobject
+  message: >-
+    `ObjectMessage.getObject()` deserialises the message payload with native
+    Java serialization. A JMS broker that accepts messages from outside the
+    trust boundary (or a compromised producer) can deliver a gadget-chain
+    payload that executes on `getObject()` (CWE-502). Prefer `TextMessage`
+    with an explicit JSON/Protobuf parser, or configure the JMS provider's
+    class allow-list (e.g. ActiveMQ's `trustedPackages`) if
+    `ObjectMessage` must be kept.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-502: Deserialization of Untrusted Data"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: (($T) $MSG).getObject()
+        - pattern: $MSG.getObject()
+    - pattern-inside: |
+        $MSG = ($T) $CONSUMER.receive(...);
+        ...

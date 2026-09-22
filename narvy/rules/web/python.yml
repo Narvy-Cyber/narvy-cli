@@ -1,0 +1,3965 @@
+# Python security rules, authored by Narvy.
+# Injection, deserialization, SSRF, XSS, path traversal, weak crypto, secrets.
+
+rules:
+- id: narvy.python.injection.os-popen-concat.os-popen-concat
+  message: 'Detected `os.popen()` called with a dynamically constructed command string. This is equivalent
+    to os.system() for command injection purposes (CWE-78). Use subprocess with a list and `shell=False`.
+
+    '
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+  patterns:
+  - pattern-either:
+    - pattern: os.popen("..." + $VAR)
+    - pattern: os.popen($VAR + "...")
+    - pattern: os.popen($VAR)
+    - pattern: os.popen(f"...{$VAR}...")
+  - pattern-not: os.popen("...")
+- id: narvy.python.injection.os-system-concat.os-system-concat
+  message: 'Detected `os.system()` called with a string that includes a non-literal variable via concatenation
+    or f-string. If the variable originates from user input this enables OS command injection (CWE-78).
+    Use the `subprocess` module with a list of arguments and `shell=False` instead.
+
+    '
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+  patterns:
+  - pattern-either:
+    - pattern: os.system("..." + $VAR)
+    - pattern: os.system($VAR + "...")
+    - pattern: os.system($VAR)
+    - pattern: os.system(f"...{$VAR}...")
+    - pattern: os.system("...".format(..., $VAR, ...))
+    - pattern: os.system("..." % $VAR)
+  - pattern-not: os.system("...")
+- id: narvy.python.injection.subprocess-shell-true-with-var.subprocess-shell-true-with-var
+  message: 'Detected subprocess call with `shell=True` and a dynamically constructed command. Using `shell=True`
+    with user input enables OS command injection (CWE-78). Pass a list of arguments with `shell=False`
+    instead.
+
+    '
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+  patterns:
+  - pattern-either:
+    - pattern: subprocess.run("..." + $VAR, ..., shell=True, ...)
+    - pattern: subprocess.run($VAR, ..., shell=True, ...)
+    - pattern: subprocess.run(f"...{$VAR}...", ..., shell=True, ...)
+    - pattern: subprocess.Popen("..." + $VAR, ..., shell=True, ...)
+    - pattern: subprocess.Popen($VAR, ..., shell=True, ...)
+    - pattern: subprocess.Popen(f"...{$VAR}...", ..., shell=True, ...)
+    - pattern: subprocess.call("..." + $VAR, ..., shell=True, ...)
+    - pattern: subprocess.call($VAR, ..., shell=True, ...)
+    - pattern: subprocess.check_output("..." + $VAR, ..., shell=True, ...)
+    - pattern: subprocess.check_output($VAR, ..., shell=True, ...)
+  - pattern-not: subprocess.run("...", ..., shell=True, ...)
+  - pattern-not: subprocess.Popen("...", ..., shell=True, ...)
+- id: narvy.python.deserialization.yaml-load-unsafe.yaml-load-unsafe
+  message: 'Detected `yaml.load()` without an explicit Loader. Without a Loader, PyYAML defaults to FullLoader
+    (PyYAML >= 5.1) or an even more dangerous loader in older versions, both of which can deserialise
+    arbitrary Python objects when the input is untrusted (CWE-502). Use `yaml.safe_load()` for untrusted
+    input.
+
+    '
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-502: Deserialization of Untrusted Data'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+  patterns:
+  - pattern: yaml.load($DATA)
+  - pattern-not: yaml.load($DATA, Loader=yaml.SafeLoader)
+  - pattern-not: yaml.load($DATA, Loader=yaml.BaseLoader)
+  - pattern-not: yaml.safe_load(...)
+- id: narvy.python.auth.django-set-password-without-validation.django-set-password-without-validation
+  message: '`set_password()` is called without a call to `django.contrib.auth.password_validation.validate_password()`
+    anywhere else in the same function, or in any other method of the same class. Django''s password strength
+    rules (`AUTH_PASSWORD_VALIDATORS` - minimum length, common-password check, similarity-to-user-attributes
+    check) are opt-in per call site, not enforced automatically by `set_password()` itself (CWE-521).
+    Call `validate_password(raw_password, user=$INSTANCE)` before `set_password()` and handle `ValidationError`.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-521: Weak Password Requirements'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - python
+    - django
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Improper Authentication
+  patterns:
+  - pattern: $INSTANCE.set_password($RAW)
+  - pattern-not: $INSTANCE.set_password("...")
+  - pattern-not-inside: "def $FUNC(...):\n    ...\n    password_validation.validate_password(...)\n  \
+      \  ...\n"
+  - pattern-not-inside: "def $FUNC(...):\n    ...\n    django.contrib.auth.password_validation.validate_password(...)\n\
+      \    ...\n"
+  - pattern-not-inside: "class $CLS(...):\n    ...\n    def $ANYMETHOD(...):\n        ...\n        password_validation.validate_password(...)\n\
+      \        ...\n    ...\n"
+  - pattern-not-inside: "class $CLS(...):\n    ...\n    def $ANYMETHOD(...):\n        ...\n        django.contrib.auth.password_validation.validate_password(...)\n\
+      \        ...\n    ...\n"
+- id: narvy.python.code-injection.compile-exec-tainted.compile-exec-tainted
+  message: '`compile()` output is passed to `exec()`/`eval()` where the source text passed to `compile()`
+    is not a fixed literal. This is the same RCE risk as calling `eval()`/`exec()` directly on tainted
+    text (CWE-94), just split across two calls, which sometimes slips past naive eval/exec-only detectors.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Code Injection
+  patterns:
+  - pattern-either:
+    - pattern: '$CODE = compile($SRC, ...)
+
+        ...
+
+        exec($CODE)
+
+        '
+    - pattern: '$CODE = compile($SRC, ...)
+
+        ...
+
+        eval($CODE)
+
+        '
+  - pattern-not: '$CODE = compile("...", ...)
+
+      ...
+
+      exec($CODE)
+
+      '
+  - pattern-not: '$CODE = compile("...", ...)
+
+      ...
+
+      eval($CODE)
+
+      '
+- id: narvy.python.code-injection.eval-format-string.eval-format-string
+  message: '`eval()` called on a dynamically built string (f-string, `%` formatting, or `.format()`) rather
+    than a fixed literal. Even if the immediate source is not obviously a request object, building code
+    text by interpolation is a strong code-injection smell (CWE-94) whenever any interpolated part is
+    not fully trusted. Prefer `ast.literal_eval` for literals, or refactor to avoid building code as text.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Code Injection
+  patterns:
+  - pattern-either:
+    - pattern: eval(f"...{$VAR}...")
+    - pattern: eval("...".format($VAR))
+    - pattern: eval("..." % $VAR)
+    - pattern: exec(f"...{$VAR}...")
+    - pattern: exec("...".format($VAR))
+    - pattern: exec("..." % $VAR)
+- id: narvy.python.code-injection.eval-on-request-data.eval-on-request-data
+  message: '`eval()` is called on data that originates from an HTTP request (Flask `request.*`, Django
+    `request.*`, or a function argument that is clearly user-controlled). `eval()` executes arbitrary
+    Python - this is full remote code execution (CWE-94). There is no safe way to sandbox `eval()` against
+    a malicious string; replace with `ast.literal_eval()` if only literals are expected, or a proper parser/allowlisted
+    DSL otherwise.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - flask
+    - django
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Code Injection
+  patterns:
+  - pattern-either:
+    - pattern: eval(request.$KIND.$ATTR(...))
+    - pattern: eval(request.$KIND.$ATTR)
+    - pattern: eval(request.$KIND[$X])
+    - pattern: eval(request.$KIND.get(...))
+    - pattern: '$V = request.$KIND.$ATTR(...)
+
+        ...
+
+        eval($V)
+
+        '
+    - pattern: '$V = request.$KIND[$X]
+
+        ...
+
+        eval($V)
+
+        '
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(GET|POST|args|form|json|values|data|cookies|headers|params)$
+- id: narvy.python.code-injection.exec-on-request-data.exec-on-request-data
+  message: '`exec()` is called on data that originates from an HTTP request. `exec()` runs arbitrary Python
+    statements - full remote code execution (CWE-94). Never execute request-derived strings as code.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - flask
+    - django
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Code Injection
+  patterns:
+  - pattern-either:
+    - pattern: exec(request.$KIND.$ATTR(...))
+    - pattern: exec(request.$KIND.$ATTR)
+    - pattern: exec(request.$KIND[$X])
+    - pattern: exec(request.$KIND.get(...))
+    - pattern: '$V = request.$KIND.$ATTR(...)
+
+        ...
+
+        exec($V)
+
+        '
+    - pattern: '$V = request.$KIND[$X]
+
+        ...
+
+        exec($V)
+
+        '
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(GET|POST|args|form|json|values|data|cookies|headers|params)$
+- id: narvy.python.command-injection.asyncio-subprocess-shell.asyncio-subprocess-shell
+  message: '`asyncio.create_subprocess_shell()` runs its argument through a real shell (like os.system).
+    If `$CMD` is built from a variable instead of a pure literal, this is OS command injection (CWE-78).
+    Use `asyncio.create_subprocess_exec()` with a list of arguments instead.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - asyncio
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Command Injection
+  patterns:
+  - pattern-either:
+    - pattern: asyncio.create_subprocess_shell($CMD)
+    - pattern: asyncio.create_subprocess_shell("..." + $VAR)
+    - pattern: asyncio.create_subprocess_shell(f"...{$VAR}...")
+  - pattern-not: asyncio.create_subprocess_shell("...")
+- id: narvy.python.command-injection.os-exec-family-tainted.os-exec-family-tainted
+  message: '`os.$FN()` replaces the current process image with a command built from a non-literal argument.
+    If the argument (or one of its list elements) is influenced by external input, this is command injection
+    / arbitrary process execution (CWE-78, CWE-88). Validate against an allowlist of known binaries before
+    calling.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    - 'CWE-88: Improper Neutralization of Argument Delimiters in a Command (''Argument Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Command Injection
+  patterns:
+  - pattern-either:
+    - pattern: os.execl($VAR, ...)
+    - pattern: os.execle($VAR, ...)
+    - pattern: os.execlp($VAR, ...)
+    - pattern: os.execv($VAR, ...)
+    - pattern: os.execve($VAR, ...)
+    - pattern: os.execvp($VAR, ...)
+    - pattern: os.spawnl(..., $VAR, ...)
+    - pattern: os.spawnv(..., $VAR, ...)
+    - pattern: os.posix_spawn($VAR, ...)
+  - pattern-not: os.$FN("...", ...)
+- id: narvy.python.command-injection.paramiko-exec-command-tainted.paramiko-exec-command-tainted
+  message: '`paramiko` SSH client `exec_command()` invoked with a non-literal command string. The remote
+    shell will interpret this string, so any external input reaching `$CMD` is remote command injection
+    on the target host (CWE-78). Build the command from a fixed template and shell-quote any variable
+    parts with `shlex.quote()`.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - paramiko
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Command Injection
+  patterns:
+  - pattern-either:
+    - pattern: $CLIENT.exec_command($CMD)
+    - pattern: $CLIENT.exec_command("..." + $VAR)
+    - pattern: $CLIENT.exec_command(f"...{$VAR}...")
+  - pattern-not: $CLIENT.exec_command("...")
+  - metavariable-regex:
+      metavariable: $CLIENT
+      regex: (?i)(ssh|client)
+- id: narvy.python.command-injection.shell-metacharacter-in-fstring-subprocess.shell-metacharacter-fstring-subprocess
+  message: 'subprocess call built via an f-string / % / .format() that embeds a variable directly into
+    the command text (rather than passing it as a separate argv element). Even without `shell=True`, if
+    this string is later split by shlex or passed to a shell, or if the call site is actually `shell=True`
+    elsewhere in this branch, unescaped shell metacharacters in the variable let an attacker chain commands.
+    Pass arguments as a list: `subprocess.run(["cmd", user_arg])`. CWE-78.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - subprocess
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Command Injection
+  patterns:
+  - pattern-either:
+    - pattern: subprocess.run(f"...{$VAR}...", ...)
+    - pattern: subprocess.Popen(f"...{$VAR}...", ...)
+    - pattern: subprocess.call(f"...{$VAR}...", ...)
+    - pattern: subprocess.check_output(f"...{$VAR}...", ...)
+    - pattern: subprocess.check_call(f"...{$VAR}...", ...)
+- id: narvy.python.command-injection.subprocess-list-arg-tainted.subprocess-list-arg-tainted
+  message: A value read from the HTTP request reaches a subprocess call as part of the argv list, with
+    no shell=True in sight and no allow-list check in between. List-form subprocess calls are often assumed
+    safe because there is no shell to interpret metacharacters, but that only protects against injecting
+    *additional* commands via `;`/`|`/backticks - it does nothing to stop the attacker from choosing which
+    flags or arguments reach the target binary, and if the tainted value is split into several argv elements
+    (e.g. via `.split(' ')`) the attacker effectively controls an arbitrary number of arguments to that
+    binary. CWE-78, CWE-88. Validate the value against a strict allow-list of expected tokens, or don't
+    let request data reach argv at all.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    - 'CWE-88: Improper Neutralization of Argument Delimiters in a Command (''Argument Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - subprocess
+    - django
+    - flask
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Command Injection
+    references:
+    - https://cwe.mitre.org/data/definitions/78.html
+    - https://cwe.mitre.org/data/definitions/88.html
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: request.POST[...]
+      - pattern: request.POST.get(...)
+      - pattern: request.GET[...]
+      - pattern: request.GET.get(...)
+      - pattern: request.args[...]
+      - pattern: request.args.get(...)
+      - pattern: request.form[...]
+      - pattern: request.form.get(...)
+      - pattern: request.values[...]
+      - pattern: request.values.get(...)
+      - pattern: request.json[...]
+      - pattern: request.json.get(...)
+      - pattern: request.data
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: subprocess.Popen($SINK, ...)
+      - pattern: subprocess.run($SINK, ...)
+      - pattern: subprocess.call($SINK, ...)
+      - pattern: subprocess.check_output($SINK, ...)
+      - pattern: subprocess.check_call($SINK, ...)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: shlex.quote(...)
+  - patterns:
+    - pattern: int(...)
+- id: narvy.python.cors.django-cors-allow-all-origins.django-cors-allow-all-origins
+  message: '`django-cors-headers` is configured with `CORS_ALLOW_ALL_ORIGINS = True` (or the deprecated
+    `CORS_ORIGIN_ALLOW_ALL = True`). Any website can now make cross-origin requests to this API from a
+    victim''s browser; if session cookies are also allowed (`CORS_ALLOW_CREDENTIALS = True`), this is
+    a full CSRF-equivalent hole on every endpoint. Set `CORS_ALLOWED_ORIGINS` to an explicit list instead.
+    CWE-942.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Cookie Security
+  patterns:
+  - pattern-either:
+    - pattern: CORS_ALLOW_ALL_ORIGINS = True
+    - pattern: CORS_ORIGIN_ALLOW_ALL = True
+- id: narvy.python.cors.fastapi-wildcard-with-credentials.fastapi-wildcard-with-credentials
+  message: FastAPI/Starlette `CORSMiddleware` is added with `allow_origins=["*"]` and `allow_credentials=True`.
+    Starlette will raise at request time for exactly this combination when it can, but variants that pass
+    a wildcard through `allow_origin_regex` slip past that guard and effectively allow any origin to make
+    credentialed requests. Use an explicit origin allowlist whenever `allow_credentials=True`. CWE-942.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - fastapi
+    - starlette
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cookie Security
+  patterns:
+  - pattern-either:
+    - pattern: '$APP.add_middleware(CORSMiddleware, allow_origins=["*"], ..., allow_credentials=True,
+        ...)
+
+        '
+    - pattern: '$APP.add_middleware(CORSMiddleware, allow_credentials=True, ..., allow_origins=["*"],
+        ...)
+
+        '
+    - pattern: '$APP.add_middleware(CORSMiddleware, allow_origin_regex=".*", ..., allow_credentials=True,
+        ...)
+
+        '
+- id: narvy.python.cors.flask-cors-wildcard-with-credentials.flask-cors-wildcard-with-credentials
+  message: flask-cors is configured with `origins="*"` (or unset, which defaults to "*") together with
+    `supports_credentials=True`. Per the Fetch/CORS spec browsers should reject this combination, but
+    some older or misconfigured setups still leak it, and the wildcard alone already allows any site to
+    read non-credentialed responses. Pin `origins=` to an explicit allowlist when `supports_credentials=True`.
+    CWE-942.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    - flask-cors
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cookie Security
+  patterns:
+  - pattern-either:
+    - pattern: CORS($APP, origins="*", ..., supports_credentials=True, ...)
+    - pattern: CORS($APP, supports_credentials=True, ..., origins="*", ...)
+    - pattern: CORS($APP, supports_credentials=True)
+- id: narvy.python.cors.reflected-origin-header.reflected-origin-header
+  message: The response's `Access-Control-Allow-Origin` header is set to the value of the incoming `Origin`
+    request header verbatim, instead of to a fixed value or a value checked against an allowlist. This
+    effectively grants every origin CORS access - identical in effect to a wildcard, but easy to miss
+    in review because the header value looks "dynamic" rather than "*". CWE-942.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - flask
+    - django
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cookie Security
+  patterns:
+  - pattern-either:
+    - pattern: $RESP.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin")
+    - pattern: $RESP.headers["Access-Control-Allow-Origin"] = request.headers["Origin"]
+    - pattern: $RESP["Access-Control-Allow-Origin"] = request.headers.get("Origin")
+    - pattern: $RESP["Access-Control-Allow-Origin"] = request.META.get("HTTP_ORIGIN")
+- id: narvy.python.crypto.broken-cipher-algorithm.broken-cipher-algorithm
+  message: Broken or deprecated symmetric cipher '$ALGO'. DES (56-bit key) and RC2 are trivially brute-forceable
+    on modern hardware; RC4/ARC4 has known keystream biases; Blowfish's 64-bit block size is vulnerable
+    to birthday-bound attacks (SWEET32) on large ciphertexts. Use AES-256-GCM or ChaCha20-Poly1305. CWE-327.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pycryptodome
+    - cryptography
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: $ALGO.new(...)
+    - pattern: algorithms.$ALGO(...)
+  - metavariable-regex:
+      metavariable: $ALGO
+      regex: ^(DES|DES3|ARC2|ARC4|RC2|RC4|Blowfish|IDEA|CAST)$
+- id: narvy.python.crypto.django-secret-key-env-fallback.django-secret-key-env-fallback
+  message: Django `SECRET_KEY` is set with a hardcoded fallback '$LITERAL' when the environment variable
+    is unset. SECRET_KEY is used for session signing, CSRF token derivation, password reset tokens, and
+    cryptographic signing of cookies. If the env var is missing in any deployment (e.g. local dev sneaking
+    into prod, CI), the SECRET_KEY reduces to a public constant and ALL session-signed data is forgeable.
+    ALWAYS fail fast in settings.py (`SECRET_KEY = os.environ['DJANGO_SECRET_KEY']` - KeyError on missing
+    - or raise ImproperlyConfigured).
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    - A07:2021 - Identification and Authentication Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    - python
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: 'SECRET_KEY = os.getenv($ENV, "$LITERAL")
+
+        '
+    - pattern: 'SECRET_KEY = os.environ.get($ENV, "$LITERAL")
+
+        '
+    - pattern: 'SECRET_KEY = os.environ.get($ENV) or "$LITERAL"
+
+        '
+    - pattern: 'SECRET_KEY = os.getenv($ENV) or "$LITERAL"
+
+        '
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.python.crypto.ecb-cipher-mode.ecb-cipher-mode
+  message: ECB cipher mode encrypts identical plaintext blocks to identical ciphertext blocks, leaking
+    structural patterns in the data (the classic "ECB penguin"). Use GCM (authenticated) or, at minimum,
+    CBC with a random IV and a separate MAC. CWE-327.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pycryptodome
+    - cryptography
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: $ALGO.new($KEY, $ALGO.MODE_ECB)
+    - pattern: Cipher($ALGO, modes.ECB(), ...)
+- id: narvy.python.crypto.empty-or-literal-aes-key.empty-or-literal-aes-key
+  message: AES key is an empty byte string or a short string literal, not a securely generated key. This
+    is either a debug leftover or a hardcoded key; both defeat the cipher. Generate keys with os.urandom(32)
+    or secrets.token_bytes(32) and load from a secret store. CWE-321, CWE-1204.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-1204: Generation of Weak Initialization Vector'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pycryptodome
+    - cryptography
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: AES.new(b"", ...)
+    - pattern: AES.new("", ...)
+    - pattern: AES.new(b"$LIT", ...)
+    - pattern: AES.new("$LIT", ...)
+- id: narvy.python.crypto.flask-secret-key-env-fallback.flask-secret-key-env-fallback
+  message: Flask `SECRET_KEY` is set with a hardcoded fallback '$LITERAL' when the environment variable
+    is unset. Used for session-cookie signing and CSRF tokens. If the env var is missing the SECRET_KEY
+    reduces to a public constant and ALL session cookies can be forged. Fail fast at startup with `app.config['SECRET_KEY']
+    = os.environ['FLASK_SECRET']`.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    - A07:2021 - Identification and Authentication Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    - python
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: '$APP.config[$KEY] = os.getenv($ENV, "$LITERAL")
+
+        '
+    - pattern: '$APP.config[$KEY] = os.environ.get($ENV, "$LITERAL")
+
+        '
+    - pattern: '$APP.config[$KEY] = os.environ.get($ENV) or "$LITERAL"
+
+        '
+    - pattern: '$APP.config[$KEY] = os.getenv($ENV) or "$LITERAL"
+
+        '
+    - pattern: '$APP.config.update(..., SECRET_KEY=os.environ.get($ENV, "$LITERAL"), ...)
+
+        '
+    - pattern: '$APP.config.update(..., SECRET_KEY=os.getenv($ENV, "$LITERAL"), ...)
+
+        '
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+  - metavariable-regex:
+      metavariable: $KEY
+      regex: ^['"]SECRET_KEY['"]$
+- id: narvy.python.crypto.hardcoded-env-fallback-to-cipher.hardcoded-env-fallback-to-cipher
+  message: Hardcoded fallback secret '$LITERAL' is passed as a symmetric cipher key when the env var is
+    unset. Defeats the entire crypto operation. Fail fast on missing env at startup and derive the key
+    via HKDF / PBKDF2 with a per-record salt.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - cryptography
+    - pycryptodome
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: 'AES.new(os.getenv($ENV, "$LITERAL").encode(...), ...)
+
+        '
+    - pattern: 'AES.new(os.environ.get($ENV, "$LITERAL").encode(...), ...)
+
+        '
+    - pattern: 'AES.new((os.environ.get($ENV) or "$LITERAL").encode(...), ...)
+
+        '
+    - pattern: 'algorithms.AES(os.getenv($ENV, "$LITERAL").encode(...))
+
+        '
+    - pattern: 'algorithms.AES(os.environ.get($ENV, "$LITERAL").encode(...))
+
+        '
+    - pattern: '$KDF.derive(os.getenv($ENV, "$LITERAL").encode(...))
+
+        '
+    - pattern: '$KDF.derive(os.environ.get($ENV, "$LITERAL").encode(...))
+
+        '
+    - pattern: '$K = os.getenv($ENV, "$LITERAL")
+
+        ...
+
+        AES.new($K.encode(...), ...)
+
+        '
+    - pattern: '$K = os.environ.get($ENV, "$LITERAL")
+
+        ...
+
+        AES.new($K.encode(...), ...)
+
+        '
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.python.crypto.hardcoded-env-fallback-to-hash.hardcoded-env-fallback-to-hash
+  message: Hardcoded fallback secret '$LITERAL' is used when the environment variable is unset, and is
+    then fed into a cryptographic hash. If the env var is missing in any deployment, the hash input reduces
+    to a public constant. Use HKDF / PBKDF2 / scrypt / Argon2, and fail fast on missing env at startup.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    - 'CWE-916: Use of Password Hash With Insufficient Computational Effort'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - hashlib
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: 'hashlib.$ALGO(os.getenv($ENV, "$LITERAL").encode(...))
+
+        '
+    - pattern: 'hashlib.$ALGO(os.getenv($ENV, "$LITERAL").encode())
+
+        '
+    - pattern: 'hashlib.$ALGO(os.environ.get($ENV, "$LITERAL").encode(...))
+
+        '
+    - pattern: 'hashlib.$ALGO(os.environ.get($ENV, "$LITERAL").encode())
+
+        '
+    - pattern: 'hashlib.$ALGO((os.environ.get($ENV) or "$LITERAL").encode(...))
+
+        '
+    - pattern: 'hashlib.$ALGO((os.getenv($ENV) or "$LITERAL").encode(...))
+
+        '
+    - pattern: '$K = os.getenv($ENV, "$LITERAL")
+
+        ...
+
+        hashlib.$ALGO($K.encode(...))
+
+        '
+    - pattern: '$K = os.environ.get($ENV, "$LITERAL")
+
+        ...
+
+        hashlib.$ALGO($K.encode(...))
+
+        '
+    - pattern: '$K = os.environ.get($ENV) or "$LITERAL"
+
+        ...
+
+        hashlib.$ALGO($K.encode(...))
+
+        '
+    - pattern: '$K = os.getenv($ENV) or "$LITERAL"
+
+        ...
+
+        hashlib.$ALGO($K.encode(...))
+
+        '
+    - pattern: "$K = os.getenv($ENV)\nif not $K:\n    $K = \"$LITERAL\"\n...\nhashlib.$ALGO($K.encode(...))\n"
+    - pattern: "$K = os.environ.get($ENV)\nif not $K:\n    $K = \"$LITERAL\"\n...\nhashlib.$ALGO($K.encode(...))\n"
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.python.crypto.hardcoded-env-fallback-to-hmac.hardcoded-env-fallback-to-hmac
+  message: Hardcoded fallback secret '$LITERAL' is used as the HMAC key when the environment variable
+    is unset. Anyone reading this source can forge valid MACs. Fail fast on missing env at startup.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - hmac
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: 'hmac.new(os.getenv($ENV, "$LITERAL").encode(...), ...)
+
+        '
+    - pattern: 'hmac.new(os.environ.get($ENV, "$LITERAL").encode(...), ...)
+
+        '
+    - pattern: 'hmac.new((os.environ.get($ENV) or "$LITERAL").encode(...), ...)
+
+        '
+    - pattern: 'hmac.new((os.getenv($ENV) or "$LITERAL").encode(...), ...)
+
+        '
+    - pattern: '$K = os.getenv($ENV, "$LITERAL")
+
+        ...
+
+        hmac.new($K.encode(...), ...)
+
+        '
+    - pattern: '$K = os.environ.get($ENV, "$LITERAL")
+
+        ...
+
+        hmac.new($K.encode(...), ...)
+
+        '
+    - pattern: '$K = os.environ.get($ENV) or "$LITERAL"
+
+        ...
+
+        hmac.new($K.encode(...), ...)
+
+        '
+    - pattern: "$K = os.getenv($ENV)\nif not $K:\n    $K = \"$LITERAL\"\n...\nhmac.new($K.encode(...),\
+        \ ...)\n"
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.python.crypto.insecure-uuid4-substitute.insecure-uuid-from-weak-random
+  message: A UUID-like identifier is being built from `random`/`os.urandom` seeded predictably or from
+    `uuid.uuid1` (which embeds the MAC address and a timestamp - both guessable/enumerable). For anything
+    used as a security token (session id, password-reset id, API key), use `uuid.uuid4()` backed by `os.urandom`,
+    or `secrets.token_urlsafe()`. CWE-330.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-330: Use of Insufficiently Random Values'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern: uuid.uuid1(...)
+- id: narvy.python.crypto.md5-as-password-hash.md5-as-password-hash
+  message: 'MD5 digest used to hash what looks like a password/credential value. MD5 is fast to brute-force
+    with commodity GPUs and has no built-in salt. Use a slow, salted KDF: bcrypt, scrypt, PBKDF2-HMAC-SHA256,
+    or Argon2. CWE-916.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-916: Use of Password Hash With Insufficient Computational Effort'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - hashlib
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: hashlib.md5($PW.encode(...)).hexdigest()
+    - pattern: hashlib.md5($PW.encode(...)).digest()
+  - metavariable-regex:
+      metavariable: $PW
+      regex: (?i)(pass|pwd|secret|credential)
+- id: narvy.python.crypto.non-cryptographic-random-for-security.non-cryptographic-random-for-security
+  message: The `random` module is not a cryptographically secure PRNG - it is a Mersenne Twister, fully
+    predictable from a handful of outputs. Using it to build a token/password/reset-code/secret value
+    lets an attacker predict future or past outputs. Use `secrets.token_urlsafe()` / `secrets.token_hex()`
+    / `os.urandom()` instead. CWE-338.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-338: Use of Cryptographically Weak PRNG'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: '$TOK = random.$FN(...)
+
+        '
+    - pattern: '$TOK = "".join(random.$FN(...) for $I in range(...))
+
+        '
+  - metavariable-regex:
+      metavariable: $FN
+      regex: ^(random|randint|randrange|choice|choices|getrandbits)$
+  - metavariable-regex:
+      metavariable: $TOK
+      regex: (?i)(token|secret|password|passwd|reset_code|otp|api_key|session_id|csrf)
+- id: narvy.python.crypto.ssl-cert-verification-disabled.ssl-cert-verification-disabled
+  message: TLS certificate verification is explicitly disabled (CERT_NONE / check_hostname=False / verify=False).
+    This makes the connection trivially interceptable by an on-path attacker (MITM), even over HTTPS.
+    Only ever acceptable for local, throwaway test fixtures - never for anything that touches real credentials
+    or production data. CWE-295.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-295: Improper Certificate Validation'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - ssl
+    - requests
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Improper Authentication
+  patterns:
+  - pattern-either:
+    - pattern: $CTX.verify_mode = ssl.CERT_NONE
+    - pattern: $CTX.check_hostname = False
+    - pattern: requests.$METHOD(..., verify=False, ...)
+    - pattern: requests.Session().request(..., verify=False, ...)
+    - pattern: ssl._create_unverified_context(...)
+  - pattern-not: requests.$METHOD("http://localhost$REST", ..., verify=False, ...)
+- id: narvy.python.crypto.unauthenticated-cbc-no-mac.unauthenticated-cbc-no-mac
+  message: CBC-mode encryption with no accompanying HMAC/authentication tag detected nearby. Unauthenticated
+    CBC is vulnerable to padding-oracle and bit-flipping attacks. Prefer AES-GCM (authenticated) or add
+    an encrypt-then-MAC (HMAC-SHA256) construction. CWE-327.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pycryptodome
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern: $CIPHER = AES.new($KEY, AES.MODE_CBC, ...)
+  - pattern-not-inside: '$CIPHER = AES.new($KEY, AES.MODE_CBC, ...)
+
+      ...
+
+      hmac.new(...)
+
+      '
+  - pattern-not-inside: '$CIPHER = AES.new($KEY, AES.MODE_CBC, ...)
+
+      ...
+
+      $HM.update(...)
+
+      '
+- id: narvy.python.crypto.weak-dsa-key-size.weak-dsa-key-size
+  message: DSA key size $BITS is below the 2048-bit minimum. Undersized DSA keys are vulnerable to discrete-log
+    attacks with modern compute. CWE-326.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - cryptography
+    - pycryptodome
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: dsa.generate_private_key(key_size=$BITS, ...)
+    - pattern: DSA.generate($BITS, ...)
+  - metavariable-comparison:
+      metavariable: $BITS
+      comparison: int($BITS) < 2048
+- id: narvy.python.crypto.weak-ec-curve.weak-ec-curve
+  message: Elliptic-curve key generated on curve '$CURVE', which provides less than 128 bits of security.
+    Use SECP256R1 (P-256) or a stronger curve. CWE-326.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - cryptography
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern: ec.generate_private_key(ec.$CURVE(), ...)
+  - metavariable-regex:
+      metavariable: $CURVE
+      regex: ^(SECP192R1|SECT163K1|SECT163R2)$
+- id: narvy.python.crypto.weak-hash-cryptography-hazmat.weak-hash-cryptography-hazmat
+  message: Weak hash algorithm '$ALGO' instantiated from cryptography.hazmat.primitives.hashes. MD5 and
+    SHA1 are broken for collision resistance, whether the digest is used standalone (hashes.Hash), inside
+    an HMAC, or as a signature padding hash. Use hashes.SHA256() or stronger. CWE-327.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - cryptography
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    references:
+    - https://cwe.mitre.org/data/definitions/327.html
+  patterns:
+  - pattern: hashes.$ALGO()
+  - metavariable-regex:
+      metavariable: $ALGO
+      regex: ^(MD5|SHA1)$
+- id: narvy.python.crypto.weak-hash-hashlib.weak-hash-hashlib
+  message: Weak hash algorithm '$ALGO' from hashlib. MD5, SHA1, MD4 and MD2 are broken for collision resistance
+    and unsuitable for integrity checks, digital signatures, or password storage. Use SHA-256 or better
+    for integrity, and Argon2/bcrypt/scrypt for passwords. CWE-327.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - hashlib
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    references:
+    - https://cwe.mitre.org/data/definitions/327.html
+  patterns:
+  - pattern-either:
+    - pattern: hashlib.$ALGO(...)
+    - pattern: hashlib.new("$ALGO", ...)
+    - pattern: hashlib.new($X, name="$ALGO", ...)
+  - metavariable-regex:
+      metavariable: $ALGO
+      regex: (?i)^(md5|md4|md2|sha1|sha)$
+  - pattern-not: hashlib.$ALGO(..., usedforsecurity=False, ...)
+  - pattern-not: hashlib.new("$ALGO", ..., usedforsecurity=False, ...)
+- id: narvy.python.crypto.weak-hash-pycryptodome.weak-hash-pycryptodome
+  message: Weak hash algorithm '$ALGO' from PyCryptodome/PyCrypto. MD5/MD2/MD4/SHA1 are broken for collision
+    resistance. Use SHA256, SHA3_256, or BLAKE2 instead. CWE-327.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pycryptodome
+    - pycrypto
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: Crypto.Hash.$ALGO.new(...)
+    - pattern: $ALGO.new(...)
+  - metavariable-regex:
+      metavariable: $ALGO
+      regex: ^(MD5|MD4|MD2|SHA1|SHA)$
+- id: narvy.python.crypto.weak-rsa-key-size.weak-rsa-key-size
+  message: RSA key size $BITS is below 3072 bits. NIST SP 800-57 rates 2048-bit RSA as acceptable only
+    through 2030; 3072 bits is the current recommendation for keys expected to remain in use beyond that,
+    and is a safer default for any key generated today. CWE-326.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - cryptography
+    - pycryptodome
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: rsa.generate_private_key(..., key_size=$BITS, ...)
+    - pattern: RSA.generate($BITS, ...)
+  - metavariable-comparison:
+      metavariable: $BITS
+      comparison: int($BITS) < 3072
+- id: narvy.python.crypto.weak-tls-protocol-version.weak-tls-protocol-version
+  message: Deprecated/insecure TLS protocol version '$PROTO' requested explicitly. SSLv2, SSLv3, and TLSv1.0/1.1
+    all have known cryptographic weaknesses (POODLE, BEAST) and are disallowed by PCI-DSS since mid-2018.
+    Use `ssl.PROTOCOL_TLS_CLIENT` or explicitly require TLS 1.2+. CWE-327.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - ssl
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern: ssl.$PROTO
+  - metavariable-regex:
+      metavariable: $PROTO
+      regex: ^PROTOCOL_(SSLv2|SSLv3|TLSv1|TLSv1_1)$
+- id: narvy.python.csrf.flask-wtf-csrf-enabled-false.flask-wtf-csrf-enabled-false
+  message: '`WTF_CSRF_ENABLED` is explicitly set to `False`. This disables CSRF token validation on every
+    form submitted through this Flask app, making every state-changing POST/PUT/DELETE endpoint that relies
+    on cookie-based session auth forgeable from any other site the victim has open (CWE-352). Remove this
+    line, or scope the exemption to the one view that genuinely needs it with `@csrf.exempt`.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    - flask-wtf
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cross-Site Request Forgery (CSRF)
+  patterns:
+  - pattern-either:
+    - pattern: $APP.config["WTF_CSRF_ENABLED"] = False
+    - pattern: $APP.config['WTF_CSRF_ENABLED'] = False
+    - pattern: $APP.config.WTF_CSRF_ENABLED = False
+    - pattern: WTF_CSRF_ENABLED = False
+- id: narvy.python.csrf.flask-wtf-csrf-exempt-usage.flask-wtf-csrf-exempt-usage
+  message: '`csrf.exempt(...)` opts its argument out of CSRF protection. When the argument is a Blueprint
+    (rather than a single view function), every state-changing route registered on it - present and future
+    - loses CSRF protection at once, which is easy to lose track of as the blueprint grows (CWE-352).
+    Semgrep cannot tell a Blueprint apart from a view function here without symbol resolution, so this
+    is flagged for manual review either way: confirm every exempted route is genuinely authenticated by
+    something other than cookies (e.g. a redirect-based external IdP callback, or a token-checked API
+    view).'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - flask
+    - flask-wtf
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Cross-Site Request Forgery (CSRF)
+  patterns:
+  - pattern: $CSRF.exempt($ARG)
+  - metavariable-regex:
+      metavariable: $CSRF
+      regex: ^csrf$
+- id: narvy.python.csrf.flask-wtf-imported-but-never-initialized.flask-wtf-imported-but-never-initialized
+  message: '`CSRFProtect` is imported from `flask_wtf.csrf` but the module never constructs it against
+    the app (`CSRFProtect(app)`) or calls `.init_app(app)` on an instance of it. The import alone protects
+    nothing - every form in the app is submitted without CSRF token validation (CWE-352). Either wire
+    it up (`CSRFProtect(app)`/`csrf.init_app(app)`) or remove the dead import if CSRF protection is intentionally
+    handled elsewhere.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - flask
+    - flask-wtf
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Cross-Site Request Forgery (CSRF)
+  patterns:
+  - pattern-either:
+    - pattern: from flask_wtf.csrf import CSRFProtect
+    - pattern: from flask_wtf import CSRFProtect
+  - pattern-not-inside: '$IMPORT
+
+      ...
+
+      CSRFProtect($APP)
+
+      '
+  - pattern-not-inside: '$IMPORT
+
+      ...
+
+      $CSRF = CSRFProtect()
+
+      ...
+
+      $CSRF.init_app($APP)
+
+      '
+  - pattern-not-inside: '$IMPORT
+
+      ...
+
+      $CSRF = CSRFProtect(...)
+
+      '
+- id: narvy.python.csv-injection.csv-writer-formula-injection.csv-writer-formula-injection
+  message: A value from request data is written to a CSV via `csv.writer` without checking for a leading
+    `=`, `+`, `-`, or `@`. Spreadsheet applications (Excel, LibreOffice, Google Sheets) treat a cell starting
+    with one of those characters as a formula; a value like `=cmd|'/c calc'!A1` opened by a victim who
+    later imports this export can trigger formula execution (CSV/Formula Injection, CWE-1236). Prefix
+    any cell beginning with `=+-@` with a single quote or tab character before writing.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-1236: Improper Neutralization of Formula Elements in a CSV File'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Improper Validation
+  patterns:
+  - pattern-either:
+    - pattern: $W.writerow([..., request.$KIND.$ATTR(...), ...])
+    - pattern: $W.writerow([..., request.$KIND[$X], ...])
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|values|GET|POST|json)$
+- id: narvy.python.ldap-injection.python-ldap-bind-dn-tainted.python-ldap-bind-dn-tainted
+  message: A distinguished name (DN) passed to `simple_bind_s()` is built by concatenating request data.
+    Beyond filter injection, an unsanitized DN can let an attacker manipulate the identity the bind authenticates
+    as, or - on some LDAP servers - bind with an empty password against a partial/malformed DN to achieve
+    an unauthenticated (anonymous) bind. CWE-90. Look the DN up from a trusted directory of known usernames
+    instead of building it from request input.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-90: Improper Neutralization of Special Elements used in an LDAP Query (''LDAP Injection'')'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python-ldap
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Improper Authentication
+  patterns:
+  - pattern-either:
+    - pattern: $CONN.simple_bind_s(f"...{$VAR}...", $PW)
+    - pattern: $CONN.simple_bind_s("..." + $VAR, $PW)
+- id: narvy.python.ldap-injection.python-ldap-search-filter-tainted.python-ldap-search-filter-tainted
+  message: An LDAP search filter is built by string interpolation with a value from request data, then
+    passed to `search_s`/`search_ext_s`. LDAP filter syntax uses `*`, `(`, `)`, `\`, and `NUL` as metacharacters;
+    an unescaped value lets an attacker widen the filter (`*)(uid=*))(|(uid=*`) to bypass an intended
+    restriction or enumerate unrelated records (CWE-90, LDAP injection). Escape the value with `ldap.filter.escape_filter_chars()`
+    before interpolating it into the filter string.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-90: Improper Neutralization of Special Elements used in an LDAP Query (''LDAP Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python-ldap
+    - ldap3
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Improper Validation
+  patterns:
+  - pattern-either:
+    - pattern: $CONN.search_s($BASE, $SCOPE, f"...{$VAR}...")
+    - pattern: $CONN.search_s($BASE, $SCOPE, "..." + $VAR)
+    - pattern: $CONN.search_s($BASE, $SCOPE, "...".format($VAR))
+    - pattern: $CONN.search_ext_s($BASE, $SCOPE, f"...{$VAR}...")
+    - pattern: $CONN.search($BASE, f"...{$VAR}...")
+  - pattern-not: $CONN.search_s($BASE, $SCOPE, "...")
+  - pattern-not-inside: '$ESCAPED = ldap.filter.escape_filter_chars($VAR)
+
+      ...
+
+      '
+- id: narvy.python.mass_assignment.django-model-create-kwargs-from-request.django-model-create-kwargs-from-request
+  message: A Django model is created with `**request.$KIND` unpacked directly as keyword arguments. Every
+    key present in the request dict is assigned to a model field with no allowlist, so a client can set
+    fields the view never intended to expose - privilege flags (`is_staff`, `is_superuser`), foreign keys,
+    or price/quantity fields owned by server-side logic (CWE-915, mass assignment). Assign each expected
+    field explicitly, or validate through a form/ serializer that declares its own field list.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - django
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Improper Access Control
+  patterns:
+  - pattern-either:
+    - pattern: $MODEL.objects.create(**request.$KIND)
+    - pattern: $MODEL.objects.create(**request.$KIND.dict())
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(GET|POST|data|query_params)$
+- id: narvy.python.mass_assignment.django-orm-bulk-mutation-kwargs-from-request.django-orm-bulk-mutation-kwargs-from-request
+  message: A Django ORM call mutates a model with `**request.$KIND` unpacked directly as keyword arguments
+    - an instance/model-utils `.update()`, a `QuerySet.filter(...).update()` bulk update, or a `get_or_create()`/`update_or_create()`
+    convenience constructor. Every key present in the request dict overwrites the matching field with
+    no allowlist - a client can set fields the view never intended to expose (CWE-915, mass assignment).
+    Assign each expected field explicitly instead of unpacking the request dict.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - django
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Improper Access Control
+  patterns:
+  - pattern-either:
+    - pattern: $TARGET.update(**request.$KIND)
+    - pattern: $MODEL.objects.get_or_create(**request.$KIND)
+    - pattern: $MODEL.objects.update_or_create(**request.$KIND)
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(GET|POST|data|query_params)$
+- id: narvy.python.misc.drf-serializer-fields-all-sensitive-model.drf-serializer-fields-all-sensitive-model
+  message: A Django REST Framework `ModelSerializer` sets `fields = "__all__"` inside a class whose name
+    suggests it wraps a security-sensitive model (User/Account/Admin/Permission/Role). Combined with a
+    writable serializer, this lets a client set every model field - including ones like `is_staff`, `is_admin`,
+    or `role` - directly from request JSON (mass assignment, CWE-915). Enumerate fields explicitly and
+    add privileged fields to `read_only_fields`.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - python
+    - django
+    - djangorestframework
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Improper Access Control
+  patterns:
+  - pattern-either:
+    - pattern-inside: "class $SER(serializers.ModelSerializer):\n    ...\n    class Meta:\n        ...\n"
+    - pattern-inside: "class $SER(serializers.HyperlinkedModelSerializer):\n    ...\n    class Meta:\n\
+        \        ...\n"
+    - pattern-inside: "class $SER(ModelSerializer):\n    ...\n    class Meta:\n        ...\n"
+    - pattern-inside: "class $SER(HyperlinkedModelSerializer):\n    ...\n    class Meta:\n        ...\n"
+  - pattern: fields = "__all__"
+  - pattern-not-inside: "class $SER(...):\n    ...\n    class Meta:\n        ...\n        read_only_fields\
+      \ = (...)\n"
+- id: narvy.python.misc.insecure-file-permission.insecure-file-permission
+  message: '`os.chmod()` / `os.open()` sets world-writable (and often world-readable) permissions (0o777
+    / 0o666). Any local user or process can then modify or read this file, which is dangerous for config
+    files, key material, or scripts that get executed later (CWE-732). Use the narrowest mode that works,
+    e.g. 0o600 for secrets or 0o644 for regular files.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-732: Incorrect Permission Assignment for Critical Resource'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - python
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Improper Access Control
+  patterns:
+  - pattern-either:
+    - pattern: os.chmod($PATH, 0o777)
+    - pattern: os.chmod($PATH, 0o666)
+    - pattern: os.chmod($PATH, 0777)
+    - pattern: os.chmod($PATH, 0666)
+    - pattern: os.chmod($PATH, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+    - pattern: os.open($PATH, $FLAGS, 0o777)
+    - pattern: os.open($PATH, $FLAGS, 0o666)
+- id: narvy.python.misc.insecure-tempfile-mktemp.insecure-tempfile-mktemp
+  message: '`tempfile.mktemp()` returns a filename but does not create the file. Between the name being
+    returned and the caller opening it, another local process can create a file (or symlink) at that path,
+    leading to a TOCTOU race that can be used for data tampering or symlink attacks (CWE-377). The Python
+    docs themselves deprecate this function for exactly this reason. Use `tempfile.NamedTemporaryFile()`
+    or `tempfile.mkstemp()`, which create the file atomically.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-377: Insecure Temporary File'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Insecure Temporary File
+  patterns:
+  - pattern: tempfile.mktemp(...)
+- id: narvy.python.misc.redos-dynamic-regex-pattern.redos-dynamic-regex-pattern
+  message: A regular-expression pattern is compiled/matched directly from request-derived data (`request.args`/`request.form`/`request.GET`/
+    `request.POST`). An attacker who controls the pattern can supply a catastrophically-backtracking regex,
+    causing a denial of service when Python's backtracking `re` engine evaluates it (ReDoS, CWE-1333).
+    Validate/allow-list the pattern, cap its length, or run matching in a subprocess with a hard timeout.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-1333: Inefficient Regular Expression Complexity'
+    - 'CWE-400: Uncontrolled Resource Consumption'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - python
+    - flask
+    - django
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Denial-of-Service (DoS)
+  patterns:
+  - pattern-either:
+    - pattern: re.compile(request.$KIND.$ATTR(...))
+    - pattern: re.compile(request.$KIND[$X])
+    - pattern: re.match(request.$KIND.$ATTR(...), ...)
+    - pattern: re.search(request.$KIND.$ATTR(...), ...)
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|values|GET|POST|json)$
+- id: narvy.python.nosqli.mongoengine-raw-query-tainted.mongoengine-raw-query-tainted
+  message: '`mongoengine`''s `.objects(__raw__=...)` escape hatch is populated with a dict built from
+    request data. `__raw__` bypasses mongoengine''s field validation/coercion entirely and is passed to
+    MongoDB near-verbatim, so the same operator-injection risk applies (CWE-943). Prefer mongoengine''s
+    typed field lookups (`Model.objects(field=value)`) which validate and coerce input.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-943: Improper Neutralization of Special Elements in Data Query Logic'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - mongoengine
+    - mongodb
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - SQL Injection
+  patterns:
+  - pattern-either:
+    - pattern: $MODEL.objects(__raw__=request.get_json())
+    - pattern: $MODEL.objects(__raw__=request.json)
+- id: narvy.python.nosqli.pymongo-filter-from-raw-request-json.pymongo-filter-from-raw-request-json
+  message: 'A pymongo `find`/`find_one`/`update_one`/`delete_one` filter dict is built directly from `request.json`/`request.get_json()`
+    without restricting it to expected scalar fields. MongoDB interprets keys starting with `$` inside
+    a value position as query operators, so a client sending `{"password": {"$ne": null}}` instead of
+    a string turns an equality check into "password is not null" - a classic NoSQL authentication-bypass
+    primitive (CWE-943). Build the filter explicitly from named, type-checked fields instead of passing
+    the request body through.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-943: Improper Neutralization of Special Elements in Data Query Logic'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pymongo
+    - mongodb
+    - flask
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - SQL Injection
+  patterns:
+  - pattern-either:
+    - pattern: $COLL.find(request.get_json())
+    - pattern: $COLL.find_one(request.get_json())
+    - pattern: $COLL.find(request.json)
+    - pattern: $COLL.find_one(request.json)
+    - pattern: $COLL.find(request.json[$X])
+    - pattern: $COLL.find_one(request.json[$X])
+    - pattern: $COLL.update_one(request.get_json(), ...)
+    - pattern: $COLL.delete_one(request.get_json())
+  - metavariable-regex:
+      metavariable: $COLL
+      regex: (?i)(collection|coll|db\.\w+)
+- id: narvy.python.nosqli.pymongo-filter-value-from-request-arg.pymongo-filter-value-from-request-arg
+  message: A pymongo query filter's *value* (not just the whole filter dict) is set directly to a raw
+    request field (`request.args.get("id")`/`request.form["x"]`) without type coercion. If the client
+    passes a JSON body instead of a query string, or the framework parses the value into a dict/list rather
+    than a plain string, this reopens the same MongoDB operator-injection bypass (`$ne`, `$gt`, `$regex`)
+    as a full raw filter would (CWE-943). Coerce the expected type explicitly (`str(...)`, `ObjectId(...)`)
+    before using it in a filter.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-943: Improper Neutralization of Special Elements in Data Query Logic'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pymongo
+    - mongodb
+    - flask
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - SQL Injection
+  patterns:
+  - pattern-either:
+    - pattern: '{$KEY: request.args.get($X)}'
+    - pattern: '{$KEY: request.json.get($X)}'
+    - pattern: '{$KEY: request.json[$X]}'
+  - pattern-not: '{$KEY: str(request.args.get($X))}'
+  - pattern-not: '{$KEY: int(request.args.get($X))}'
+  - metavariable-regex:
+      metavariable: $KEY
+      regex: (?i)("|')(username|user|email|password|role|admin|id|_id)("|')
+- id: narvy.python.open-redirect.django-httpresponseredirect-tainted.django-httpresponseredirect-tainted
+  message: Django `HttpResponseRedirect()`/`redirect()` target comes directly from request data with no
+    host/path validation. Same phishing pivot as the Flask case (CWE-601) - an attacker-controlled `next`
+    parameter sends an authenticated user off-site. Use `django.utils.http.url_has_allowed_host_and_scheme()`
+    to validate before redirecting.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-601: URL Redirection to Untrusted Site (''Open Redirect'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Open Redirect
+  patterns:
+  - pattern-either:
+    - pattern: HttpResponseRedirect(request.$KIND.$ATTR(...))
+    - pattern: HttpResponseRedirect(request.$KIND[$X])
+    - pattern: redirect(request.$KIND.$ATTR(...))
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(GET|POST)$
+- id: narvy.python.open-redirect.flask-redirect-tainted.flask-redirect-tainted
+  message: Flask `redirect()` target URL comes directly from request data (`request.args.get("next")`,
+    etc.) with no check that it points somewhere on this site. An attacker sends a link like `/login?next=https://evil.example/phish`
+    and the app helpfully redirects a just-authenticated user straight to the phishing page (CWE-601).
+    Validate the target is a relative path or matches an allowlisted host before redirecting.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-601: URL Redirection to Untrusted Site (''Open Redirect'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Open Redirect
+  patterns:
+  - pattern-either:
+    - pattern: redirect(request.$KIND.$ATTR(...))
+    - pattern: redirect(request.$KIND[$X])
+    - pattern: redirect(request.$KIND.get(...))
+    - pattern: '$URL = request.$KIND.$ATTR(...)
+
+        ...
+
+        redirect($URL)
+
+        '
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|values|GET|POST)$
+- id: narvy.python.paramiko.connect-without-host-key-check.connect-without-host-key-check
+  message: '`paramiko.client.SSHClient()` is used to connect without ever calling `set_missing_host_key_policy()`
+    on it and without loading system/user known-hosts (`load_system_host_keys()` / `load_host_keys()`).
+    paramiko''s own default policy in this state rejects unknown hosts, but a client built this way frequently
+    gets "fixed" later by someone adding `AutoAddPolicy()` the first time it throws on an unrecognized
+    host, silently reopening the man-in-the-middle exposure this rule''s sibling flags (CWE-322). Load
+    a known_hosts file explicitly and keep the default `RejectPolicy`, or pin expected host keys.'
+  severity: INFO
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-322: Key Exchange without Entity Authentication'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - python
+    - paramiko
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Improper Authentication
+  patterns:
+  - pattern: '$CLIENT = paramiko.SSHClient()
+
+      ...
+
+      $CLIENT.connect(...)
+
+      '
+  - pattern-not-inside: '$CLIENT = paramiko.SSHClient()
+
+      ...
+
+      $CLIENT.set_missing_host_key_policy(...)
+
+      ...
+
+      '
+  - pattern-not-inside: '$CLIENT = paramiko.SSHClient()
+
+      ...
+
+      $CLIENT.load_system_host_keys(...)
+
+      ...
+
+      '
+  - pattern-not-inside: '$CLIENT = paramiko.SSHClient()
+
+      ...
+
+      $CLIENT.load_host_keys(...)
+
+      ...
+
+      '
+- id: narvy.python.paramiko.implicit-trust-host-key.implicit-trust-host-key
+  message: '`set_missing_host_key_policy()` is called with `AutoAddPolicy` or `WarningPolicy`. Both accept
+    a host key the client has never seen before without any verification - `AutoAddPolicy` saves it silently,
+    `WarningPolicy` only logs. Either way, a machine-in-the-middle presenting its own key instead of the
+    real server''s is accepted transparently, defeating SSH host authentication (CWE-322). Use the default
+    `RejectPolicy`, or pin the expected host key and verify it explicitly with a custom `paramiko.MissingHostKeyPolicy`
+    subclass.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-322: Key Exchange without Entity Authentication'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - paramiko
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Improper Authentication
+  patterns:
+  - pattern-either:
+    - pattern: $CLIENT.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    - pattern: $CLIENT.set_missing_host_key_policy(paramiko.AutoAddPolicy)
+    - pattern: $CLIENT.set_missing_host_key_policy(paramiko.client.AutoAddPolicy())
+    - pattern: $CLIENT.set_missing_host_key_policy(paramiko.client.AutoAddPolicy)
+    - pattern: $CLIENT.set_missing_host_key_policy(AutoAddPolicy())
+    - pattern: $CLIENT.set_missing_host_key_policy(AutoAddPolicy)
+    - pattern: $CLIENT.set_missing_host_key_policy(paramiko.WarningPolicy())
+    - pattern: $CLIENT.set_missing_host_key_policy(paramiko.WarningPolicy)
+    - pattern: $CLIENT.set_missing_host_key_policy(paramiko.client.WarningPolicy())
+    - pattern: $CLIENT.set_missing_host_key_policy(paramiko.client.WarningPolicy)
+    - pattern: $CLIENT.set_missing_host_key_policy(WarningPolicy())
+    - pattern: $CLIENT.set_missing_host_key_policy(WarningPolicy)
+- id: narvy.python.path-traversal.django-fileresponse-tainted.django-fileresponse-tainted
+  message: Django `FileResponse(open(...))` opens a file whose path is built from request data. Same arbitrary-file-read
+    risk as the generic `open()` case (CWE-22), but the response streams the content straight back to
+    the client, so a successful traversal is immediately readable rather than just server-side. Validate
+    the resolved path stays under the intended media root before opening.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Path Traversal
+  patterns:
+  - pattern-either:
+    - pattern: FileResponse(open(request.$KIND.$ATTR(...), ...))
+    - pattern: FileResponse(open(request.$KIND[$X], ...))
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(GET|POST)$
+- id: narvy.python.path-traversal.flask-send-file-tainted.flask-send-file-tainted
+  message: '`send_file()`/`send_from_directory()` is called with a path/filename argument built directly
+    from request data without validation. `send_file()` does not sanitize `../` sequences on the caller''s
+    behalf when the path is fully attacker-supplied (only `send_from_directory`''s `filename` argument
+    is checked, and only if you actually use that API correctly). Arbitrary file read (CWE-22). Validate
+    the filename against an allowlist or strip path separators before use.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Path Traversal
+  patterns:
+  - pattern-either:
+    - pattern: send_file(request.$KIND.$ATTR(...))
+    - pattern: send_file(request.$KIND[$X])
+    - pattern: send_file(f"...{request.$KIND.$ATTR(...)}...")
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|values|GET|POST|json)$
+- id: narvy.python.path-traversal.open-tainted-path.open-tainted-path
+  message: '`open()` is called with a filesystem path built directly from request data. Without normalizing
+    and validating the path stays inside an intended base directory, an attacker can supply `../../etc/passwd`-style
+    segments to read (or, on a write-mode open, overwrite) arbitrary files reachable by the process (CWE-22).
+    Resolve the path with `os.path.realpath()`, then verify it is a descendant of the intended base directory
+    before opening.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - flask
+    - django
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Path Traversal
+  patterns:
+  - pattern-either:
+    - pattern: open(request.$KIND.$ATTR(...), ...)
+    - pattern: open(request.$KIND[$X], ...)
+    - pattern: open(f"...{request.$KIND.$ATTR(...)}...", ...)
+    - pattern: open(os.path.join($BASE, request.$KIND.$ATTR(...)), ...)
+    - pattern: '$P = request.$KIND.$ATTR(...)
+
+        ...
+
+        open($P, ...)
+
+        '
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|values|GET|POST|json)$
+- id: narvy.python.path-traversal.zipfile-extractall-untrusted.zipfile-extractall-untrusted-archive
+  message: '`ZipFile.extractall()` is called on an archive that came from an upload/request/network fetch,
+    with no per-member path check first. A malicious zip can contain entries with `../` path segments
+    or absolute paths ("Zip Slip") that extract outside the target directory, overwriting arbitrary files
+    (CWE-22). Iterate `zip.namelist()` and reject any entry whose resolved path escapes the destination
+    directory before calling `extractall()`.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Path Traversal
+  patterns:
+  - pattern: $ZIP.extractall(...)
+  - pattern-inside: '$ZIP = zipfile.ZipFile($SRC, ...)
+
+      ...
+
+      '
+  - metavariable-regex:
+      metavariable: $SRC
+      regex: (?i)(request|upload|response|download)
+- id: narvy.python.pyramid.csrf-disabled-globally.csrf-disabled-globally
+  message: Pyramid's default CSRF check is turned off application-wide via `set_default_csrf_options(require_csrf=False)`.
+    Every unsafe-method view (POST/PUT/PATCH/DELETE) in the app loses its automatic CSRF token check unless
+    it re-enables it individually. Pass `require_csrf=True` (the framework default), or drop the kwarg
+    entirely and only opt specific views out. CWE-352.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pyramid
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cross-Site Request Forgery (CSRF)
+  patterns:
+  - pattern-either:
+    - pattern: $CONFIGURATOR.set_default_csrf_options(..., require_csrf=False, ...)
+    - pattern: config.set_default_csrf_options(..., require_csrf=False, ...)
+- id: narvy.python.pyramid.csrf-disabled-per-view.csrf-disabled-per-view
+  message: This view opts out of Pyramid's automatic CSRF check via `require_csrf=False` on `@view_config`/`add_view`.
+    If the view accepts an unsafe HTTP method (POST/PUT/PATCH/DELETE) and changes state, this reopens
+    it to cross-site request forgery even if CSRF protection is enabled globally elsewhere. Confirm this
+    view is either read-only or protected by an equivalent check (API token, custom header requirement)
+    before disabling it. CWE-352.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pyramid
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site Request Forgery (CSRF)
+  patterns:
+  - pattern-either:
+    - pattern: view_config(..., require_csrf=False, ...)
+    - pattern: pyramid.view.view_config(..., require_csrf=False, ...)
+    - pattern: $CONFIGURATOR.add_view(..., require_csrf=False, ...)
+- id: narvy.python.pyramid.response-object-echoes-request-data.response-object-echoes-request-data
+  message: A Pyramid `Response` is built (or its body/text attribute set) by directly interpolating request-derived
+    data (`request.GET`/`request.POST`/`request.params`/`request.matchdict`) instead of rendering it through
+    a Chameleon/Jinja2/Mako template, which auto-escapes. `Response` does no HTML escaping of its own,
+    so any HTML/JS in the request value reaches the browser verbatim. Reflected XSS (CWE-79). Render through
+    a template, or escape the value with `markupsafe.escape()`/`html.escape()` before it reaches the response
+    body.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pyramid
+    likelihood: HIGH
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: request.GET
+      - pattern: request.GET.get(...)
+      - pattern: request.GET[...]
+      - pattern: request.POST
+      - pattern: request.POST.get(...)
+      - pattern: request.POST[...]
+      - pattern: request.params
+      - pattern: request.params.get(...)
+      - pattern: request.params[...]
+      - pattern: request.matchdict
+      - pattern: request.matchdict.get(...)
+      - pattern: request.matchdict[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: Response($SINK)
+      - pattern: pyramid.response.Response($SINK)
+      - pattern: $RESP.text = $SINK
+      - pattern: $RESP.body = $SINK
+      - pattern: $RESP.ubody = $SINK
+      - pattern: $RESP.unicode_body = $SINK
+  pattern-sanitizers:
+  - patterns:
+    - pattern: escape(...)
+  - patterns:
+    - pattern: markupsafe.escape(...)
+  - patterns:
+    - pattern: html.escape(...)
+- id: narvy.python.pyramid.session-cookie-not-httponly.session-cookie-not-httponly
+  message: Pyramid auth-ticket or session cookie constructed without `httponly=True` (either omitted,
+    which is not the secure choice for this kind of cookie, or explicitly set to False). Client-side JavaScript
+    can read this cookie, so any XSS elsewhere in the app can be used to steal the session/auth-ticket
+    value directly. Pass `httponly=True`. CWE-1004.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-1004: Sensitive Cookie Without ''HttpOnly'' Flag'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pyramid
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cookie Security
+  patterns:
+  - pattern-either:
+    - pattern: AuthTktAuthenticationPolicy(..., httponly=False, ...)
+    - pattern: pyramid.authentication.AuthTktAuthenticationPolicy(..., httponly=False, ...)
+    - pattern: SignedCookieSessionFactory(..., httponly=False, ...)
+    - pattern: pyramid.session.SignedCookieSessionFactory(..., httponly=False, ...)
+    - patterns:
+      - pattern-either:
+        - pattern: AuthTktAuthenticationPolicy(...)
+        - pattern: pyramid.authentication.AuthTktAuthenticationPolicy(...)
+        - pattern: SignedCookieSessionFactory(...)
+        - pattern: pyramid.session.SignedCookieSessionFactory(...)
+      - pattern-not: AuthTktAuthenticationPolicy(..., httponly=$H, ...)
+      - pattern-not: pyramid.authentication.AuthTktAuthenticationPolicy(..., httponly=$H, ...)
+      - pattern-not: SignedCookieSessionFactory(..., httponly=$H, ...)
+      - pattern-not: pyramid.session.SignedCookieSessionFactory(..., httponly=$H, ...)
+      - pattern-not: AuthTktAuthenticationPolicy(..., **$KW)
+      - pattern-not: pyramid.authentication.AuthTktAuthenticationPolicy(..., **$KW)
+      - pattern-not: SignedCookieSessionFactory(..., **$KW)
+      - pattern-not: pyramid.session.SignedCookieSessionFactory(..., **$KW)
+- id: narvy.python.pyramid.session-cookie-not-secure.session-cookie-not-secure
+  message: Pyramid auth-ticket or session cookie constructed without `secure=True` (either omitted or
+    explicitly set to False). Without it, the browser will happily send this cookie over a plaintext HTTP
+    connection, exposing the session/auth-ticket value to anyone on the network path. Pass `secure=True`
+    for any deployment that is reachable over HTTPS (which should be all of them). CWE-614.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-614: Sensitive Cookie in HTTPS Session Without ''Secure'' Attribute'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pyramid
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cookie Security
+  patterns:
+  - pattern-either:
+    - pattern: AuthTktAuthenticationPolicy(..., secure=False, ...)
+    - pattern: pyramid.authentication.AuthTktAuthenticationPolicy(..., secure=False, ...)
+    - pattern: SignedCookieSessionFactory(..., secure=False, ...)
+    - pattern: pyramid.session.SignedCookieSessionFactory(..., secure=False, ...)
+    - patterns:
+      - pattern-either:
+        - pattern: AuthTktAuthenticationPolicy(...)
+        - pattern: pyramid.authentication.AuthTktAuthenticationPolicy(...)
+        - pattern: SignedCookieSessionFactory(...)
+        - pattern: pyramid.session.SignedCookieSessionFactory(...)
+      - pattern-not: AuthTktAuthenticationPolicy(..., secure=$S, ...)
+      - pattern-not: pyramid.authentication.AuthTktAuthenticationPolicy(..., secure=$S, ...)
+      - pattern-not: SignedCookieSessionFactory(..., secure=$S, ...)
+      - pattern-not: pyramid.session.SignedCookieSessionFactory(..., secure=$S, ...)
+      - pattern-not: AuthTktAuthenticationPolicy(..., **$KW)
+      - pattern-not: pyramid.authentication.AuthTktAuthenticationPolicy(..., **$KW)
+      - pattern-not: SignedCookieSessionFactory(..., **$KW)
+      - pattern-not: pyramid.session.SignedCookieSessionFactory(..., **$KW)
+- id: narvy.python.pyramid.session-cookie-samesite-unset.session-cookie-samesite-unset
+  message: Pyramid auth-ticket or session cookie constructed without a `samesite` policy (omitted, or
+    explicitly `samesite=None`). Without SameSite=Lax/Strict, this cookie is sent on cross-site requests
+    too, which is what makes CSRF against session-authenticated endpoints possible in the first place.
+    Pass `samesite="Lax"` (or `"Strict"` for the most sensitive cookies). CWE-352.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pyramid
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cookie Security
+    - Cross-Site Request Forgery (CSRF)
+  patterns:
+  - pattern-either:
+    - pattern: AuthTktAuthenticationPolicy(..., samesite=None, ...)
+    - pattern: pyramid.authentication.AuthTktAuthenticationPolicy(..., samesite=None, ...)
+    - pattern: SignedCookieSessionFactory(..., samesite=None, ...)
+    - pattern: pyramid.session.SignedCookieSessionFactory(..., samesite=None, ...)
+    - patterns:
+      - pattern-either:
+        - pattern: AuthTktAuthenticationPolicy(...)
+        - pattern: pyramid.authentication.AuthTktAuthenticationPolicy(...)
+        - pattern: SignedCookieSessionFactory(...)
+        - pattern: pyramid.session.SignedCookieSessionFactory(...)
+      - pattern-not: AuthTktAuthenticationPolicy(..., samesite=$SS, ...)
+      - pattern-not: pyramid.authentication.AuthTktAuthenticationPolicy(..., samesite=$SS, ...)
+      - pattern-not: SignedCookieSessionFactory(..., samesite=$SS, ...)
+      - pattern-not: pyramid.session.SignedCookieSessionFactory(..., samesite=$SS, ...)
+      - pattern-not: AuthTktAuthenticationPolicy(..., **$KW)
+      - pattern-not: pyramid.authentication.AuthTktAuthenticationPolicy(..., **$KW)
+      - pattern-not: SignedCookieSessionFactory(..., **$KW)
+      - pattern-not: pyramid.session.SignedCookieSessionFactory(..., **$KW)
+- id: narvy.python.secrets.hardcoded-credential-assignment.hardcoded-credential-assignment
+  message: A variable named like a credential (password/api_key/secret/token) is assigned a plain string
+    literal rather than being read from an environment variable or secret store. Anyone with source or
+    VCS history access recovers the value (CWE-798). Load it from `os.environ` and fail startup if missing.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Hard-coded Secrets
+  paths:
+    exclude:
+    # Test/fixture paths are NOT excluded: a real credential committed there is a
+    # common leak vector; it is emitted then down-ranked to LOW. Only example/doc
+    # code (whose literals are illustrative, not live) stays excluded.
+    - '**/*example*.py'
+    - '**/docs_src/**'
+    - '**/examples/**'
+  patterns:
+  - pattern-either:
+    - pattern: $VAR = "$LITERAL"
+  - metavariable-regex:
+      metavariable: $VAR
+      regex: (?i)^([a-z0-9]+_)*(password|passwd|passwsd|pwd|passphrase|secret|secret_key|api_key|apikey|api_secret|access_token|auth_token|refresh_token|session_token|client_secret|private_key|token|credential)s?$
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^.{8,}$
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^(?!.*(\{\}|\{\d|\{[a-zA-Z_]|%s|%d|xxxx|XXXX|changeme|CHANGEME|your[-_ ]|placeholder|example|redacted|\*\*\*)).*$
+  - pattern-not: $VAR = os.environ[$X]
+  - pattern-not: $VAR = os.getenv($X)
+  - pattern-not: $VAR = ""
+- id: narvy.python.secrets.logger-credential-leak.logger-credential-leak
+  message: A logging call includes a variable named like a credential (password/token/secret/api_key)
+    in its message. Logs routinely end up in less-restricted storage than the application itself (log
+    aggregators, ticket attachments, `journalctl`, support bundles); writing a live credential there is
+    an information-disclosure bug (CWE-532). Redact or omit the value before logging.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-532: Insertion of Sensitive Information into Log File'
+    owasp:
+    - A09:2021 - Security Logging and Monitoring Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Mishandled Sensitive Information
+  patterns:
+  - pattern-either:
+    - pattern: logging.$LEVEL(f"...{$VAR}...")
+    - pattern: logger.$LEVEL(f"...{$VAR}...")
+    - pattern: $LOG.$LEVEL(f"...{$VAR}...")
+  - metavariable-regex:
+      metavariable: $LEVEL
+      regex: ^(debug|info|warning|warn|error|critical|exception)$
+  - metavariable-regex:
+      metavariable: $VAR
+      regex: (?i)^(password|passwd|pwd|token|secret|api_key|apikey|access_token|auth_token|credential)s?$
+- id: narvy.python.session.django-csrf-exempt-view.django-csrf-exempt-view
+  message: View is decorated with `@csrf_exempt`, opting it out of Django's CSRF protection entirely.
+    If the view performs a state-changing action (POST/PUT/DELETE that writes data) and relies on cookie-based
+    session auth, it is now forgeable from any other site the victim has open (CWE-352). Only use `@csrf_exempt`
+    for endpoints authenticated by something other than cookies (e.g. a signed API token checked in the
+    view), and say so in a comment.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Cross-Site Request Forgery (CSRF)
+  patterns:
+  - pattern: "@csrf_exempt\ndef $VIEW(...):\n    ...\n"
+- id: narvy.python.session.django-debug-true-in-settings.django-debug-true-in-settings
+  message: '`DEBUG = True` in a Django settings file. In debug mode Django shows full stack traces with
+    local variables, settings values (including secrets, unless explicitly redacted), and SQL queries
+    to any visitor who triggers a 500 - a serious information disclosure if this file is ever the one
+    loaded in production (CWE-489, CWE-215). Default to `DEBUG = False` and flip it on only via an environment
+    variable in local dev.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-489: Active Debug Code'
+    - 'CWE-215: Insertion of Sensitive Information Into Debugging Code'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Active Debug Code
+  patterns:
+  - pattern: DEBUG = True
+- id: narvy.python.session.django-samesite-none-or-disabled.django-samesite-none-or-disabled
+  message: Session/CSRF cookie SameSite policy is set to "None" or disabled. SameSite=None allows the
+    cookie to be sent on cross-site requests, which is the exact condition CSRF protection exists to prevent
+    (CWE-352). Use `SESSION_COOKIE_SAMESITE = "Lax"` (or "Strict") unless you have a documented cross-site
+    embedding need paired with other CSRF defenses.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site Request Forgery (CSRF)
+  patterns:
+  - pattern-either:
+    - pattern: SESSION_COOKIE_SAMESITE = None
+    - pattern: SESSION_COOKIE_SAMESITE = "None"
+    - pattern: CSRF_COOKIE_SAMESITE = None
+    - pattern: CSRF_COOKIE_SAMESITE = "None"
+- id: narvy.python.session.django-secret-key-hardcoded-literal.django-secret-key-hardcoded-literal
+  message: '`SECRET_KEY` is assigned a plain string literal directly in settings, with no environment/secret-manager
+    indirection. Django''s SECRET_KEY signs sessions, CSRF tokens, and password-reset links; a value committed
+    to source control (and therefore to every clone, fork, and CI log) is a hardcoded cryptographic key
+    (CWE-321, CWE-798). Load it from an environment variable and fail startup if unset.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  paths:
+    exclude:
+    - '**/test*/**'
+    - '**/tests/**'
+    - '**/*test*.py'
+    - '**/*example*.py'
+    - '**/docs_src/**'
+    - '**/examples/**'
+  patterns:
+  - pattern: SECRET_KEY = "$LITERAL"
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^.{8,}$
+- id: narvy.python.session.django-session-cookie-insecure-settings.django-session-cookie-insecure-settings
+  message: Django settings explicitly disable a session-cookie security flag (`SESSION_COOKIE_SECURE =
+    False`, `SESSION_COOKIE_HTTPONLY = False`, or `CSRF_COOKIE_SECURE = False`). This allows the session/CSRF
+    cookie to be sent over plain HTTP or read from JavaScript, undermining transport security and XSS-hardening
+    respectively (CWE-614, CWE-1004).
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-614: Sensitive Cookie in HTTPS Session Without ''Secure'' Attribute'
+    - 'CWE-1004: Sensitive Cookie Without ''HttpOnly'' Flag'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Cookie Security
+  patterns:
+  - pattern-either:
+    - pattern: SESSION_COOKIE_SECURE = False
+    - pattern: SESSION_COOKIE_HTTPONLY = False
+    - pattern: CSRF_COOKIE_SECURE = False
+- id: narvy.python.session.flask-debug-mode-enabled.flask-debug-mode-enabled
+  message: Flask app is run with `debug=True` (or `app.debug = True`). The Werkzeug debugger it enables
+    exposes an interactive Python console on every unhandled exception - if this ever reaches a production
+    deployment, any visitor who triggers an error gets a remote Python shell (CWE-489, active debug code).
+    Gate `debug=` behind an environment-controlled flag that defaults to `False`, and never hardcode `True`.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-489: Active Debug Code'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Active Debug Code
+  patterns:
+  - pattern-either:
+    - pattern: $APP.run(..., debug=True, ...)
+    - pattern: $APP.debug = True
+    - pattern: $APP.config["DEBUG"] = True
+    - pattern: $APP.config['DEBUG'] = True
+- id: narvy.python.session.flask-set-cookie-missing-httponly.flask-set-cookie-missing-httponly
+  message: '`set_cookie()` is called without `httponly=True`. A cookie without HttpOnly is readable from
+    JavaScript via `document.cookie`, so any XSS on the page can exfiltrate it (session hijack). CWE-1004.
+    Set `httponly=True`, or `SESSION_COOKIE_HTTPONLY = True` globally.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-1004: Sensitive Cookie Without ''HttpOnly'' Flag'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cookie Security
+  patterns:
+  - pattern: $RESP.set_cookie($NAME, $VALUE, ...)
+  - pattern-not: $RESP.set_cookie($NAME, $VALUE, ..., httponly=True, ...)
+  - pattern-not: $RESP.set_cookie($NAME, $VALUE, ..., httponly=$X, ...)
+- id: narvy.python.session.flask-set-cookie-missing-secure.flask-set-cookie-missing-secure
+  message: '`set_cookie()` is called without `secure=True`. Without the Secure flag, the browser will
+    also send this cookie over plain HTTP, exposing it to network eavesdroppers and active MITM (CWE-614).
+    Set `secure=True` for any cookie carrying session/auth state, or set `SESSION_COOKIE_SECURE = True`
+    globally in Flask config.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-614: Sensitive Cookie in HTTPS Session Without ''Secure'' Attribute'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cookie Security
+  patterns:
+  - pattern: $RESP.set_cookie($NAME, $VALUE, ...)
+  - pattern-not: $RESP.set_cookie($NAME, $VALUE, ..., secure=True, ...)
+  - pattern-not: $RESP.set_cookie($NAME, $VALUE, ..., secure=$X, ...)
+- id: narvy.python.session.password-compared-with-equality.password-compared-with-equality
+  message: A value named like a password/token/secret is compared with `==` instead of a constant-time
+    comparison. Python's `==` on strings short-circuits on the first differing byte, so the comparison
+    time leaks how many leading characters were correct - a timing side channel an attacker can exploit
+    to recover the secret byte by byte (CWE-208). Use `hmac.compare_digest(a, b)` instead.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-208: Observable Timing Discrepancy'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Improper Authentication
+  patterns:
+  - pattern-either:
+    - pattern: "if $STORED_SECRET == $PROVIDED_SECRET:\n    ...\n"
+    - pattern: "if $PROVIDED_SECRET == $STORED_SECRET:\n    ...\n"
+  - metavariable-regex:
+      metavariable: $STORED_SECRET
+      regex: (?i)\.(password|passwd|pwd|secret|token|api_key|signature|hmac|mac)$
+  - pattern-not-inside: '$R = hmac.compare_digest(...)
+
+      ...
+
+      '
+- id: narvy.python.sqli.django-extra-tainted.django-extra-tainted
+  message: QuerySet `.extra()` is called with a `where=`/`select=`/`tables=` clause built by string interpolation.
+    `.extra()` SQL fragments are inserted into the query almost verbatim; any interpolated variable is
+    SQL injection (CWE-89). `.extra()` is deprecated for this exact reason - use the ORM's expression
+    API or `.raw()` with bound `params`.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - SQL Injection
+  patterns:
+  - pattern-either:
+    - pattern: $QS.extra(where=[f"...{$VAR}..."])
+    - pattern: $QS.extra(where=["..." + $VAR])
+    - pattern: '$QS.extra(select={$K: f"...{$VAR}..."})'
+- id: narvy.python.sqli.django-queryset-raw-tainted.django-queryset-raw-tainted
+  message: '`Model.objects.raw()` is called with a SQL string built by concatenation or interpolation
+    rather than passed as a fixed literal with the `params=` argument. Django''s `.raw()` does not auto-parameterize
+    the SQL text itself - only the `params` list is safely bound. SQL injection (CWE-89). Use `Model.objects.raw("...
+    WHERE id = %s", [user_id])`.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - SQL Injection
+  patterns:
+  - pattern-either:
+    - pattern: $MODEL.objects.raw("..." + $VAR)
+    - pattern: $MODEL.objects.raw($VAR + "...")
+    - pattern: $MODEL.objects.raw(f"...{$VAR}...")
+    - pattern: $MODEL.objects.raw("...".format(...))
+    - pattern: $MODEL.objects.raw("..." % $VAR)
+- id: narvy.python.sqli.pymongo-eval-where-injection.pymongo-eval-where-injection
+  message: MongoDB `$where` clause (or `db.eval()`) built with a tainted string. `$where` executes JavaScript
+    server-side against every document; an attacker-controlled fragment here is server-side NoSQL code
+    injection, not just a filter bypass (CWE-943, CWE-94). Use standard MongoDB query operators instead
+    of `$where`.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-943: Improper Neutralization of Special Elements in Data Query Logic'
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - pymongo
+    - mongodb
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - SQL Injection
+  patterns:
+  - pattern-either:
+    - pattern: '{"$where": f"...{$VAR}..."}'
+    - pattern: '{"$where": "..." + $VAR}'
+    - pattern: $DB.eval(f"...{$VAR}...")
+    - pattern: $DB.eval("..." + $VAR)
+- id: narvy.python.sqli.sqlalchemy-execute-string-concat.sqlalchemy-execute-string-concat
+  message: '`.execute()` on a SQLAlchemy Connection/Session/Engine called with a raw string built by concatenation
+    or f-string rather than a parameterized `text()` construct with bound params. SQL injection (CWE-89).'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - sqlalchemy
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - SQL Injection
+  patterns:
+  - pattern-either:
+    - pattern: $SESSION.execute("..." + $VAR)
+    - pattern: $SESSION.execute(f"...{$VAR}...")
+    - pattern: $ENGINE.connect().execute("..." + $VAR)
+  - metavariable-regex:
+      metavariable: $SESSION
+      regex: (?i)(session|conn|connection|engine)
+- id: narvy.python.sqli.sqlalchemy-text-tainted.sqlalchemy-text-tainted
+  message: 'SQLAlchemy `text()` construct built by string interpolation rather than using bound parameters
+    (`text("... WHERE id = :id").bindparams(id=x)` or `conn.execute(text(...), {"id": x})`). Interpolating
+    a variable directly into the SQL text defeats SQLAlchemy''s parameterization and is SQL injection
+    (CWE-89).'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - sqlalchemy
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - SQL Injection
+  patterns:
+  - pattern-either:
+    - pattern: text(f"...{$VAR}...")
+    - pattern: text("..." + $VAR)
+    - pattern: text($VAR + "...")
+    - pattern: text("...".format($VAR))
+    - pattern: text("..." % $VAR)
+  - pattern-not: text("...")
+- id: narvy.python.sqli.formatted-sql-string-to-execute.formatted-sql-string-to-execute
+  message: >-
+    A SQL query built with Python string formatting (%, .format(), an f-string
+    interpolation, or + concatenation) reaches cursor.execute / cursor.executemany.
+    If any interpolated value is attacker-controlled this is SQL injection (CWE-89).
+    Build queries with bound parameters instead: execute(sql, (params,)) or use an
+    ORM with bound parameters.
+  severity: ERROR
+  languages:
+  - python
+  mode: taint
+  metadata:
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - 'A03:2021 - Injection'
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - python
+    - sqlite3
+    - psycopg2
+    - mysql-connector
+    - aiopg
+    - asyncpg
+    - pymysql
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Improper Validation
+    references:
+    - https://cwe.mitre.org/data/definitions/89.html
+  pattern-sources:
+  - patterns:
+    - pattern: '"$SQL" % $X'
+    - metavariable-regex:
+        metavariable: $SQL
+        regex: (?i).*\b(select|insert\s+into|update|delete\s+from|drop\s+table|alter\s+table|create\s+table|merge|truncate|where|values|set|from)\b.*
+  - patterns:
+    - pattern: '"$SQL".format(...)'
+    - metavariable-regex:
+        metavariable: $SQL
+        regex: (?i).*\b(select|insert\s+into|update|delete\s+from|drop\s+table|alter\s+table|create\s+table|merge|truncate|where|values|set|from)\b.*
+  - pattern: 'f"...{$X}..."'
+  - patterns:
+    - pattern: '"$SQL" + $X'
+    - metavariable-regex:
+        metavariable: $SQL
+        regex: (?i).*\b(select|insert\s+into|update|delete\s+from|drop\s+table|alter\s+table|create\s+table|merge|truncate|where|values|set|from)\b.*
+  pattern-sinks:
+  - pattern: $CURSOR.execute($QUERY, ...)
+  - pattern: $CURSOR.execute($QUERY)
+  - pattern: $CURSOR.executemany($QUERY, ...)
+  - pattern: $CURSOR.executemany($QUERY)
+- id: narvy.python.ssrf.httpx-tainted-url.httpx-tainted-url
+  message: '`httpx` client call with a URL built directly from request data. Same SSRF risk (CWE-918)
+    as `requests`/`urllib` - httpx is increasingly the default HTTP client in async FastAPI codebases
+    and is just as exploitable if the URL/host is attacker-controlled.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - httpx
+    - fastapi
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Server-Side Request Forgery (SSRF)
+  patterns:
+  - pattern-either:
+    - pattern: httpx.$METHOD($URL)
+    - pattern: await $CLIENT.$METHOD($URL)
+  - metavariable-regex:
+      metavariable: $URL
+      regex: (?i)(request\.(args|form|json|values|get)|query_params|path_params)
+  - metavariable-regex:
+      metavariable: $METHOD
+      regex: ^(get|post|put|delete|head|patch|request)$
+- id: narvy.python.ssrf.requests-tainted-url.requests-tainted-url
+  message: '`requests.$METHOD()` is called with a URL built directly from request data (`request.args`,
+    `request.form`, `request.json`, a Django `request.GET`, or a FastAPI path/query parameter). Without
+    validating the target host against an allowlist, an attacker can point this request at internal services
+    (cloud metadata endpoints, admin panels, internal APIs) that are not otherwise reachable from the
+    internet. SSRF (CWE-918).'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - requests
+    - flask
+    - django
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Server-Side Request Forgery (SSRF)
+  patterns:
+  - pattern-either:
+    - pattern: requests.$METHOD(request.$KIND.$ATTR(...))
+    - pattern: requests.$METHOD(request.$KIND[$X])
+    - pattern: requests.$METHOD(request.$KIND.get(...))
+    - pattern: requests.$METHOD(f"...{request.$KIND.$ATTR(...)}...")
+    - pattern: requests.$METHOD("..." + request.$KIND.$ATTR(...))
+    - pattern: '$URL = request.$KIND.$ATTR(...)
+
+        ...
+
+        requests.$METHOD($URL)
+
+        '
+    - pattern: '$URL = request.$KIND[$X]
+
+        ...
+
+        requests.$METHOD($URL)
+
+        '
+  - metavariable-regex:
+      metavariable: $METHOD
+      regex: ^(get|post|put|delete|head|patch|request)$
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|json|values|GET|POST|query_params|path_params)$
+- id: narvy.python.ssrf.tainted-host-only.tainted-host-only
+  message: A request's target *host* (not the full URL) is built from request data and then f-string-interpolated
+    into a `requests`/`urllib` call (`f"http://{host}/..."`). Restricting only the path while letting
+    the host be attacker-controlled is still full SSRF (CWE-918) - validate the host against an allowlist
+    before building the URL.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - requests
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Server-Side Request Forgery (SSRF)
+  patterns:
+  - pattern-either:
+    - pattern: '$HOST = request.$KIND.$ATTR(...)
+
+        ...
+
+        requests.$METHOD(f"http://{$HOST}$REST")
+
+        '
+    - pattern: '$HOST = request.$KIND.$ATTR(...)
+
+        ...
+
+        requests.$METHOD(f"https://{$HOST}$REST")
+
+        '
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|json|values|GET|POST)$
+- id: narvy.python.ssrf.urllib-tainted-url.urllib-tainted-url
+  message: '`urllib.request.urlopen()` is called with a URL built directly from request data. Same SSRF
+    risk as the `requests`-library case (CWE-918): the server will fetch whatever host/path the attacker
+    supplies, including internal-only addresses. Validate the target against an allowlist of hosts, or
+    resolve and check the IP is not in a private/link-local range before fetching.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Server-Side Request Forgery (SSRF)
+  patterns:
+  - pattern-either:
+    - pattern: urllib.request.urlopen(request.$KIND.$ATTR(...))
+    - pattern: urllib.request.urlopen(request.$KIND[$X])
+    - pattern: urlopen(request.$KIND.$ATTR(...))
+    - pattern: '$URL = request.$KIND.$ATTR(...)
+
+        ...
+
+        urllib.request.urlopen($URL)
+
+        '
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|json|values|GET|POST)$
+- id: narvy.python.transport.bind-all-interfaces.bind-all-interfaces
+  message: Server socket / dev-server binds to `0.0.0.0` (all interfaces) explicitly in application code.
+    This exposes the service on every network interface, including ones only meant to be internal/loopback,
+    bypassing whatever network-level restriction the deployment intended (CWE-668). Bind to a specific
+    interface, or make the bind address configurable via environment and default it to `127.0.0.1` for
+    anything not meant to be internet-facing.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-668: Exposure of Resource to Wrong Sphere'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - flask
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Mishandled Sensitive Information
+  patterns:
+  - pattern-either:
+    - pattern: $APP.run(host="0.0.0.0", ...)
+    - pattern: socket.bind(("0.0.0.0", $PORT))
+- id: narvy.python.transport.cleartext-http-literal.cleartext-http-literal
+  message: Cleartext HTTP URL detected. Traffic to this endpoint is unencrypted and vulnerable to MITM
+    (eavesdropping, tampering). Use HTTPS. CWE-319.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-319: Cleartext Transmission of Sensitive Information'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    - A03:2017 - Sensitive Data Exposure
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Insecure Communication
+    references:
+    - https://cwe.mitre.org/data/definitions/319.html
+    - https://owasp.org/www-community/vulnerabilities/Insecure_Transport
+  paths:
+    exclude:
+    - '**/fuzzer/payloads.py'
+    - '**/fuzzer/**/payloads*.py'
+    - '**/oob/blind_payloads.py'
+    - '**/*_analyzer.py'
+    - '**/payloads/*.py'
+  patterns:
+  - pattern-either:
+    - pattern: '"$URL"'
+    - pattern: '''$URL'''
+  - metavariable-regex:
+      metavariable: $URL
+      regex: ^http://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|169\.254\.|10\.\d+\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|\[::1\]|[a-zA-Z0-9.-]+\.(local|internal|test|example)(/|$|:)|schemas\.|www\.w3\.org|xmlns\.com|purl\.org|ns\.adobe\.com|java\.sun\.com|jabber\.org|x\.org|evil\.com)[a-zA-Z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$
+- id: narvy.python.xpath-injection.lxml-xpath-tainted.lxml-xpath-tainted
+  message: An XPath expression evaluated by `lxml`/`xml.etree`'s `.xpath()` is built by string interpolation
+    with request data. Like SQL, XPath has no built-in parameter binding for string-built queries; an
+    attacker can inject expression syntax (`' or '1'='1`) to select unintended nodes or bypass an authentication
+    check implemented as an XPath query. CWE-643 (XPath Injection). Use `.xpath(expr, var=$VAR)` with
+    XPath variable binding instead of interpolating the value into the expression string.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-643: Improper Neutralization of Data within XPath Expressions (''XPath Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - lxml
+    - python
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Improper Validation
+  patterns:
+  - pattern-either:
+    - pattern: $TREE.xpath(f"...{$VAR}...")
+    - pattern: $TREE.xpath("..." + $VAR)
+    - pattern: $TREE.xpath("...".format($VAR))
+    - pattern: $TREE.xpath("..." % $VAR)
+  - pattern-not: $TREE.xpath("...")
+- id: narvy.python.xss.django-context-autoescape-disabled.django-context-autoescape-disabled
+  message: A Django template `Context` is constructed with `autoescape=False`. Every variable rendered
+    through this context skips Django's automatic HTML escaping (CWE-79). If any of the rendered data
+    originates from a request, a database row a user can edit, or any other attacker-influenced source,
+    this is XSS. Remove the `autoescape=False` argument, or escape the specific values that need to stay
+    unescaped with `mark_safe()` after running them through `bleach.clean()` or similar.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - pattern: Context(..., autoescape=False, ...)
+    - pattern: RequestContext(..., autoescape=False, ...)
+- id: narvy.python.xss.django-html-email-body-tainted.django-html-email-body-tainted
+  message: An `EmailMessage` whose `content_subtype` is set to `"html"` is built from request data. Mail
+    clients render this body as raw HTML with no equivalent of Django's template auto-escaping applied
+    - if an attacker controls the value, they control the HTML/script that renders in whoever's inbox
+    receives it (CWE-79, email-delivered XSS). Escape the value with `django.utils.html.escape()` before
+    interpolating it into the HTML body, or build the email through a Django template (auto-escaped) instead
+    of raw string concatenation/formatting.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-inside: "def $FUNC(...):\n    ...\n    $EMAIL.content_subtype = \"html\"\n    ...\n"
+  - pattern-either:
+    - pattern: django.core.mail.EmailMessage($SUBJ, request.$KIND.$ATTR(...), ...)
+    - pattern: EmailMessage($SUBJ, request.$KIND.$ATTR(...), ...)
+    - pattern: '$BODY = request.$KIND.$ATTR(...)
+
+        ...
+
+        django.core.mail.EmailMessage($SUBJ, $BODY, ...)
+
+        '
+    - pattern: '$BODY = request.$KIND.$ATTR(...)
+
+        ...
+
+        EmailMessage($SUBJ, $BODY, ...)
+
+        '
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(GET|POST|data|query_params)$
+- id: narvy.python.xss.django-httpresponse-echoes-request-data.django-httpresponse-echoes-request-data
+  message: '`HttpResponse()` built by interpolating `request.GET`/`request.POST` directly into the response
+    body instead of going through a Django template (which auto-escapes) or `django.utils.html.escape()`.
+    Reflected XSS (CWE-79).'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: HIGH
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - pattern: HttpResponse(f"...{request.$KIND.$ATTR(...)}...")
+    - pattern: HttpResponse("..." + request.$KIND.$ATTR(...))
+    - pattern: HttpResponse("...".format(request.$KIND.$ATTR(...)))
+    - pattern: HttpResponse("..." % request.$KIND.$ATTR(...))
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(GET|POST|COOKIES|META)$
+- id: narvy.python.xss.django-mark-safe-html-email-body.django-mark-safe-html-email-body
+  message: '`mark_safe()` output is passed directly as an HTML email body (`EmailMessage` with `content_subtype
+    = "html"`, or `send_mail(..., html_message=...)`). `mark_safe()` skips Django''s escaping, so whatever
+    went into it reaches the recipient''s mail client verbatim (CWE-79). Only wrap already-sanitized HTML
+    (e.g. from `bleach.clean()`) with `mark_safe()`, never a raw concatenation/format string built from
+    request or database data.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - django
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - patterns:
+      - pattern-inside: "def $FUNC(...):\n    ...\n    $EMAIL.content_subtype = \"html\"\n    ...\n"
+      - pattern: '$BODY = mark_safe(...)
+
+          ...
+
+          django.core.mail.EmailMessage($SUBJ, $BODY, ...)
+
+          '
+    - patterns:
+      - pattern-inside: "def $FUNC(...):\n    ...\n    $EMAIL.content_subtype = \"html\"\n    ...\n"
+      - pattern: '$BODY = mark_safe(...)
+
+          ...
+
+          EmailMessage($SUBJ, $BODY, ...)
+
+          '
+    - pattern: '$BODY = mark_safe(...)
+
+        ...
+
+        send_mail(..., html_message=$BODY, ...)
+
+        '
+- id: narvy.python.xss.django-mark-safe-tainted.django-mark-safe-tainted
+  message: '`mark_safe()` is applied to a string built by interpolating a variable that is not passed
+    through `escape()`/`conditional_escape()` first. `mark_safe()` tells Django''s template engine to
+    skip auto-escaping entirely - any HTML/JS in the unescaped interpolated value reaches the browser
+    verbatim (CWE-79). If the variable is fully attacker-controlled this is XSS; if it is only developer/admin-controlled,
+    escaping it anyway costs nothing and keeps the call reviewable without having to trace where every
+    value came from. Wrap the interpolated part in `escape(...)`, or build the HTML through a template
+    instead of `mark_safe()`.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - django
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - pattern: mark_safe(f"...{$VAR}...")
+    - pattern: mark_safe("..." + $VAR)
+    - pattern: mark_safe("...".format($VAR))
+    - pattern: mark_safe("..." % $VAR)
+  - pattern-not: mark_safe("...")
+  - pattern-not: mark_safe(f"...{escape($VAR)}...")
+  - pattern-not: mark_safe(f"...{conditional_escape($VAR)}...")
+  - pattern-not: mark_safe("..." + escape($VAR))
+  - pattern-not: mark_safe("...".format(escape($VAR)))
+- id: narvy.python.xss.django-send-mail-html-message-tainted.django-send-mail-html-message-tainted
+  message: Django's `send_mail(...)` is called with `html_message=` built from request data. `html_message`
+    is rendered as raw HTML by the recipient's mail client with no auto-escaping applied (CWE-79, email-delivered
+    XSS). Escape the value with `django.utils.html.escape()` first, or render it through a Django template.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - pattern: send_mail(..., html_message=request.$KIND.$ATTR(...), ...)
+    - pattern: django.core.mail.send_mail(..., html_message=request.$KIND.$ATTR(...), ...)
+    - pattern: '$BODY = request.$KIND.$ATTR(...)
+
+        ...
+
+        send_mail(..., html_message=$BODY, ...)
+
+        '
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(GET|POST|data|query_params)$
+- id: narvy.python.xss.django-template-tag-autoescape-off.django-template-tag-autoescape-off
+  message: A Django template file contains `{% autoescape off %}`. Every variable rendered inside this
+    block skips Django's automatic HTML escaping until the matching `{% endautoescape %}` (CWE-79). If
+    any variable rendered in that block can contain attacker-controlled text, this is XSS. Remove the
+    block, or wrap only the specific value that is genuinely pre-sanitized HTML with `|safe` / `mark_safe()`
+    in Python instead of disabling escaping for the whole region.
+  severity: WARNING
+  languages:
+  - generic
+  paths:
+    include:
+    - '*.html'
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  pattern-regex: \{%\s*autoescape\s+off\s*%\}
+- id: narvy.python.xss.django-templates-setting-autoescape-disabled.django-templates-setting-autoescape-disabled
+  message: 'Django''s `TEMPLATES` setting sets `''autoescape'': False` in a backend''s `OPTIONS`. This
+    turns off automatic HTML escaping for every template rendered through this backend project-wide -
+    any template variable that is not manually wrapped in `escape()` becomes an XSS sink (CWE-79). Remove
+    the `autoescape` override (it defaults to `True`), or escape every interpolated value by hand if you
+    truly need it off.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - django
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - pattern: '{..., ''OPTIONS'': {..., ''autoescape'': False, ...}, ...}
+
+        '
+    - pattern: '{..., "OPTIONS": {..., "autoescape": False, ...}, ...}
+
+        '
+- id: narvy.python.xss.flask-raw-html-response.flask-raw-html-response
+  message: A Flask response is built from a non-literal, non-template-rendered string with an explicit
+    `text/html` mimetype/content_type. Nothing escapes this body before it reaches the browser. If the
+    string contains attacker-controlled data this is reflected XSS (CWE-79). Render through `render_template`
+    (Jinja2 auto-escapes by default) or explicitly escape with `markupsafe.escape()` before concatenation.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - python
+    - flask
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - pattern: Response($BODY, mimetype="text/html")
+    - pattern: Response($BODY, content_type="text/html")
+  - pattern-not: Response("...", mimetype="text/html")
+  - pattern-not: Response("...", content_type="text/html")
+  - pattern-not: Response(render_template(...), mimetype="text/html")
+- id: narvy.python.xss.flask-response-echoes-request-data.flask-response-echoes-request-data
+  message: A Flask view returns an HTML/text response built by directly interpolating request data (`request.args`,
+    `request.form`, `request.values`, ...) instead of rendering it through Jinja2's auto-escaping `render_template()`.
+    A browser reflecting this response executes any HTML/JS the attacker put in the request value. Reflected
+    XSS (CWE-79). Use `render_template()` with the value passed as a context variable, or `markupsafe.escape()`
+    if you must build the string manually.
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    likelihood: HIGH
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - pattern: return f"...{request.$KIND.$ATTR(...)}..."
+    - pattern: return f"...{request.$KIND.$ATTR}..."
+    - pattern: return f"...{request.$KIND[$X]}..."
+    - pattern: return "..." + request.$KIND.$ATTR(...)
+    - pattern: return "...".format(request.$KIND.$ATTR(...))
+    - pattern: return Response(f"...{request.$KIND.$ATTR(...)}...")
+    - pattern: return make_response(f"...{request.$KIND.$ATTR(...)}...")
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|values|GET|POST|json|cookies|headers)$
+- id: narvy.python.xss.jinja2-autoescape-disabled.jinja2-autoescape-disabled
+  message: Jinja2 `Environment(...)` is constructed with `autoescape=False`, or omits `autoescape` entirely
+    - which defaults to False for a plain `jinja2.Environment` (unlike Flask's `app.jinja_env`, which
+    turns it on for you). Every variable rendered through templates in this environment is XSS-vulnerable
+    by default (CWE-79). Pass `autoescape=True`, or `select_autoescape([...])` to scope it to HTML/XML
+    template extensions.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - jinja2
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - pattern: jinja2.Environment(..., autoescape=False, ...)
+    - pattern: Environment(..., autoescape=False, ...)
+    - patterns:
+      - pattern-either:
+        - pattern: jinja2.Environment(loader=..., ...)
+        - pattern: Environment(loader=..., ...)
+      - pattern-not: jinja2.Environment(..., autoescape=$AUTOESCAPE, ...)
+      - pattern-not: Environment(..., autoescape=$AUTOESCAPE, ...)
+- id: narvy.python.xss.markup-wrap-non-literal.markup-wrap-non-literal
+  message: '`Markup()` wraps a non-literal value, marking it as pre-escaped HTML. Jinja2 will render it
+    unescaped. If the value contains attacker-controlled data this is XSS (CWE-79). Only wrap already-sanitized
+    output (e.g. from `bleach.clean()`) with `Markup`, never raw user input.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - flask
+    - jinja2
+    - markupsafe
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  patterns:
+  - pattern-either:
+    - pattern: Markup($X)
+    - pattern: markupsafe.Markup($X)
+    - pattern: flask.Markup($X)
+  - pattern-not: Markup("...")
+  - pattern-not: markupsafe.Markup("...")
+  - pattern-not: flask.Markup("...")
+  - pattern-not: Markup(bleach.clean(...))
+  - pattern-not: Markup($SANITIZER.clean(...))
+- id: narvy.python.xss.raw-html-fragment-built-from-request-data.raw-html-fragment-built-from-request-data
+  message: A value derived from the HTTP request flows into a string that is built to look like an HTML
+    fragment (an f-string/%-format/.format() call/concatenation containing a literal `<tag ...>`), without
+    going through an escaping function first. Whoever eventually renders this fragment - a template `{%
+    autoescape off %}` block, a hand-rolled response, a non-Django rendering layer (widgets, table columns,
+    admin actions) - gets the attacker's HTML/JS verbatim. CWE-79. Escape the interpolated value with
+    `django.utils.html.escape()` / `markupsafe.escape()` / `html.escape()` before it goes into the fragment,
+    or build the fragment through `format_html()` (Django) / Jinja2 auto-escaping instead of a raw string
+    op.
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - django
+    - flask
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: LOW
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+    references:
+    - https://cwe.mitre.org/data/definitions/79.html
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: request.$KIND.get(...)
+      - pattern: request.$KIND[...]
+    - metavariable-regex:
+        metavariable: $KIND
+        regex: ^(GET|POST|args|form|values|json|COOKIES|META|data)$
+  pattern-sinks:
+  - patterns:
+    - pattern: f"...{$SINK}..."
+    - pattern-not-regex: ^((?!<[a-zA-Z]).)*$
+  - patterns:
+    - pattern: '"...%s..." % $SINK'
+    - pattern-not-regex: ^((?!<[a-zA-Z]).)*$
+  - patterns:
+    - pattern: '"...%s..." % ($SINK, ...)'
+    - pattern-not-regex: ^((?!<[a-zA-Z]).)*$
+  - patterns:
+    - pattern: '"...{}...".format($SINK)'
+    - pattern-not-regex: ^((?!<[a-zA-Z]).)*$
+  - patterns:
+    - pattern: '"...{}...".format(..., $SINK, ...)'
+    - pattern-not-regex: ^((?!<[a-zA-Z]).)*$
+  - patterns:
+    - pattern: '"..." + $SINK'
+    - pattern-not-regex: ^((?!<[a-zA-Z]).)*$
+  - patterns:
+    - pattern: $SINK + "..."
+    - pattern-not-regex: ^((?!<[a-zA-Z]).)*$
+  pattern-sanitizers:
+  - patterns:
+    - pattern: escape(...)
+  - patterns:
+    - pattern: django.utils.html.escape(...)
+  - patterns:
+    - pattern: markupsafe.escape(...)
+  - patterns:
+    - pattern: html.escape(...)
+  - patterns:
+    - pattern: conditional_escape(...)
+  - patterns:
+    - pattern: format_html(...)
+- id: narvy.python.xss.template-string-render-tainted.render-template-string-tainted
+  message: '`render_template_string()` is called with a template *text* built from request data, rather
+    than a fixed template file. Since the first argument is compiled as a Jinja2 template, an attacker
+    who controls it can inject template syntax (`{{ 7*7 }}`, or worse, `{{ self.__init__.__globals__ ...
+    }}`), which is Server-Side Template Injection - typically full RCE, not just XSS (CWE-94, CWE-79).
+    Never build the template text itself from user input; pass user data only as context variables to
+    a fixed template.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - flask
+    - jinja2
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+    - Code Injection
+  patterns:
+  - pattern-either:
+    - pattern: render_template_string(request.$KIND.$ATTR(...))
+    - pattern: render_template_string(f"...{request.$KIND.$ATTR(...)}...")
+    - pattern: render_template_string("..." + request.$KIND.$ATTR(...))
+    - pattern: '$T = request.$KIND.$ATTR(...)
+
+        ...
+
+        render_template_string($T)
+
+        '
+  - metavariable-regex:
+      metavariable: $KIND
+      regex: ^(args|form|values|GET|POST|json)$
+- id: narvy.python.deserialization.jsonpickle-decode-untrusted.jsonpickle-decode-untrusted
+  message: '`jsonpickle.decode()` deserializes data that is not a fixed local trusted source. Unlike plain
+    `json.loads()`, jsonpickle can reconstruct arbitrary Python objects (including calling constructors)
+    from the `py/object` markers in its payload - applying the same object-instantiation RCE risk as `pickle`
+    to data that looks like harmless JSON (CWE-502). Use `json.loads()` for untrusted input unless you
+    specifically need full object round-tripping from a trusted source only.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-502: Deserialization of Untrusted Data'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - jsonpickle
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Insecure Deserialization
+  patterns:
+  - pattern: jsonpickle.decode($DATA)
+  - metavariable-regex:
+      metavariable: $DATA
+      regex: (?i)(request|upload|response|body|payload)
+- id: narvy.python.deserialization.marshal-loads-untrusted.marshal-loads-untrusted
+  message: '`marshal.loads()` deserializes data that is not a fixed local trusted source. `marshal` is
+    the format used for compiled Python bytecode - loading crafted marshal data from an untrusted source
+    is a code-execution vector, and unlike `pickle`, its format is explicitly documented as unstable/unsafe
+    by CPython itself (CWE-502).'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-502: Deserialization of Untrusted Data'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Insecure Deserialization
+  patterns:
+  - pattern: marshal.loads($DATA)
+  - metavariable-regex:
+      metavariable: $DATA
+      regex: (?i)(request|upload|response|body|payload|socket|message|msg)
+- id: narvy.python.deserialization.pickle-loads-untrusted.pickle-loads-untrusted
+  message: '`pickle.load()`/`pickle.loads()` deserializes data that is not a fixed local trusted file
+    - a request body, an uploaded file, a cache/queue payload, or a network socket read. Unpickling is
+    equivalent to code execution: a crafted pickle stream can call arbitrary callables via `__reduce__`.
+    This is remote code execution (CWE-502), not just a data-integrity issue. Use JSON (or another data-only
+    format) for anything that crosses a trust boundary; if you must use pickle, sign the payload (HMAC)
+    and verify before unpickling.'
+  severity: ERROR
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-502: Deserialization of Untrusted Data'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Insecure Deserialization
+  patterns:
+  - pattern-either:
+    - pattern: pickle.load($F)
+    - pattern: pickle.loads($DATA)
+    - pattern: cPickle.loads($DATA)
+  - metavariable-regex:
+      metavariable: $DATA
+      regex: (?i)(request|upload|response|body|payload|socket|redis|celery|queue|message|msg)
+- id: narvy.python.deserialization.shelve-open-untrusted-path.shelve-open-untrusted-path
+  message: '`shelve.open()` is backed by `pickle` under the hood - reading a shelve database an attacker
+    can influence the path or contents of is the same RCE risk as calling `pickle.load()` directly (CWE-502).
+    Only open shelve files from a fixed, trusted, non-user-writable path.'
+  severity: WARNING
+  languages:
+  - python
+  metadata:
+    cwe:
+    - 'CWE-502: Deserialization of Untrusted Data'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    vulnerability_class:
+    - Insecure Deserialization
+  patterns:
+  - pattern: shelve.open($PATH)
+  - metavariable-regex:
+      metavariable: $PATH
+      regex: (?i)(request|upload|user|param)

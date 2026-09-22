@@ -1,0 +1,48 @@
+rules:
+
+# C#/.NET XXE: an XmlDocument left with its default resolver still resolves external entities/DTDs.
+
+- id: narvy.csharp.xxe.xmldocument-default-resolver.xmldocument-default-resolver
+  message: >-
+    An `XmlDocument` parses input while keeping its default `XmlResolver`.
+    On older target frameworks that resolver follows external entities and
+    DTDs, so parsing attacker-controlled XML lets it read local files or
+    reach internal network resources (XXE / SSRF, CWE-611). Set
+    `doc.XmlResolver = null;` before loading, or parse with
+    `XmlReader` configured with `DtdProcessing.Prohibit`.
+  severity: ERROR
+  languages: [csharp]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-611: Improper Restriction of XML External Entity Reference"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [csharp, dotnet]
+  patterns:
+    - pattern-either:
+        - patterns:
+            - pattern-inside: |
+                var $DOC = new XmlDocument();
+                ...
+            - pattern-not-inside: |
+                var $DOC = new XmlDocument();
+                ...
+                $DOC.XmlResolver = null;
+                ...
+        - patterns:
+            - pattern-inside: |
+                $TY $DOC = new XmlDocument();
+                ...
+            - pattern-not-inside: |
+                $TY $DOC = new XmlDocument();
+                ...
+                $DOC.XmlResolver = null;
+                ...
+    - pattern-either:
+        - pattern: $DOC.LoadXml(...)
+        - pattern: $DOC.Load(...)

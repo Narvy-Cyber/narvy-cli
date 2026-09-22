@@ -1,0 +1,61 @@
+rules:
+
+# ASP.NET config hardening (web.config/attributes): request validation off, debug compilation on.
+# Generic mode.
+
+- id: narvy.csharp.config.request-validation-disabled.request-validation-disabled
+  message: >-
+    ASP.NET request validation is disabled (`validateRequest="false"` in
+    web.config, or `[ValidateInput(false)]` on a controller/action). Request
+    validation is the framework's built-in first line against reflected XSS
+    and script injection in posted values; turning it off removes that
+    safety net for every affected request (CWE-20, CWE-79). Leave it on and
+    encode output at the point of use instead of disabling validation
+    wholesale.
+  severity: WARNING
+  languages: [generic]
+  paths:
+    include:
+      - "*.config"
+      - "*.cs"
+  metadata:
+    category: security
+    cwe:
+      - "CWE-20: Improper Input Validation"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology: [csharp, dotnet, asp.net]
+  patterns:
+    - pattern-either:
+        - pattern-regex: 'validateRequest\s*=\s*"false"'
+        - pattern-regex: 'ValidateInput\s*\(\s*false\s*\)'
+
+- id: narvy.csharp.config.debug-compilation-enabled.debug-compilation-enabled
+  message: >-
+    `<compilation debug="true">` is set in web.config. Debug compilation
+    disables request timeouts, emits verbose error pages that leak stack
+    traces and source paths, and produces non-optimized, larger binaries -
+    none of which belong in a deployed application (CWE-11, CWE-489). Set
+    `debug="false"` for anything past local development.
+  severity: WARNING
+  languages: [generic]
+  paths:
+    include:
+      - "*.config"
+  metadata:
+    category: security
+    cwe:
+      - "CWE-11: ASP.NET Misconfiguration: Creating Debug Binary"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: HIGH
+    technology: [csharp, dotnet, asp.net]
+  patterns:
+    - pattern-regex: '<compilation[^>]*\bdebug\s*=\s*"true"'

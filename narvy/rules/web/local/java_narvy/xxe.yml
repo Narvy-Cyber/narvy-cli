@@ -1,0 +1,212 @@
+rules:
+
+# Java XXE hardening. The four rule ids below are a stable API - do not rename.
+# Patterns are bounded on both ends (factory creation ... parse/build call); an open trailing `...` can double-match.
+
+- id: narvy.java.xxe.documentbuilderfactory-disallow-doctype-decl-missing.documentbuilderfactory-disallow-doctype-decl-missing
+  message: >-
+    A `DocumentBuilderFactory` is created and used to parse XML without the
+    `http://apache.org/xml/features/disallow-doctype-decl` feature disabled.
+    Without it, a DOCTYPE declaration in the parsed document can define
+    external entities that read local files, reach internal network
+    services (SSRF), or exhaust memory (billion-laughs) (CWE-611). Call
+    `factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);`
+    right after creating the factory.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-611: Improper Restriction of XML External Entity Reference"
+      - "CWE-776: Improper Restriction of Recursive Entity References in DTDs"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  patterns:
+    - pattern: |
+        $DBF = DocumentBuilderFactory.newInstance();
+        ...
+        $DBF.newDocumentBuilder();
+    - pattern-not: |
+        $DBF = DocumentBuilderFactory.newInstance();
+        ...
+        $DBF.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        ...
+        $DBF.newDocumentBuilder();
+
+- id: narvy.java.xxe.saxparserfactory-disallow-doctype-decl-missing.saxparserfactory-disallow-doctype-decl-missing
+  message: >-
+    A `SAXParserFactory` is created without disabling DOCTYPE declarations.
+    A crafted DOCTYPE lets an attacker read arbitrary local files, reach
+    internal-only network endpoints (SSRF), or trigger a denial of service
+    via entity expansion (CWE-611). Call
+    `factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);`
+    on the factory before parsing.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-611: Improper Restriction of XML External Entity Reference"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  patterns:
+    - pattern: |
+        $SPF = SAXParserFactory.newInstance();
+        ...
+        $SPF.newSAXParser();
+    - pattern-not: |
+        $SPF = SAXParserFactory.newInstance();
+        ...
+        $SPF.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        ...
+        $SPF.newSAXParser();
+
+- id: narvy.java.xxe.transformerfactory-dtds-not-disabled.transformerfactory-dtds-not-disabled
+  message: >-
+    A `TransformerFactory` (used for XSLT transforms) is created without
+    disabling access to external DTDs and stylesheets. An attacker-supplied
+    stylesheet or source document can then read local files or reach
+    internal network endpoints through an external entity or `document()`
+    call (CWE-611). Set `factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");`
+    and `factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");`.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-611: Improper Restriction of XML External Entity Reference"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology: [java]
+  patterns:
+    - pattern: |
+        $TF = TransformerFactory.newInstance();
+        ...
+        $TF.newTransformer();
+    - pattern-not: |
+        $TF = TransformerFactory.newInstance();
+        ...
+        $TF.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "...");
+        ...
+        $TF.newTransformer();
+
+- id: narvy.java.xxe.xmlinputfactory-disallow-doctype-decl-missing.xmlinputfactory-disallow-doctype-decl-missing
+  message: >-
+    An `XMLInputFactory` (StAX) is created without disabling DTD support or
+    external entity resolution. Reading an attacker-supplied document with
+    it can read local files, hit internal network endpoints (SSRF), or
+    trigger entity-expansion denial of service (CWE-611). Set
+    `factory.setProperty(XMLInputFactory.SUPPORT_DTD, false);` and
+    `factory.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);`.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-611: Improper Restriction of XML External Entity Reference"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  patterns:
+    - pattern: |
+        $XIF = XMLInputFactory.newInstance();
+        ...
+        $XIF.createXMLStreamReader($SRC);
+    - pattern-not: |
+        $XIF = XMLInputFactory.newInstance();
+        ...
+        $XIF.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+        ...
+        $XIF.createXMLStreamReader($SRC);
+
+- id: narvy.java.xxe.documentbuilderfactory-external-entities-enabled.documentbuilderfactory-external-entities-enabled
+  message: >-
+    A `DocumentBuilderFactory` explicitly re-enables external general or
+    parameter entities (`load-external-dtd`,
+    `external-general-entities`, or `external-parameter-entities` set to
+    `true`). This defeats any DOCTYPE hardening done elsewhere on the same
+    factory and reopens the classic XXE file-read/SSRF path (CWE-611).
+    Remove the override, or set it to `false`.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-611: Improper Restriction of XML External Entity Reference"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: $DBF.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", true)
+        - pattern: $DBF.setFeature("http://xml.org/sax/features/external-general-entities", true)
+        - pattern: $DBF.setFeature("http://xml.org/sax/features/external-parameter-entities", true)
+
+- id: narvy.java.xxe.xstream-unrestricted-fromxml.xstream-unrestricted-fromxml
+  message: >-
+    An `XStream` instance deserialises XML with `fromXML(...)` and no type
+    permission allow-list configured (`xstream.allowTypes(...)` /
+    `xstream.setupDefaultSecurity(...)`). Unrestricted XStream deserialises
+    arbitrary classes on the classpath, which is both an XXE vector and a
+    remote-code-execution gadget-chain vector (CWE-611, CWE-502). Call
+    `xstream.allowTypesByWildcard(...)` (or `addPermission`) with an
+    explicit allow-list before calling `fromXML`.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-611: Improper Restriction of XML External Entity Reference"
+      - "CWE-502: Deserialization of Untrusted Data"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology: [java]
+  patterns:
+    - pattern: |
+        $XS = new XStream(...);
+        ...
+        $XS.fromXML($SRC);
+    - pattern-not: |
+        $XS = new XStream(...);
+        ...
+        $XS.allowTypes(...);
+        ...
+        $XS.fromXML($SRC);
+    - pattern-not: |
+        $XS = new XStream(...);
+        ...
+        $XS.allowTypesByWildcard(...);
+        ...
+        $XS.fromXML($SRC);
+    - pattern-not: |
+        $XS = new XStream(...);
+        ...
+        $XS.addPermission(...);
+        ...
+        $XS.fromXML($SRC);

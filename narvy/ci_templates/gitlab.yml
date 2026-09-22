@@ -1,0 +1,19 @@
+# Narvy SAST for GitLab CI. Written by `narvy init-ci --gitlab`; edit freely.
+# Already have a .gitlab-ci.yml? Copy the narvy_sast job below into it instead of overwriting.
+# Note: SARIF is stored as a plain artifact (not GitLab's SAST schema), but the --fail-on gate still blocks the MR.
+stages:
+  - test
+
+narvy_sast:
+  stage: test
+  image: python:3.11-slim
+  before_script:
+    - pip install --upgrade pip
+    - pip install narvy-cli
+  script:
+    - narvy scan . --output sarif --file narvy-results.sarif --fail-on high
+  artifacts:
+    when: always   # keep the SARIF even when --fail-on failed the pipeline
+    paths:
+      - narvy-results.sarif
+    expire_in: 1 week

@@ -1,0 +1,56 @@
+# Objective-C cryptography checks.
+
+- id: IOS-OBJC-CRYPTO-001
+  name: "Weak Cipher Algorithm (DES/3DES/RC4)"
+  pattern: 'kCCAlgorithm(DES|3DES|RC4)\b'
+  severity: "CRITICAL"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-327"
+    masvs: "MSTG-CRYPTO-4"
+    description: "DES, 3DES, and RC4 are broken/deprecated ciphers. DES has a trivially brute-forceable 56-bit key, 3DES is deprecated by NIST, RC4 has known keystream biases."
+    recommendation: "Use kCCAlgorithmAES with a 256-bit key and GCM (or CBC with a random IV + separate MAC) instead."
+
+- id: IOS-OBJC-CRYPTO-002
+  name: "ECB Mode Encryption"
+  pattern: 'kCCOptionECBMode\b'
+  severity: "CRITICAL"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-327"
+    masvs: "MSTG-CRYPTO-4"
+    description: "ECB mode encrypts identical plaintext blocks to identical ciphertext blocks, leaking structural patterns in the plaintext (the classic 'ECB penguin' problem)."
+    recommendation: "Use GCM or CBC mode with a fresh, random IV per encryption operation instead of ECB."
+
+- id: IOS-OBJC-CRYPTO-003
+  name: "Weak Hash Algorithm (MD5/SHA1)"
+  pattern: '\bCC_(MD5|SHA1)\s*\('
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-328"
+    masvs: "MSTG-CRYPTO-4"
+    description: "MD5 and SHA-1 are cryptographically broken for security-sensitive use (collision attacks). Using them for password hashing, integrity checks, or signatures is insecure."
+    recommendation: "Use CC_SHA256 or CC_SHA512 for hashing. For password storage specifically, use a dedicated KDF (PBKDF2/bcrypt/scrypt/Argon2) via CommonKeyDerivation, never a bare hash."
+
+- id: IOS-OBJC-CRYPTO-004
+  name: "Weak PRNG for Security-Sensitive Value"
+  pattern: '(?<!arc4)\brandom\s*\(\s*\)|\bsrand\s*\(|\brand\s*\(\s*\)'
+  severity: "HIGH"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-338"
+    masvs: "MSTG-CRYPTO-6"
+    description: "random()/rand()/srand() are not cryptographically secure pseudo-random number generators - their output is predictable, which is dangerous if used to generate tokens, keys, nonces, or IVs."
+    recommendation: "Use SecRandomCopyBytes(kSecRandomDefault, ...) for any security-sensitive random value."
+
+- id: IOS-OBJC-CRYPTO-005
+  name: "Hardcoded Key Material Passed to CommonCrypto"
+  pattern: '(?:CCCrypt|CCCryptorCreate)\s*\([^;]*@"[^"]{6,}"[^;]*\)\s*;'
+  severity: "CRITICAL"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-321"
+    masvs: "MSTG-CRYPTO-1"
+    description: "A CommonCrypto call (CCCrypt/CCCryptorCreate) includes a string literal directly in its argument list - most commonly the hardcoded key or IV. Anyone who reads the source recovers the exact key/IV material."
+    recommendation: "Never embed key or IV material as a literal. Derive keys via the Keychain/Secure Enclave, or retrieve them from a secure backend at runtime; generate IVs randomly per-operation with SecRandomCopyBytes."

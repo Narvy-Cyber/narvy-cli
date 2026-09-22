@@ -1,0 +1,291 @@
+rules:
+
+# Java/Spring hardening: CSRF disabled, SpEL injection, permissive CORS.
+
+- id: narvy.java.spring.csrf-disabled.csrf-disabled
+  message: >-
+    CSRF protection is explicitly turned off on this
+    `HttpSecurity`/`ServerHttpSecurity` chain. Once disabled, any
+    state-changing endpoint reachable with a browser-sent cookie can be
+    triggered from a page the victim did not intend to submit (CWE-352).
+    This is a deliberate choice for pure token-authenticated APIs (no
+    cookie-based session, `Authorization: Bearer` on every call) - if that
+    is this service, leave a comment explaining why; if any endpoint still
+    relies on a session cookie, re-enable CSRF or scope the disable to the
+    stateless endpoints only.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-352: Cross-Site Request Forgery (CSRF)"
+    owasp:
+      - "A01:2021 - Broken Access Control"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology: [java, spring]
+  patterns:
+    - pattern-either:
+        - pattern: $HTTP.csrf().disable()
+        - pattern: $HTTP.csrf($CSRF -> $CSRF.disable())
+        - pattern: $HTTP.csrf(AbstractHttpConfigurer::disable)
+        - pattern: $HTTP.csrf(CsrfConfigurer::disable)
+        - pattern: $HTTP.csrf(ServerHttpSecurity.CsrfSpec::disable)
+        - pattern: $HTTP.csrf(CsrfSpec::disable)
+
+- id: narvy.java.spring.spel-injection.tainted-request-parseexpression
+  message: >-
+    A Spring Expression Language (SpEL) parser evaluates an expression
+    string built from an HTTP request parameter, header, or a
+    `@RequestParam`/`@PathVariable` handler argument. SpEL is a full
+    expression language with reflection and static-method invocation
+    (`T(java.lang.Runtime).getRuntime().exec(...)` is valid SpEL) - letting
+    the request choose any part of the evaluated expression is remote code
+    execution, not just information disclosure (CWE-94). Never evaluate
+    request-derived text as SpEL; if the request must select between a
+    handful of computations, look them up in a fixed map instead.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology: [java, spring]
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: $REQ.getParameter(...)
+            - pattern: $REQ.getHeader(...)
+    - patterns:
+        - pattern-inside: |
+            $RET $METHOD(..., @RequestParam $T $PARAM, ...) {
+              ...
+            }
+        - pattern: $PARAM
+    - patterns:
+        - pattern-inside: |
+            $RET $METHOD(..., @RequestParam(...) $T $PARAM, ...) {
+              ...
+            }
+        - pattern: $PARAM
+    - patterns:
+        - pattern-inside: |
+            $RET $METHOD(..., @PathVariable $T $PARAM, ...) {
+              ...
+            }
+        - pattern: $PARAM
+    - patterns:
+        - pattern-inside: |
+            $RET $METHOD(..., @PathVariable(...) $T $PARAM, ...) {
+              ...
+            }
+        - pattern: $PARAM
+  pattern-sinks:
+    - patterns:
+        - pattern: $PARSER.parseExpression($SINK)
+
+- id: narvy.java.spring.spel-injection.dynamic-expression-parsed
+  message: >-
+    A SpEL `ExpressionParser`/`SpelExpressionParser` evaluates a string
+    that is not a fixed literal in this call (it comes from a getter, a
+    method argument, a loop variable, or a field). SpEL grants full
+    reflection and static-method invocation once evaluated, so parsing
+    anything other than a compile-time-fixed expression is a code-injection
+    risk the moment that string can be influenced by a stored record, a
+    config value an admin (not a developer) can edit, or an upstream call
+    (CWE-94). Confirm the expression text is fully outside user/operator
+    reach, or stop building it dynamically.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology: [java, spring]
+  patterns:
+    - pattern-inside: |
+        ...
+        $PARSERTYPE $PARSER = ...;
+        ...
+    - metavariable-regex:
+        metavariable: $PARSERTYPE
+        regex: ^(SpelExpressionParser|ExpressionParser|TemplateAwareExpressionParser)$
+    - pattern: $PARSER.parseExpression($EXPR)
+    - pattern-not: $PARSER.parseExpression("...")
+    - pattern-not-inside: |
+        String $EXPR = "...";
+        ...
+
+- id: narvy.java.spring.spel-injection.dangerous-type-reference
+  message: >-
+    A hardcoded SpEL expression (parsed directly, or supplied via
+    `@Value(...)`) references `java.lang.Runtime` or
+    `java.lang.ProcessBuilder` through SpEL's `T(...)` type-reference
+    syntax. That is a working remote-code-execution gadget the moment this
+    expression string becomes reachable from outside the codebase - a
+    config value an operator can edit, a template an admin user can save,
+    or debug/test code left behind (CWE-94). Remove the type reference; if
+    process execution is genuinely needed, call `ProcessBuilder` directly
+    from Java code, not through an evaluated expression string.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology: [java, spring]
+  patterns:
+    - pattern-either:
+        - pattern: $PARSER.parseExpression($S)
+        - pattern: '@Value($S)'
+    - metavariable-regex:
+        metavariable: $S
+        regex: .*T\(\s*(java\.lang\.)?(Runtime|ProcessBuilder)\s*\).*
+
+- id: narvy.java.spring.permissive-cors.crossorigin-wildcard-annotation
+  message: >-
+    `@CrossOrigin` allows every origin (`"*"`, or no `origins` value at
+    all, which also defaults to allow-all). Any website can now make
+    cross-origin requests to this endpoint from a victim's browser and read
+    the response, defeating the same-origin policy that protects
+    session-cookie-authenticated users from other sites reading their data
+    (CWE-942). Name the exact origins that need access instead of `"*"`.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology: [java, spring]
+  patterns:
+    - pattern-either:
+        - pattern: '@CrossOrigin(origins = "*")'
+        - pattern: '@CrossOrigin(origins = {"*"})'
+        - pattern: '@CrossOrigin("*")'
+
+- id: narvy.java.spring.permissive-cors.corsconfiguration-wildcard
+  message: >-
+    A `CorsConfiguration` allows every origin (`"*"`, or the equivalent
+    `addAllowedOriginPattern("*")`/wildcard `CorsConfigurationSource`).
+    Any website can now make cross-origin requests to this application
+    from a victim's browser (CWE-942). Build the allowed-origins list from
+    a fixed set of known-good hosts instead of a wildcard.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology: [java, spring]
+  patterns:
+    - pattern-either:
+        - pattern: $CFG.setAllowedOrigins(java.util.List.of("*"))
+        - pattern: $CFG.setAllowedOrigins(java.util.Arrays.asList("*"))
+        - pattern: $CFG.setAllowedOrigins(java.util.Collections.singletonList("*"))
+        - pattern: $CFG.addAllowedOrigin("*")
+        - pattern: $CFG.setAllowedOriginPatterns(java.util.List.of("*"))
+        - pattern: $CFG.addAllowedOriginPattern("*")
+
+- id: narvy.java.spring.permissive-cors.corsconfiguration-wildcard-with-credentials
+  message: >-
+    This `CorsConfiguration` allows every origin AND allows credentials
+    (`setAllowCredentials(true)`). Combined, a malicious page on any site
+    can send the victim's session cookie/basic-auth header cross-origin and
+    read the authenticated response - the exact attack CORS's
+    credentialed-request checks exist to block (CWE-942). Most browsers
+    reject a literal `"*"` alongside `allowCredentials(true)` today, but a
+    reflected-origin implementation (echoing whatever `Origin` header the
+    caller sent) has the identical effect and does pass browser checks - if
+    this configuration reflects the request origin rather than using a
+    fixed allow-list, treat this as exploitable now.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java, spring]
+  patterns:
+    - pattern-inside: |
+        $CFGTYPE $CFG = ...;
+        ...
+        $CFG.setAllowCredentials(true);
+        ...
+    - pattern-either:
+        - pattern: $CFG.setAllowedOrigins(java.util.List.of("*"))
+        - pattern: $CFG.setAllowedOrigins(java.util.Arrays.asList("*"))
+        - pattern: $CFG.addAllowedOrigin("*")
+        - pattern: $CFG.setAllowedOriginPatterns(java.util.List.of("*"))
+        - pattern: $CFG.addAllowedOriginPattern("*")
+
+- id: narvy.java.spring.permissive-cors.addcorsmapping-wildcard
+  message: >-
+    A `WebMvcConfigurer.addCorsMapping` registration allows every origin
+    (`"*"`, or omits `.allowedOrigins(...)` entirely, which also defaults
+    to allow-all). Any website can now make cross-origin requests to the
+    mapped paths from a victim's browser (CWE-942). Name the exact origins
+    that need access instead of `"*"`.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+    owasp:
+      - "A05:2021 - Security Misconfiguration"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology: [java, spring]
+  patterns:
+    - pattern-inside: |
+        class $CLASS implements WebMvcConfigurer {
+          ...
+          public void addCorsMappings(CorsRegistry $REGISTRY) {
+            ...
+          }
+          ...
+        }
+    - pattern-either:
+        - pattern: $REGISTRY.addMapping(...).allowedOrigins("*")
+        - pattern: $MAPPING.allowedOrigins("*")

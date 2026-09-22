@@ -1,0 +1,235 @@
+rules:
+
+# Java SQL injection: JDBC, JPA/Hibernate, Spring JdbcTemplate, MyBatis.
+
+- id: narvy.java.sqli.jdbc-statement-concat.jdbc-statement-concat
+  message: >-
+    A plain JDBC `Statement` executes a query string built with `+`
+    concatenation. `Statement` never parameterises, so any tainted value
+    reaching the concatenation is a direct SQL injection (CWE-89). Switch to
+    `PreparedStatement` with `?` placeholders and `setString`/`setInt`/etc.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: $STMT.executeQuery($A + $B)
+        - pattern: $STMT.executeUpdate($A + $B)
+        - pattern: $STMT.execute($A + $B)
+    - pattern-not: $STMT.executeQuery("..." + "...")
+    - pattern-not: $STMT.executeUpdate("..." + "...")
+    - pattern-not: $STMT.execute("..." + "...")
+
+- id: narvy.java.sqli.jdbc-connection-createquery-concat.jdbc-connection-createquery-concat
+  message: >-
+    `Connection.prepareStatement(...)` is called with a SQL string built by
+    `+` concatenation. Building the query text via concatenation defeats the
+    protection `PreparedStatement` exists to provide, because the tainted
+    value is already part of the parsed SQL grammar by the time the driver
+    sees it (CWE-89). Keep the query text a fixed literal and bind values
+    with `?` + `setString`/`setInt`.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: $CONN.prepareStatement($A + $B)
+        - pattern: $CONN.prepareStatement($A + $B, ...)
+    - pattern-not: $CONN.prepareStatement("..." + "...")
+    - pattern-not: $CONN.prepareStatement("..." + "...", ...)
+
+- id: narvy.java.sqli.jpa-createquery-concat.jpa-createquery-concat
+  message: >-
+    A JPA/Hibernate `EntityManager.createQuery(...)` or
+    `createNativeQuery(...)` builds JPQL/SQL by string concatenation. Even
+    JPQL is subject to injection when the WHERE clause, ORDER BY column, or
+    table name is built from tainted data this way (CWE-89). Use a named or
+    positional parameter (`:status`, `?1`) and `setParameter(...)` instead
+    of splicing the value into the query text.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: $EM.createQuery($A + $B)
+        - pattern: $EM.createNativeQuery($A + $B)
+        - pattern: $EM.createNativeQuery($A + $B, ...)
+    - pattern-not: $EM.createQuery("..." + "...")
+    - pattern-not: $EM.createNativeQuery("..." + "...")
+    - pattern-not: $EM.createNativeQuery("..." + "...", ...)
+
+# Covers the variable-indirection shape (concatenation moved to a local) that the inline rule above misses.
+- id: narvy.java.sqli.jpa-createquery-concat-var.jpa-createquery-concat-var
+  message: >-
+    The query string handed to `createQuery`/`createNativeQuery` was built
+    by string concatenation a few lines earlier and assigned to a local
+    variable. Moving the concatenation into a variable does not change
+    what reaches the database (CWE-89). Bind the value with
+    `setParameter(...)` instead.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: |
+            String $Q = $A + $B;
+            ...
+            $EM.createQuery($Q, ...);
+        - pattern: |
+            String $Q = $A + $B;
+            ...
+            $EM.createNativeQuery($Q, ...);
+    - pattern-not: |
+        String $Q = "..." + "...";
+        ...
+        $EM.createQuery($Q, ...);
+    - pattern-not: |
+        String $Q = "..." + "...";
+        ...
+        $EM.createNativeQuery($Q, ...);
+
+- id: narvy.java.sqli.jpa-createquery-sprintf-var.jpa-createquery-sprintf-var
+  message: >-
+    A JPQL/native query string assembled with `String.format(...)` is passed
+    to `createQuery`/`createNativeQuery`. `String.format` does not escape
+    SQL metacharacters - a tainted format argument is a SQL injection the
+    same as direct concatenation would be (CWE-89). Use a bind parameter
+    instead of formatting the value into the query text.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology: [java]
+  patterns:
+    - pattern-either:
+        - pattern: |
+            $Q = String.format($FMT, ...);
+            ...
+            $EM.createQuery($Q);
+        - pattern: |
+            $Q = String.format($FMT, ...);
+            ...
+            $EM.createNativeQuery($Q);
+
+- id: narvy.java.sqli.jdbctemplate-concat.jdbctemplate-concat
+  message: >-
+    Spring `JdbcTemplate` is called with a SQL string built by `+`
+    concatenation instead of the `?` placeholder + args form. `JdbcTemplate`
+    only protects arguments passed through its own varargs binder; splicing
+    a value into the SQL text bypasses that entirely (CWE-89). Use
+    `jdbcTemplate.query("... WHERE id = ?", rowMapper, id)`.
+  severity: ERROR
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java, spring]
+  patterns:
+    - pattern-either:
+        - pattern: $JT.query($A + $B, ...)
+        - pattern: $JT.queryForObject($A + $B, ...)
+        - pattern: $JT.queryForList($A + $B, ...)
+        - pattern: $JT.update($A + $B, ...)
+        - pattern: $JT.execute($A + $B)
+    - pattern-not: $JT.query("..." + "...", ...)
+    - pattern-not: $JT.queryForObject("..." + "...", ...)
+    - pattern-not: $JT.queryForList("..." + "...", ...)
+    - pattern-not: $JT.update("..." + "...", ...)
+    - pattern-not: $JT.execute("..." + "...")
+
+- id: narvy.java.sqli.tainted-request-param-to-statement.tainted-request-param-to-statement
+  message: >-
+    A value read directly from the HTTP request (`getParameter`,
+    `getHeader`, `getQueryString`) reaches a `Statement`/`PreparedStatement`
+    SQL sink through a local variable, with no bind-parameter API in the
+    call. Even when the sink call itself is a `PreparedStatement`, if the
+    tainted value ends up as part of the SQL text (versus a bound `?`
+    argument) it is a SQL injection (CWE-89). Bind the value with
+    `setString`/`setInt`/etc; never build the SQL string from request data.
+  severity: WARNING
+  languages: [java]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology: [java]
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: $REQ.getParameter(...)
+            - pattern: $REQ.getHeader(...)
+            - pattern: $REQ.getQueryString()
+  pattern-sinks:
+    - patterns:
+        - pattern-either:
+            - pattern: $STMT.executeQuery("..." + $SINK + "...")
+            - pattern: $STMT.executeQuery("..." + $SINK)
+            - pattern: $STMT.executeUpdate("..." + $SINK + "...")
+            - pattern: $STMT.execute("..." + $SINK + "...")
+  pattern-sanitizers:
+    - patterns:
+        - pattern: Integer.parseInt(...)
+    - patterns:
+        - pattern: Long.parseLong(...)

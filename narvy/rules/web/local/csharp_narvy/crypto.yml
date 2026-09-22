@@ -1,0 +1,64 @@
+rules:
+
+# C#/.NET weak crypto: broken hashes (MD5/SHA-1) and broken/legacy ciphers (DES/3DES/RC2).
+
+- id: narvy.csharp.crypto.weak-hash.weak-hash
+  message: >-
+    A cryptographically broken hash algorithm (MD5 or SHA-1) is instantiated.
+    Both have practical collision attacks and must not be used for
+    signatures, integrity of security-relevant data, or password hashing
+    (CWE-327, CWE-328). Use SHA-256 or better for integrity; for passwords
+    use a memory-hard KDF such as PBKDF2 (`Rfc2898DeriveBytes`), bcrypt or
+    Argon2.
+  severity: WARNING
+  languages: [csharp]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      - "CWE-328: Use of Weak Hash"
+    owasp:
+      - "A02:2021 - Cryptographic Failures"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    technology: [csharp, dotnet]
+  patterns:
+    - pattern-either:
+        - pattern: MD5.Create(...)
+        - pattern: SHA1.Create(...)
+        - pattern: new MD5CryptoServiceProvider(...)
+        - pattern: new SHA1CryptoServiceProvider(...)
+        - pattern: new MD5Cng(...)
+        - pattern: new SHA1Managed(...)
+        - pattern: System.Security.Cryptography.MD5.Create(...)
+        - pattern: System.Security.Cryptography.SHA1.Create(...)
+
+- id: narvy.csharp.crypto.weak-cipher.weak-cipher
+  message: >-
+    A broken or legacy symmetric cipher (DES, Triple-DES, or RC2) is
+    instantiated. DES and RC2 have inadequate key sizes and Triple-DES is
+    deprecated (SWEET32 birthday attack on its 64-bit block) (CWE-327).
+    Use AES (`Aes.Create()`) with an authenticated mode such as AES-GCM.
+  severity: WARNING
+  languages: [csharp]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+    owasp:
+      - "A02:2021 - Cryptographic Failures"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    technology: [csharp, dotnet]
+  patterns:
+    - pattern-either:
+        - pattern: new DESCryptoServiceProvider(...)
+        - pattern: new TripleDESCryptoServiceProvider(...)
+        - pattern: new RC2CryptoServiceProvider(...)
+        - pattern: DES.Create(...)
+        - pattern: TripleDES.Create(...)
+        - pattern: RC2.Create(...)

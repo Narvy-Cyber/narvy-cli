@@ -1,0 +1,413 @@
+# Kotlin security rules, authored by Narvy.
+# String-template SQL and command injection, Ktor CORS, weak crypto.
+
+rules:
+- id: narvy.kotlin.auth.ldap-unauthenticated-bind
+  message: An LDAP `InitialDirContext` is opened with `SECURITY_AUTHENTICATION` set to `"none"`, i.e. an anonymous bind. Anonymous
+    binds let any caller run LDAP queries against the directory without proving identity, which typically over-exposes directory
+    contents and defeats access controls built on top of the bind (CWE-287). Bind with real credentials (simple or SASL) unless
+    anonymous read access to this directory is a deliberate, documented design choice.
+  severity: WARNING
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-287: Improper Authentication'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - kotlin
+  patterns:
+  - pattern: '$ENV.put(Context.SECURITY_AUTHENTICATION, "none")
+
+      ...
+
+      $DCTX = InitialDirContext($ENV, ...)
+
+      '
+- id: narvy.kotlin.secrets.gradle-fallback-password.gradle-fallback-password
+  message: 'A Gradle Kotlin DSL build script reads a signing/repository password from the environment with a hardcoded literal
+    as the Elvis-operator fallback (`env["..."] ?: "literal"`). Build scripts are committed to source control, so this literal
+    ships to every clone of the repository; if the real environment variable is ever unset, the build silently signs or authenticates
+    with the leaked fallback (CWE-798). Fail the build instead of falling back: `env["SIGNING_PASSWORD"] ?: error("SIGNING_PASSWORD
+    not set")`.'
+  severity: WARNING
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - kotlin
+  options:
+    symbolic_propagation: true
+  patterns:
+  - pattern: '$PASS = System.getenv($NAME) ?: $VALUE'
+  - metavariable-regex:
+      metavariable: $PASS
+      regex: (?i).*(password|passwd|secret|signingkey|apikey|token).*
+  - metavariable-regex:
+      metavariable: $VALUE
+      regex: ^"[A-Za-z0-9/+=_-]{4,}"$
+  paths:
+    include:
+    - '*build.gradle.kts'
+    - '*settings.gradle.kts'
+- id: narvy.kotlin.auth.csrf-disabled.csrf-disabled
+  message: Spring Security's CSRF protection is explicitly disabled (`http.csrf { it.disable() }`). Without CSRF tokens, any
+    authenticated session can be driven by a malicious page to perform state-changing requests the victim never intended (CWE-352).
+    Disable CSRF only for endpoints that are genuinely stateless/token-authenticated (pure REST APIs using bearer tokens,
+    not cookies), and scope the exemption with `ignoringRequestMatchers(...)` rather than disabling it globally.
+  severity: WARNING
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-352: Cross-Site Request Forgery (CSRF)'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - audit
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - kotlin
+    - spring
+  patterns:
+  - pattern: $HTTP.csrf { it.disable() }
+- id: narvy.kotlin.cmdi.command-string-template.command-string-template
+  message: '`Runtime.getRuntime().exec(...)` is called with a single command string built via Kotlin string-template interpolation
+    (`"ping -c 1 $host"`). The JVM tokenises that single-string form itself, so an interpolated value containing spaces or
+    shell metacharacters changes how many arguments the process actually receives - a command injection vector (CWE-78). Use
+    the `exec(Array<String>)` / `ProcessBuilder(listOf(...))` overload with each argument as a separate element instead of
+    building one interpolated string.'
+  severity: ERROR
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - kotlin
+  patterns:
+  - pattern: Runtime.getRuntime().exec("...${$X}...")
+- id: narvy.kotlin.cors.install-cors-anyhost.install-cors-anyhost
+  message: A Ktor `install(CORS)` block calls `anyHost()` while also allowing credentials (`allowCredentials = true`). Reflecting
+    every Origin while also permitting cookies/Authorization headers on cross-origin requests means any website can make authenticated
+    requests on behalf of a logged in user and read the response (CWE-942). Restrict allowed hosts with `allowHost("app.example.com",
+    schemes = listOf("https"))` when `allowCredentials` is enabled.
+  severity: ERROR
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - kotlin
+    - ktor
+  patterns:
+  - pattern: "install(CORS) {\n  ...\n  anyHost()\n  ...\n  allowCredentials = true\n  ...\n}\n"
+- id: narvy.kotlin.crypto.use-of-md5.use-of-md5
+  message: MD5 is cryptographically broken; practical collisions have been demonstrated for over a decade. Do not use it for
+    signatures, integrity checks, password storage, or any other security control (CWE-327, CWE-328). Use SHA-256 or stronger
+    for integrity, and a memory-hard KDF (Argon2id, scrypt, bcrypt) for password hashing.
+  severity: WARNING
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    - 'CWE-328: Use of Weak Hash'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    technology:
+    - kotlin
+  patterns:
+  - pattern-either:
+    - pattern: MessageDigest.getInstance("MD5")
+    - pattern: java.security.MessageDigest.getInstance("MD5")
+    - pattern: DigestUtils.getMd5Digest()
+    - pattern: DigestUtils.md5Hex(...)
+- id: narvy.kotlin.crypto.use-of-sha1.use-of-sha1
+  message: SHA-1 is deprecated for security purposes; chosen-prefix collisions are practical. Do not use it for signatures,
+    certificate fingerprints, or any security-relevant integrity check (CWE-327, CWE-328). Use SHA-256 or stronger.
+  severity: WARNING
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    - 'CWE-328: Use of Weak Hash'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    technology:
+    - kotlin
+  patterns:
+  - pattern-either:
+    - pattern: MessageDigest.getInstance("SHA-1")
+    - pattern: MessageDigest.getInstance("SHA1")
+    - pattern: java.security.MessageDigest.getInstance("SHA-1")
+    - pattern: DigestUtils.getSha1Digest()
+    - pattern: DigestUtils.sha1Hex(...)
+- id: narvy.kotlin.crypto.ecb-cipher.ecb-cipher
+  message: A symmetric cipher is used in ECB mode (explicitly, or implicitly via a bare algorithm name such as `Cipher.getInstance("AES")`,
+    which most JCE providers default to `AES/ECB/PKCS5Padding`). ECB encrypts each block independently, so identical plaintext
+    blocks produce identical ciphertext blocks; patterns in the plaintext leak through unencrypted (CWE-327). Use `AES/GCM/NoPadding`
+    with a unique 12-byte nonce per encryption.
+  severity: WARNING
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - kotlin
+  patterns:
+  - pattern-either:
+    - pattern: Cipher.getInstance("AES/ECB/...")
+    - pattern: Cipher.getInstance("AES")
+- id: narvy.kotlin.crypto.null-cipher.null-cipher
+  message: '`javax.crypto.NullCipher` performs no encryption at all; every byte passes through unchanged. It exists purely
+    for testing pipelines that expect a `Cipher` object. Shipping it in a production code path that handles real data is equivalent
+    to storing/transmitting plaintext (CWE-327).'
+  severity: ERROR
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - kotlin
+  patterns:
+  - pattern-either:
+    - pattern: NullCipher()
+    - pattern: javax.crypto.NullCipher()
+- id: narvy.kotlin.crypto.weak-symmetric-cipher.weak-symmetric-cipher
+  message: 'DES / 3DES(DESede) / RC2 / RC4 are broken or insufficient for modern use: DES''s 56-bit key is brute-forceable
+    in hours, RC2/RC4 have known keystream biases, and 3DES''s 64-bit block size is vulnerable to birthday attacks (Sweet32)
+    (CWE-327). Use AES-256 in GCM mode instead.'
+  severity: WARNING
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - kotlin
+  patterns:
+  - pattern-either:
+    - pattern: Cipher.getInstance("DES")
+    - pattern: Cipher.getInstance("DESede")
+    - pattern: Cipher.getInstance("DESede/...")
+    - pattern: Cipher.getInstance("RC2")
+    - pattern: Cipher.getInstance("RC4")
+    - pattern: KeyGenerator.getInstance("DES")
+    - pattern: KeyGenerator.getInstance("DESede")
+- id: narvy.kotlin.crypto.rsa-ecb-nopadding-cipher
+  message: RSA is used with `NoPadding` (raw textbook RSA) instead of OAEP. Textbook RSA is deterministic and malleable, and
+    an attacker who can submit chosen ciphertexts to a decryption oracle can recover the plaintext (Bleichenbacher-style attacks)
+    (CWE-780). Use `RSA/ECB/OAEPWithSHA-256AndMGF1Padding`.
+  severity: ERROR
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-780: Use of RSA Algorithm without OAEP'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - kotlin
+  patterns:
+  - pattern-either:
+    - pattern: Cipher.getInstance("RSA/ECB/NoPadding")
+    - pattern: Cipher.getInstance("RSA/None/NoPadding")
+- id: narvy.kotlin.crypto.weak-rsa-keysize.weak-rsa-keysize
+  message: An RSA `KeyPairGenerator` is initialised with a key size below 2048 bits. NIST deprecated 1024-bit RSA in 2013
+    (CWE-326). Initialise with 2048 bits minimum (3072+ for long-lived keys).
+  severity: WARNING
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-326: Inadequate Encryption Strength'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - kotlin
+  patterns:
+  - pattern-either:
+    - pattern: 'val $KEY = $G.getInstance("RSA")
+
+        ...
+
+        $KEY.initialize($BITS, ...)
+
+        '
+    - pattern: 'var $KEY = $G.getInstance("RSA")
+
+        ...
+
+        $KEY.initialize($BITS, ...)
+
+        '
+    - pattern: 'val $KEY = $G.getInstance("RSA")
+
+        ...
+
+        $KEY.initialize($BITS)
+
+        '
+    - pattern: 'var $KEY = $G.getInstance("RSA")
+
+        ...
+
+        $KEY.initialize($BITS)
+
+        '
+  - metavariable-comparison:
+      metavariable: $BITS
+      comparison: $BITS < 2048
+- id: narvy.kotlin.crypto.insecure-random.insecure-random
+  message: '`kotlin.random.Random` / `java.util.Random` / `Math.random()` are predictable PRNGs once a handful of outputs
+    are observed. Used to seed a token, password reset code, or any other security-relevant value, an attacker can reconstruct
+    past or future outputs (CWE-330, CWE-338). Use `java.security.SecureRandom` for anything that must be unpredictable.'
+  severity: WARNING
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-330: Use of Insufficiently Random Values'
+    - 'CWE-338: Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - kotlin
+  patterns:
+  - pattern-either:
+    - pattern: Random.nextLong()
+    - pattern: Random.nextInt(...)
+    - pattern: Random.Default.nextLong()
+    - pattern: Math.random()
+    - pattern: java.util.Random()
+  - pattern-not: SecureRandom()
+  - pattern-not: java.security.SecureRandom()
+- id: narvy.kotlin.sqli.raw-sql-string-template.raw-sql-string-template
+  message: >-
+    A SQL string built with Kotlin string-template interpolation (`"SELECT
+    ... WHERE x = $var"` or `"${expr}"`) is passed directly to a JDBC
+    `Statement`/`Connection.prepareStatement` or an Exposed
+    `TransactionManager.exec(...)` call. Interpolation happens before the
+    driver ever sees the string, so a tainted value here is spliced straight
+    into the SQL grammar - the same risk as `+` concatenation (CWE-89). Use
+    `?` placeholders with bound parameters instead of interpolating the value
+    into the query text.
+  severity: ERROR
+  languages:
+  - kotlin
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - kotlin
+  patterns:
+  - pattern-either:
+    - pattern: $CONN.prepareStatement("...${$X}...")
+    - pattern: $STMT.executeQuery("...${$X}...")
+    - pattern: $STMT.executeUpdate("...${$X}...")
+    - pattern: $TM.current().exec("...${$X}...")
+    - pattern: TransactionManager.current().exec("...${$X}...")
