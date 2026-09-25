@@ -1,0 +1,48 @@
+title = "narvy gitleaks config"
+
+# Start from gitleaks' full built-in ruleset, then add project allowlists for
+# known false positives. Every entry below is a NON-secret: a deliberately fake
+# test fixture, a compiled native symbol name, or a secret-DETECTION rule pack
+# whose whole purpose is to contain example secret patterns.
+[extend]
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# 1) Secret-detection rule packs. These files ARE the scanner's own signatures
+#    for AWS keys, private keys, Slack webhooks, etc. They are definitionally
+#    full of secret-shaped example patterns; scanning them for secrets is an
+#    inherent false positive.
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "Narvy secret-detection rule packs (example patterns, not real secrets)"
+paths = [
+    '''narvy/rules/.*\.ya?ml''',
+    '''narvy/rules/.*\.ya?ml''',
+]
+
+# ---------------------------------------------------------------------------
+# 2) Deliberately fake credential fixtures used by the SAST detection tests.
+#    These are non-functional placeholders (documented AWS/GCP example key
+#    shapes) that assert the scanner flags credential-shaped strings.
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "Fake credential test fixtures (non-functional placeholders)"
+regexTarget = "match"
+regexes = [
+    '''AKIAABCDEFGHIJKLMNOP''',
+    '''AIzaSyD233TooXzscI_hrYt5GPJNGE6K3I1fW9M''',
+]
+
+# ---------------------------------------------------------------------------
+# 3) Compiled Android native (JNI) symbol names. Long underscore-joined export
+#    names such as Java_androidx_datastore_core_NativeSharedCounter_* contain a
+#    "re_core_" run that high-entropy detectors mistake for a token. These are
+#    public NDK symbol names, never credentials.
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "Android JNI native symbol names (not secrets)"
+regexTarget = "match"
+regexes = [
+    '''Java_[A-Za-z0-9_]+_NativeSharedCounter[A-Za-z0-9_]*''',
+    '''[A-Za-z0-9_]*re_core_[A-Za-z0-9_]+''',
+]

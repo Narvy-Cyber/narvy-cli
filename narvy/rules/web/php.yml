@@ -1,0 +1,1666 @@
+# PHP security rules, authored by Narvy.
+# Injection, file inclusion, deserialization, weak crypto, session handling.
+
+rules:
+- id: narvy.php.lang.assert-tainted-string.assert-tainted-string
+  message: '`assert()` called with a string built from user input. When `assert()` receives a string argument (not a boolean
+    expression), PHP < 8 evaluates it as PHP code via `eval()` semantics - a tainted value here is remote code execution (CWE-95).
+    PHP 8 removed string evaluation, but this is still exploitable on any PHP 7.x deployment. Never build the assertion string
+    from input; pass a real boolean expression instead.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code (''Eval Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: assert("..." . $SINK . "...")
+      - pattern: assert("...$SINK...")
+      - pattern: assert($SINK)
+- id: narvy.php.lang.extract-tainted-array.extract-tainted-array
+  message: '`extract()` called directly on a superglobal (`$_GET` / `$_POST` / `$_REQUEST` / `$_COOKIE`). This lets an attacker
+    define or overwrite any variable in the current symbol table by choosing the array key - variable injection that can bypass
+    authentication checks or poison variables used later in the request (CWE-621 / CWE-473 class). Never `extract()` a superglobal;
+    whitelist the keys you actually need with `EXTR_SKIP` and a fixed key list, or avoid `extract()` entirely.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code (''Eval Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - php
+  patterns:
+  - pattern-either:
+    - pattern: extract($_GET)
+    - pattern: extract($_POST)
+    - pattern: extract($_REQUEST)
+    - pattern: extract($_COOKIE)
+    - pattern: extract($_GET, ...)
+    - pattern: extract($_POST, ...)
+    - pattern: extract($_REQUEST, ...)
+    - pattern: extract(array_merge($_GET, ...))
+    - pattern: extract(array_merge($_POST, ...))
+- id: narvy.php.code-injection.create-function-tainted.create-function-tainted
+  mode: taint
+  message: '`create_function()` compiles its arguments as PHP code via an internal `eval()` - it is deprecated (removed in
+    PHP 8.0) precisely because of this. If either argument is user-controlled, this is remote code execution (CWE-94). Use
+    an anonymous function (`function(...) { ... }` or an arrow function) instead - never build the function source from a
+    string.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Code Injection
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern: create_function(...)
+- id: narvy.php.code-injection.preg-replace-e-modifier.preg-replace-e-modifier
+  message: '`preg_replace()` is called with the `/e` modifier on its pattern. The `/e` modifier evaluates the replacement
+    string as PHP code after backreference substitution - if any matched/substituted portion is attacker-influenced, this
+    is remote code execution (CWE-94). The modifier was removed in PHP 7.0, but legacy code running on old runtimes (or migrated
+    verbatim) still carries it. Use `preg_replace_callback()` with a real closure instead.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Code Injection
+  patterns:
+  - pattern: preg_replace($PATTERN, $REPL, $SUBJECT)
+  - metavariable-regex:
+      metavariable: $PATTERN
+      regex: ^['"].*/[a-zA-Z]*e[a-zA-Z]*['"]$
+- id: narvy.php.cors.wildcard-allow-origin.wildcard-allow-origin
+  message: '`Access-Control-Allow-Origin: *` accepts cross-origin requests from ANY website. If this response also carries
+    session cookies or an Authorization header, any site can read the authenticated response on behalf of a logged-in user
+    (CWE-942). Reflect a validated origin from an allow-list instead of using a wildcard.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Security Misconfiguration
+    references:
+    - https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
+  patterns:
+  - pattern-either:
+    - pattern: 'header("Access-Control-Allow-Origin: *")'
+    - pattern: 'header(''Access-Control-Allow-Origin: *'')'
+- id: narvy.php.cors.reflected-origin-header.reflected-origin-header
+  message: 'The `Origin` request header is echoed straight back as the `Access-Control-Allow-Origin` response value. This
+    is functionally equivalent to a wildcard (every origin is allowed) but additionally permits `Access-Control-Allow-Credentials:
+    true` to work with it, letting ANY site make authenticated cross-origin requests on a logged-in user''s behalf (CWE-942).
+    Validate `Origin` against an explicit allow-list before reflecting it.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-942: Permissive Cross-domain Policy with Untrusted Domains'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Security Misconfiguration
+    references:
+    - https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
+  patterns:
+  - pattern-either:
+    - pattern: 'header("Access-Control-Allow-Origin: " . $_SERVER["HTTP_ORIGIN"])'
+    - pattern: 'header(''Access-Control-Allow-Origin: '' . $_SERVER[''HTTP_ORIGIN''])'
+- id: narvy.php.curl.tls-verify-peer-off.tls-verify-peer-off
+  message: '`CURLOPT_SSL_VERIFYPEER` set to `false` / `0`. This disables TLS certificate validation entirely - the request
+    will accept any certificate (including a self-signed one presented by an attacker-in-the-middle), defeating TLS (CWE-295).
+    Remove the option (it defaults to verifying) or set it to `true`.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-295: Improper Certificate Validation'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - php
+  patterns:
+  - pattern-either:
+    - pattern: curl_setopt($CH, CURLOPT_SSL_VERIFYPEER, false)
+    - pattern: curl_setopt($CH, CURLOPT_SSL_VERIFYPEER, 0)
+    - pattern: curl_setopt_array($CH, [..., CURLOPT_SSL_VERIFYPEER => false, ...])
+    - pattern: curl_setopt_array($CH, [..., CURLOPT_SSL_VERIFYPEER => 0, ...])
+- id: narvy.php.curl.tls-verify-host-off.tls-verify-host-off
+  message: '`CURLOPT_SSL_VERIFYHOST` set to `false` / `0`. This disables the hostname check against the certificate''s CN/SAN
+    - a valid certificate for *any* domain will be accepted, enabling man-in-the-middle attacks (CWE-295). Set it to `2` (the
+    secure default) instead.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-295: Improper Certificate Validation'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - php
+  patterns:
+  - pattern-either:
+    - pattern: curl_setopt($CH, CURLOPT_SSL_VERIFYHOST, false)
+    - pattern: curl_setopt($CH, CURLOPT_SSL_VERIFYHOST, 0)
+    - pattern: curl_setopt_array($CH, [..., CURLOPT_SSL_VERIFYHOST => false, ...])
+    - pattern: curl_setopt_array($CH, [..., CURLOPT_SSL_VERIFYHOST => 0, ...])
+- id: narvy.php.code-injection.eval-with-user-input.eval-with-user-input
+  message: 'Detected PHP `eval()` called with user-controlled input. eval() executes arbitrary PHP code; if the argument is
+    user-controlled this is a remote code execution vulnerability (CWE-94). Remove eval() or use a safe alternative (e.g.,
+    a whitelist dispatch table).
+
+    '
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+      - pattern: $_SERVER['HTTP_$VAR']
+      - pattern: file_get_contents("php://input")
+  pattern-sinks:
+  - patterns:
+    - pattern: eval($CODE)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: htmlspecialchars($X, ...)
+    - pattern: htmlentities($X, ...)
+- id: narvy.php.file-inclusion.dynamic-include-with-user-input.dynamic-include-with-user-input
+  message: 'Detected PHP `include` / `require` with a user-controlled filename. This allows local file inclusion (LFI) and
+    potentially remote file inclusion (RFI), enabling arbitrary code execution (CWE-98). Validate the include path against
+    a strict allow-list.
+
+    '
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program (''PHP Remote File Inclusion'')'
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: include($FILE)
+      - pattern: include_once($FILE)
+      - pattern: require($FILE)
+      - pattern: require_once($FILE)
+- id: narvy.php.file-inclusion.include-variable-defined-elsewhere.include-variable-defined-elsewhere
+  message: '`include` / `require` loads a file whose path is a variable that is never assigned in this file, so its value
+    is set by another included file, by `extract()`, or by the request itself. When that other file takes the value from request
+    input (for example `$file = $_GET[''page''];`), this is local or remote file inclusion and leads to code execution (CWE-98).
+    This check cannot follow the value across files: confirm where the variable comes from, and include only paths picked
+    from a fixed allow-list.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program (''PHP Remote File Inclusion'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - audit
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: LOW
+    technology:
+    - php
+  patterns:
+  - pattern-either:
+    - pattern: include $F;
+    - pattern: include_once $F;
+    - pattern: require $F;
+    - pattern: require_once $F;
+  - metavariable-regex:
+      metavariable: $F
+      regex: ^\$[A-Za-z_][A-Za-z0-9_]*$
+  - pattern-not-inside: function $FN(...) { ... }
+  - pattern-not-inside: function(...) { ... }
+  - pattern-not-inside: foreach ($A as $F) { ... }
+  - pattern-not-inside: foreach ($A as $K => $F) { ... }
+  - pattern-not-inside: while (<... $F = $V ...>) { ... }
+  - pattern-not-inside: if (<... $F = $V ...>) { ... }
+  - pattern-not-inside: '$F = $V;
+
+      ...
+
+      '
+  - pattern-not-inside: 'if (...) { ... $F = $V; ... }
+
+      ...
+
+      '
+  - pattern-not-inside: 'if (...) { ... $F = $V; ... } else { ... }
+
+      ...
+
+      '
+  - pattern-not-inside: 'switch ($S) { case $C: ... $F = $V; ... }
+
+      ...
+
+      '
+- id: narvy.php.crypto.hardcoded-env-fallback-to-hmac-inline.hardcoded-env-fallback-to-hmac-inline
+  message: 'Hardcoded fallback secret ''$LITERAL'' is used as the HMAC key when the environment variable is unset. Anyone
+    reading this source can forge valid MACs. Fix: fail fast at startup.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: 'hash_hmac($ALGO, $DATA, getenv($ENV) ?: "$LITERAL")
+
+        '
+    - pattern: 'hash_hmac($ALGO, $DATA, $_ENV[$ENV] ?? "$LITERAL")
+
+        '
+    - pattern: 'hash_hmac($ALGO, $DATA, $_SERVER[$ENV] ?? "$LITERAL")
+
+        '
+    - pattern: 'hash_hmac($ALGO, $DATA, getenv($ENV) ?? "$LITERAL")
+
+        '
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.php.crypto.hardcoded-env-fallback-to-hmac-twostep.hardcoded-env-fallback-to-hmac-twostep
+  message: 'Hardcoded fallback secret ''$LITERAL'' (assigned from `getenv` / `$_ENV` with default) is used as the HMAC key.
+    Fix: fail fast at startup.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern-inside: '$K = getenv($ENV) ?: "$LITERAL";
+
+        ...
+
+        '
+    - pattern-inside: '$K = $_ENV[$ENV] ?? "$LITERAL";
+
+        ...
+
+        '
+    - pattern-inside: '$K = $_SERVER[$ENV] ?? "$LITERAL";
+
+        ...
+
+        '
+    - pattern-inside: '$K = isset($_ENV[$ENV]) ? $_ENV[$ENV] : "$LITERAL";
+
+        ...
+
+        '
+  - pattern: 'hash_hmac($ALGO, $DATA, $K)
+
+      '
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.php.crypto.hardcoded-env-fallback-to-openssl-inline.hardcoded-env-fallback-to-openssl-inline
+  message: 'Hardcoded fallback secret ''$LITERAL'' is used as the symmetric cipher key in openssl_encrypt / openssl_decrypt
+    when the env var is unset. All ciphertexts can be decrypted by anyone reading this source. Fix: fail fast at startup and
+    derive the cipher key via hash_hkdf / PBKDF2 with a per-record salt.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    - openssl
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern: 'openssl_encrypt($PLAIN, $CIPHER, getenv($ENV) ?: "$LITERAL", ...)
+
+        '
+    - pattern: 'openssl_encrypt($PLAIN, $CIPHER, $_ENV[$ENV] ?? "$LITERAL", ...)
+
+        '
+    - pattern: 'openssl_decrypt($CT, $CIPHER, getenv($ENV) ?: "$LITERAL", ...)
+
+        '
+    - pattern: 'openssl_decrypt($CT, $CIPHER, $_ENV[$ENV] ?? "$LITERAL", ...)
+
+        '
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.php.crypto.hardcoded-env-fallback-to-openssl-twostep.hardcoded-env-fallback-to-openssl-twostep
+  message: Hardcoded fallback secret '$LITERAL' (assigned via env-fallback) is used as the openssl cipher key. Fail fast at
+    startup.
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-321: Use of Hard-coded Cryptographic Key'
+    - 'CWE-798: Use of Hard-coded Credentials'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    - openssl
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    - Hard-coded Credentials
+  patterns:
+  - pattern-either:
+    - pattern-inside: '$K = getenv($ENV) ?: "$LITERAL";
+
+        ...
+
+        '
+    - pattern-inside: '$K = $_ENV[$ENV] ?? "$LITERAL";
+
+        ...
+
+        '
+  - pattern-either:
+    - pattern: 'openssl_encrypt($PLAIN, $CIPHER, $K, ...)
+
+        '
+    - pattern: 'openssl_decrypt($CT, $CIPHER, $K, ...)
+
+        '
+  - metavariable-regex:
+      metavariable: $LITERAL
+      regex: ^[A-Za-z0-9 _!@#$%^&*()+=,.:?<>\[\]{}|/\\-]{1,64}$
+- id: narvy.php.ldap.request-input-to-search-filter.request-input-to-search-filter
+  message: A value from $_GET/$_POST/$_REQUEST/$_COOKIE is concatenated into an LDAP search/bind filter without escaping.
+    An attacker can inject LDAP filter metacharacters to bypass authentication or exfiltrate directory data (LDAP injection,
+    CWE-90). Escape the value with `ldap_escape($value, "", LDAP_ESCAPE_FILTER)` before building the filter string.
+  severity: ERROR
+  languages:
+  - php
+  mode: taint
+  metadata:
+    cwe:
+    - 'CWE-90: Improper Neutralization of Special Elements used in an LDAP Query (''LDAP Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - LDAP Injection
+    references:
+    - https://cwe.mitre.org/data/definitions/90.html
+    - https://owasp.org/www-community/attacks/LDAP_Injection
+  paths:
+    exclude:
+    - '**/test/**'
+    - '**/tests/**'
+  pattern-sources:
+  - pattern: $_GET[...]
+  - pattern: $_POST[...]
+  - pattern: $_REQUEST[...]
+  - pattern: $_COOKIE[...]
+  pattern-sanitizers:
+  - pattern: ldap_escape(...)
+  pattern-sinks:
+  - pattern: ldap_search($CONN, $BASE, $SINK)
+  - pattern: ldap_search($CONN, $BASE, $SINK, ...)
+  - pattern: ldap_list($CONN, $BASE, $SINK)
+  - pattern: ldap_list($CONN, $BASE, $SINK, ...)
+  - pattern: ldap_bind($CONN, $SINK, ...)
+- id: narvy.php.misc.insecure-chmod-permission.insecure-chmod-permission
+  message: '`chmod()` sets world-writable (and often world-readable) permissions (0777/0666). Any local user or process can
+    then modify or read this file, which is dangerous for config files, uploaded content directories, or scripts that get
+    executed later (CWE-732). Use the narrowest mode that works, e.g. 0600 for secrets or 0644 for regular files.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-732: Incorrect Permission Assignment for Critical Resource'
+    owasp:
+    - A01:2021 - Broken Access Control
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - php
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Improper Access Control
+  patterns:
+  - pattern-either:
+    - pattern: chmod($PATH, 0777)
+    - pattern: chmod($PATH, 0666)
+- id: narvy.php.lang.open-redirect-header-location.open-redirect-header-location
+  message: '`header(''Location: ...'')` built with a value taken directly from user input. An attacker can craft a link to
+    your trusted domain that then redirects the victim to an attacker-controlled site - used in phishing to borrow the trusted
+    domain''s credibility (CWE-601). Validate the target against a fixed allow-list of paths/hosts, or only allow relative
+    paths starting with `/`.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-601: URL Redirection to Untrusted Site (''Open Redirect'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: 'header("Location: " . $SINK)'
+      - pattern: 'header("Location: $SINK")'
+      - pattern: 'header("Location: " . $SINK . "...")'
+- id: narvy.php.info.phpinfo-call.phpinfo-call
+  message: '`phpinfo()` call found in application code reachable via a web request. It dumps the full PHP configuration -
+    loaded extensions, disabled functions, include paths, environment variables, and (with `INFO_ALL`/default flags) request
+    headers and server variables - which materially helps an attacker fingerprint the stack and find further weaknesses (CWE-200).
+    Remove it from production code, or gate it behind an authenticated admin-only route with a strict IP allow-list.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-200: Exposure of Sensitive Information to an Unauthorized Actor'
+    owasp:
+    - A05:2021 - Security Misconfiguration
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - php
+  patterns:
+  - pattern-either:
+    - pattern: phpinfo()
+    - pattern: phpinfo($X)
+- id: narvy.php.sqli.request-input-to-query.request-input-to-query
+  message: A value derived from $_GET/$_POST/$_REQUEST/$_COOKIE flows into a raw SQL query executed via mysqli_query/mysql_query/pg_query/PDO::query/
+    PDO::exec without parameterization. This is SQL injection (CWE-89). Use a prepared statement with bound parameters instead
+    of building the query string with request-derived data.
+  severity: ERROR
+  languages:
+  - php
+  mode: taint
+  metadata:
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - SQL Injection
+    references:
+    - https://cwe.mitre.org/data/definitions/89.html
+    - https://owasp.org/www-community/attacks/SQL_Injection
+  paths:
+    exclude:
+    - '**/test/**'
+    - '**/tests/**'
+    - '**/*Test.php'
+  pattern-sources:
+  - pattern: $_GET[...]
+  - pattern: $_POST[...]
+  - pattern: $_REQUEST[...]
+  - pattern: $_COOKIE[...]
+  pattern-sanitizers:
+  - pattern: mysqli_real_escape_string(...)
+  - pattern: $CONN->real_escape_string(...)
+  - pattern: addslashes(...)
+  - pattern: intval(...)
+  - pattern: (int)$X
+  - pattern: (int) $X
+  pattern-sinks:
+  - pattern: mysqli_query($CONN, $SINK)
+  - pattern: mysql_query($SINK)
+  - pattern: pg_query($CONN, $SINK)
+  - pattern: pg_query($SINK)
+  - pattern: $CONN->query($SINK)
+  - pattern: $PDO->query($SINK)
+  - pattern: $PDO->exec($SINK)
+  - pattern: $PDO->prepare($SINK)
+- id: narvy.php.generic.sqli-mysqli-query-tainted.sqli-mysqli-query-tainted
+  message: SQL query built with string concatenation/interpolation and passed to `mysqli_query()` / `$mysqli->query()` / `mysql_query()`.
+    These functions run the string as-is with no parameter binding; a tainted value is a SQL injection (CWE-89). Use `mysqli_prepare()`
+    with bound parameters.
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: mysqli_query($CONN, "..." . $SINK . "...")
+      - pattern: mysqli_query($CONN, "...$SINK...")
+      - pattern: $CONN->query("..." . $SINK . "...")
+      - pattern: $CONN->query("...$SINK...")
+      - pattern: mysql_query("..." . $SINK . "...")
+      - pattern: mysql_query("...$SINK...")
+  pattern-sanitizers:
+  - patterns:
+    - pattern: mysqli_real_escape_string(...)
+    - pattern: $CONN->real_escape_string(...)
+    - pattern: intval(...)
+    - pattern: (int)$X
+- id: narvy.php.generic.sqli-pdo-query-exec-tainted.sqli-pdo-query-exec-tainted
+  message: SQL query built with string concatenation/interpolation and passed to `PDO::query()` / `PDO::exec()`. Both run
+    the string as literal SQL with no parameter binding; a tainted value is a SQL injection (CWE-89). Use `PDO::prepare()`
+    with bound parameters instead.
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $PDO->query("..." . $SINK . "...")
+      - pattern: $PDO->query("...$SINK...")
+      - pattern: $PDO->exec("..." . $SINK . "...")
+      - pattern: $PDO->exec("...$SINK...")
+  pattern-sanitizers:
+  - patterns:
+    - pattern: intval(...)
+    - pattern: (int)$X
+- id: narvy.php.generic.sqli-prepare-string-built-tainted.sqli-prepare-string-built-tainted
+  message: '`PDO::prepare()` / `mysqli_prepare()` called with a query string that is itself built by concatenating/interpolating
+    a tainted value into the SQL text (e.g. a table/column name). Preparing the statement does not help if the injection point
+    is baked into the SQL text before `prepare()` is called (CWE-89). Validate identifiers against a fixed allow-list.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: $PDO->prepare("..." . $SINK . "...")
+      - pattern: $PDO->prepare("...$SINK...")
+      - pattern: mysqli_prepare($CONN, "..." . $SINK . "...")
+      - pattern: mysqli_prepare($CONN, "...$SINK...")
+  pattern-sanitizers:
+  - patterns:
+    - pattern: intval(...)
+    - pattern: (int)$X
+- id: narvy.php.crypto.aes-cbc-static-iv-literal.aes-cbc-static-iv-literal
+  message: '`openssl_encrypt()` in CBC mode called with a hardcoded string literal (or all-zero string) as the IV. Every message
+    encrypted with this key+IV pair leaks whether two plaintexts share a prefix, and reuse across messages breaks CBC''s semantic-security
+    guarantee (CWE-329). Generate a fresh random IV per encryption with `random_bytes(openssl_cipher_iv_length($cipher))`
+    and store/transmit it alongside the ciphertext.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-329: Generation of Predictable IV with CBC Mode'
+    - 'CWE-330: Use of Insufficiently Random Values'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    technology:
+    - php
+  patterns:
+  - pattern: openssl_encrypt($DATA, $CIPHER, $KEY, $OPT, "...", ...)
+  - metavariable-regex:
+      metavariable: $CIPHER
+      regex: (?i).*-cbc.*
+  - metavariable-pattern:
+      metavariable: $CIPHER
+      patterns:
+      - pattern-not: $VAR
+- id: narvy.php.crypto.aes-cbc-iv-derived-from-key.aes-cbc-iv-derived-from-key
+  message: '`openssl_encrypt()` IV argument is the same variable as (or is directly derived via `substr()`/hashing of) the
+    encryption key. Deriving the IV from the key removes the independence CBC relies on and produces a predictable, reused
+    IV across every message encrypted under that key (CWE-329). Use a fresh cryptographically random IV per call, independent
+    of the key.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-329: Generation of Predictable IV with CBC Mode'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  patterns:
+  - pattern-either:
+    - pattern: openssl_encrypt($DATA, $CIPHER, $KEY, $OPT, $KEY)
+    - pattern: openssl_encrypt($DATA, $CIPHER, $KEY, $OPT, substr($KEY, ...))
+  - metavariable-regex:
+      metavariable: $CIPHER
+      regex: (?i).*-cbc.*
+- id: narvy.php.crypto.mcrypt-static-iv.mcrypt-static-iv
+  message: Legacy `mcrypt_encrypt()` called with a hardcoded string literal as the IV. `mcrypt` itself is deprecated/removed
+    since PHP 7.2, but code kept running on older runtimes with a fixed IV loses CBC's semantic-security guarantee the same
+    way `openssl_encrypt` does (CWE-329). Migrate to `openssl_encrypt`/`sodium_crypto_secretbox` with a fresh random IV/nonce
+    per message.
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-329: Generation of Predictable IV with CBC Mode'
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    technology:
+    - php
+  pattern: mcrypt_encrypt($CIPHER, $KEY, $DATA, $MODE, "...")
+- id: narvy.php.lang.tainted-call-user-func.tainted-call-user-func
+  message: '`call_user_func()` / `call_user_func_array()` called with a callable name/array taken directly from user input.
+    An attacker who controls the function name can invoke any reachable function, including dangerous built-ins (`exec`, `system`,
+    `unlink`, ...) - unsafe reflection / code execution by proxy (CWE-470). Restrict the callable to a fixed allow-list keyed
+    by a validated token, never the raw input.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-470: Use of Externally-Controlled Input to Select Classes or Code (''Unsafe Reflection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: call_user_func($SINK, ...)
+      - pattern: call_user_func_array($SINK, ...)
+      - pattern: forward_static_call($SINK, ...)
+      - pattern: forward_static_call_array($SINK, ...)
+- id: narvy.php.lang.tainted-variable-function-call.tainted-variable-function-call
+  message: Variable function call `$fn(...)` where `$fn` is assigned directly from user input. PHP calls whatever function
+    name the string holds - this is the same unsafe-reflection risk as `call_user_func()` with a tainted name (CWE-470). Restrict
+    to a fixed allow-list of function names.
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-470: Use of Externally-Controlled Input to Select Classes or Code (''Unsafe Reflection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    technology:
+    - php
+  patterns:
+  - pattern-either:
+    - pattern: '$FN = $_GET[...];
+
+        ...
+
+        $FN(...);
+
+        '
+    - pattern: '$FN = $_POST[...];
+
+        ...
+
+        $FN(...);
+
+        '
+    - pattern: '$FN = $_REQUEST[...];
+
+        ...
+
+        $FN(...);
+
+        '
+- id: narvy.php.lang.tainted-exec-family.tainted-exec-family
+  message: '`exec()` / `shell_exec()` / `system()` / `passthru()` / `` `backtick` `` called with a command string built from
+    user input. The command is handed to the shell - an attacker can append `;`, `&&`, `|`, or backticks to run arbitrary
+    OS commands (CWE-78). Use `escapeshellarg()`/`escapeshellcmd()` on every tainted argument, or better, avoid a shell entirely
+    by calling the target program directly.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: exec("..." . $SINK . "...", ...)
+      - pattern: exec("...$SINK...", ...)
+      - pattern: exec("..." . $SINK, ...)
+      - pattern: shell_exec("..." . $SINK . "...")
+      - pattern: shell_exec("...$SINK...")
+      - pattern: shell_exec("..." . $SINK)
+      - pattern: system("..." . $SINK . "...", ...)
+      - pattern: system("...$SINK...", ...)
+      - pattern: system("..." . $SINK, ...)
+      - pattern: passthru("..." . $SINK . "...", ...)
+      - pattern: passthru("...$SINK...", ...)
+      - pattern: passthru("..." . $SINK, ...)
+  pattern-sanitizers:
+  - pattern-either:
+    - pattern: escapeshellarg(...)
+    - pattern: escapeshellcmd(...)
+    - pattern: intval(...)
+    - pattern: (int)$X
+    - patterns:
+      - pattern-inside: if (<... is_numeric($V) ...>) { ... }
+      - pattern: $V
+    - patterns:
+      - pattern-inside: if (<... ctype_digit($V) ...>) { ... }
+      - pattern: $V
+    - patterns:
+      - pattern-inside: if (<... filter_var($V, FILTER_VALIDATE_IP, ...) ...>) { ... }
+      - pattern: $V
+    - pattern: filter_var($V, FILTER_VALIDATE_INT, ...)
+    - pattern: filter_var($V, FILTER_VALIDATE_IP, ...)
+- id: narvy.php.lang.tainted-proc-popen.tainted-proc-popen
+  message: '`proc_open()` / `popen()` called with a command string built from user input. Both spawn the command through the
+    shell; a tainted value is an OS command injection (CWE-78). Prefer `proc_open()` with the command passed as an argv array
+    (bypasses the shell) and `escapeshellarg()`/`escapeshellcmd()` on any remaining tainted piece.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-78: Improper Neutralization of Special Elements used in an OS Command (''OS Command Injection'')'
+    owasp:
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: proc_open("..." . $SINK . "...", ...)
+      - pattern: proc_open("...$SINK...", ...)
+      - pattern: proc_open("..." . $SINK, ...)
+      - pattern: popen("..." . $SINK . "...", ...)
+      - pattern: popen("...$SINK...", ...)
+      - pattern: popen("..." . $SINK, ...)
+  pattern-sanitizers:
+  - pattern-either:
+    - pattern: escapeshellarg(...)
+    - pattern: escapeshellcmd(...)
+    - patterns:
+      - pattern-inside: if (<... is_numeric($V) ...>) { ... }
+      - pattern: $V
+    - patterns:
+      - pattern-inside: if (<... ctype_digit($V) ...>) { ... }
+      - pattern: $V
+    - patterns:
+      - pattern-inside: if (<... filter_var($V, FILTER_VALIDATE_IP, ...) ...>) { ... }
+      - pattern: $V
+    - pattern: filter_var($V, FILTER_VALIDATE_INT, ...)
+    - pattern: filter_var($V, FILTER_VALIDATE_IP, ...)
+- id: narvy.php.session.session-id-tainted.session-id-tainted
+  message: '`session_id()` called with a value taken from user-controlled input (query string, cookie, or POST body). This
+    allows session fixation - an attacker sets the session ID before the victim logs in, then reuses that same ID after authentication
+    succeeds (CWE-384). Never accept a caller-supplied session ID; call `session_id()` with no argument to let PHP generate
+    one, and call `session_regenerate_id(true)` immediately after a successful login.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-384: Session Fixation'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern: session_id($SINK)
+- id: narvy.php.session.session-name-tainted.session-name-tainted
+  message: '`session_name()` set from user-controlled input. The session cookie name should be a fixed application constant;
+    letting an attacker influence it can be combined with other bugs to fixate or confuse session handling across sub-applications
+    on the same domain (CWE-384). Use a hardcoded session name.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-384: Session Fixation'
+    owasp:
+    - A07:2021 - Identification and Authentication Failures
+    subcategory:
+    - vuln
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+  pattern-sinks:
+  - patterns:
+    - pattern: session_name($SINK)
+- id: narvy.php.ssrf.tainted-url-file-get-contents.tainted-url-file-get-contents
+  message: '`file_get_contents()` / `fopen()` called with a URL built from user input. If the scheme/host is attacker-controlled,
+    this lets the attacker make the server issue requests to internal services (metadata endpoints, admin panels, other hosts
+    on the internal network) - SSRF (CWE-918). Validate the target against a strict allow-list of hosts and reject non-`https`
+    schemes before fetching.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery (SSRF)
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: file_get_contents($SINK)
+      - pattern: file_get_contents("..." . $SINK . "...")
+      - pattern: file_get_contents("...$SINK...")
+      - pattern: fopen($SINK, ...)
+      - pattern: fopen("..." . $SINK . "...", ...)
+      - pattern: readfile($SINK)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: parse_url(...)
+- id: narvy.php.ssrf.tainted-curl-url.tainted-curl-url
+  message: '`CURLOPT_URL` (or `curl_init()`''s URL argument) set from user input. An attacker who controls the target host
+    can make the server issue requests on their behalf to internal-only endpoints - SSRF (CWE-918). Validate the host against
+    a strict allow-list before setting it, and reject `file://`/`gopher://`/`dict://` schemes.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery (SSRF)
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: curl_setopt($CH, CURLOPT_URL, $SINK)
+      - pattern: curl_setopt($CH, CURLOPT_URL, "..." . $SINK . "...")
+      - pattern: curl_init($SINK)
+      - pattern: curl_init("..." . $SINK . "...")
+  pattern-sanitizers:
+  - patterns:
+    - pattern: parse_url(...)
+- id: narvy.php.crypto.md5-sha1-as-password-hash.md5-sha1-as-password-hash
+  message: MD5/SHA1 digest applied to a value whose name indicates a password/credential. Both algorithms are fast, unsalted,
+    and brute-forceable with commodity GPUs; MD5 is also collision-broken. Use `password_hash($password, PASSWORD_DEFAULT)`
+    (bcrypt/Argon2) for credential storage, and verify with `password_verify()`. CWE-916.
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-916: Use of Password Hash With Insufficient Computational Effort'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern-either:
+    - pattern: md5($PW)
+    - pattern: sha1($PW)
+  - metavariable-regex:
+      metavariable: $PW
+      regex: (?i).*(pass|pwd|secret|credential).*
+- id: narvy.php.crypto.mcrypt-weak-algo-or-mode.mcrypt-weak-algo-or-mode
+  message: '`mcrypt_encrypt()` called with a broken cipher (DES/TripleDES/RC4) or ECB mode. DES has a brute-forceable 56-bit
+    key, RC4 has known keystream biases, and ECB leaks plaintext structure. The `mcrypt` extension itself is deprecated/removed
+    since PHP 7.2 - migrate to `openssl_encrypt()` with `aes-256-gcm`. CWE-327.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    - mcrypt
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern: mcrypt_encrypt($CIPHER, ...)
+  - metavariable-regex:
+      metavariable: $CIPHER
+      regex: (?i).*(des|rc4|arcfour|ecb).*
+- id: narvy.php.crypto.openssl-encrypt-ecb-mode.openssl-encrypt-ecb-mode
+  message: '`openssl_encrypt()` called with an ECB-mode cipher string (e.g. "aes-128-ecb"). ECB encrypts identical plaintext
+    blocks to identical ciphertext blocks, leaking structural information about the data. Use an authenticated mode such as
+    "aes-256-gcm" instead. CWE-327.'
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    - openssl
+    likelihood: LOW
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+  patterns:
+  - pattern: openssl_encrypt($DATA, "$CIPHER", ...)
+  - metavariable-regex:
+      metavariable: $CIPHER
+      regex: (?i).*-ecb$
+- id: narvy.php.crypto.weak-random-security-token.weak-random-security-token
+  message: '`mt_rand()` / `rand()` output is assigned to a variable whose name indicates security-sensitive use (token, secret,
+    password, otp, session, nonce, reset code, csrf). Both are Mersenne-Twister-based and not cryptographically secure - their
+    output is predictable once a few samples are observed. Use `random_bytes()` or `random_int()`, which are CSPRNG-backed.
+    CWE-338.'
+  severity: WARNING
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-338: Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)'
+    - 'CWE-330: Use of Insufficiently Random Values'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - audit
+    technology:
+    - php
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    vulnerability_class:
+    - Insufficient Entropy
+  patterns:
+  - pattern-either:
+    - pattern: $TOKEN = mt_rand(...);
+    - pattern: $TOKEN = rand(...);
+  - metavariable-regex:
+      metavariable: $TOKEN
+      regex: (?i).*(token|secret|password|passwd|pwd|otp|session|nonce|reset|csrf).*
+- id: narvy.php.xss.echo-superglobal-unescaped.echo-superglobal-unescaped
+  mode: taint
+  message: User-controlled request data ($_GET/$_POST/$_REQUEST/$_COOKIE/ $_SERVER['HTTP_*']) reaches an `echo`/`print` output
+    sink without passing through `htmlspecialchars()` / `htmlentities()`. The value is written into the HTML response verbatim;
+    an attacker who controls it can inject `<script>` or event-handler markup (reflected XSS, CWE-79). Escape with `htmlspecialchars($value,
+    ENT_QUOTES, 'UTF-8')` before output.
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: HIGH
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: echo $X;
+      - pattern: print $X;
+      - pattern: printf($FMT, $X)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: htmlspecialchars($X, ...)
+  - patterns:
+    - pattern: htmlentities($X, ...)
+  - patterns:
+    - pattern: strip_tags($X, ...)
+  - patterns:
+    - pattern: (int)$X
+  - patterns:
+    - pattern: (float)$X
+  - patterns:
+    - pattern: esc_html($X)
+  - patterns:
+    - pattern: esc_html__($X, ...)
+  - patterns:
+    - pattern: esc_attr($X)
+  - patterns:
+    - pattern: esc_attr__($X, ...)
+  - patterns:
+    - pattern: esc_url($X)
+  - patterns:
+    - pattern: esc_url_raw($X)
+  - patterns:
+    - pattern: esc_js($X)
+  - patterns:
+    - pattern: esc_textarea($X)
+  - patterns:
+    - pattern: wp_kses($X, ...)
+  - patterns:
+    - pattern: wp_kses_post($X)
+  - patterns:
+    - pattern: sanitize_text_field($X)
+  - patterns:
+    - pattern: sanitize_email($X)
+  - patterns:
+    - pattern: sanitize_key($X)
+  - patterns:
+    - pattern: absint($X)
+  - patterns:
+    - pattern: intval($X, ...)
+  - patterns:
+    - pattern: wc_clean($X)
+- id: narvy.php.xss.request-input-in-html-string.request-input-in-html-string
+  message: Request input ($_GET/$_POST/$_REQUEST/$_COOKIE) is concatenated or interpolated into a string of HTML markup without
+    `htmlspecialchars()` / `htmlentities()`. Wherever that string is echoed, the attacker's value lands in the page verbatim
+    and can carry `<script>` or event-handler markup (reflected XSS, CWE-79). Blacklist filtering such as `str_replace('<script>',
+    '', ...)` does not fix this. Escape with `htmlspecialchars($value, ENT_QUOTES, 'UTF-8')` where the value enters the markup.
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    cwe:
+    - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+    owasp:
+    - A03:2021 - Injection
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: HIGH
+    impact: MEDIUM
+    confidence: MEDIUM
+    vulnerability_class:
+    - Cross-Site-Scripting (XSS)
+  pattern-either:
+  - pattern-either:
+    - patterns:
+      - pattern-either:
+        - patterns:
+          - pattern-either:
+            - pattern: $LIT . $_GET[$K]
+            - pattern: $_GET[$K] . $LIT
+          - metavariable-regex:
+              metavariable: $LIT
+              regex: (?s)^['"].*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=]
+        - patterns:
+          - pattern-inside: '"...$W..."'
+          - pattern: $_GET[$K]
+          - pattern-regex: '"[^"\n]*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=][^"\n]*"'
+    - patterns:
+      - pattern-either:
+        - patterns:
+          - pattern-either:
+            - pattern: $LIT . $_POST[$K]
+            - pattern: $_POST[$K] . $LIT
+          - metavariable-regex:
+              metavariable: $LIT
+              regex: (?s)^['"].*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=]
+        - patterns:
+          - pattern-inside: '"...$W..."'
+          - pattern: $_POST[$K]
+          - pattern-regex: '"[^"\n]*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=][^"\n]*"'
+    - patterns:
+      - pattern-either:
+        - patterns:
+          - pattern-either:
+            - pattern: $LIT . $_REQUEST[$K]
+            - pattern: $_REQUEST[$K] . $LIT
+          - metavariable-regex:
+              metavariable: $LIT
+              regex: (?s)^['"].*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=]
+        - patterns:
+          - pattern-inside: '"...$W..."'
+          - pattern: $_REQUEST[$K]
+          - pattern-regex: '"[^"\n]*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=][^"\n]*"'
+    - patterns:
+      - pattern-either:
+        - patterns:
+          - pattern-either:
+            - pattern: $LIT . $_COOKIE[$K]
+            - pattern: $_COOKIE[$K] . $LIT
+          - metavariable-regex:
+              metavariable: $LIT
+              regex: (?s)^['"].*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=]
+        - patterns:
+          - pattern-inside: '"...$W..."'
+          - pattern: $_COOKIE[$K]
+          - pattern-regex: '"[^"\n]*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=][^"\n]*"'
+  - patterns:
+    - pattern-either:
+      - pattern-inside: '$V = $_GET[...];
+
+          ...
+
+          '
+      - patterns:
+        - pattern-inside: '$V = $F(..., $_GET[...], ...);
+
+            ...
+
+            '
+        - metavariable-regex:
+            metavariable: $F
+            regex: ^(str_replace|str_ireplace|preg_replace|trim|ltrim|rtrim|stripslashes|strtolower|strtoupper|ucfirst|ucwords|substr|mb_substr|urldecode|rawurldecode|base64_decode|html_entity_decode|nl2br|strrev|wp_unslash)$
+      - pattern-inside: '$V = $_POST[...];
+
+          ...
+
+          '
+      - patterns:
+        - pattern-inside: '$V = $F(..., $_POST[...], ...);
+
+            ...
+
+            '
+        - metavariable-regex:
+            metavariable: $F
+            regex: ^(str_replace|str_ireplace|preg_replace|trim|ltrim|rtrim|stripslashes|strtolower|strtoupper|ucfirst|ucwords|substr|mb_substr|urldecode|rawurldecode|base64_decode|html_entity_decode|nl2br|strrev|wp_unslash)$
+      - pattern-inside: '$V = $_REQUEST[...];
+
+          ...
+
+          '
+      - patterns:
+        - pattern-inside: '$V = $F(..., $_REQUEST[...], ...);
+
+            ...
+
+            '
+        - metavariable-regex:
+            metavariable: $F
+            regex: ^(str_replace|str_ireplace|preg_replace|trim|ltrim|rtrim|stripslashes|strtolower|strtoupper|ucfirst|ucwords|substr|mb_substr|urldecode|rawurldecode|base64_decode|html_entity_decode|nl2br|strrev|wp_unslash)$
+      - pattern-inside: '$V = $_COOKIE[...];
+
+          ...
+
+          '
+      - patterns:
+        - pattern-inside: '$V = $F(..., $_COOKIE[...], ...);
+
+            ...
+
+            '
+        - metavariable-regex:
+            metavariable: $F
+            regex: ^(str_replace|str_ireplace|preg_replace|trim|ltrim|rtrim|stripslashes|strtolower|strtoupper|ucfirst|ucwords|substr|mb_substr|urldecode|rawurldecode|base64_decode|html_entity_decode|nl2br|strrev|wp_unslash)$
+    - pattern-not-inside: '$V = $A;
+
+        ...
+
+        $V = $B;
+
+        ...
+
+        '
+    - pattern-either:
+      - patterns:
+        - patterns:
+          - pattern-either:
+            - pattern: $LIT . $V
+            - pattern: $V . $LIT
+          - metavariable-regex:
+              metavariable: $LIT
+              regex: (?s)^['"].*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=]
+        - focus-metavariable: $V
+      - patterns:
+        - pattern-inside: '"...$W..."'
+        - pattern: $V
+        - pattern-regex: '"[^"\n]*<\s*/?\s*[a-zA-Z][a-zA-Z0-9-]*[\s>/=][^"\n]*"'
+- id: narvy.php.deserialization.unserialize-request-input.unserialize-request-input
+  message: '`unserialize()` is called on data derived from $_GET/$_POST/ $_REQUEST/$_COOKIE. PHP object injection (CWE-502):
+    if any class reachable from the deserialized graph implements a magic method (__wakeup, __destruct, __toString, ...),
+    an attacker can craft a serialized payload that triggers a POP-chain gadget for RCE, file write, or SQL injection. Use
+    `json_decode()` for untrusted data, or `unserialize($X, [''allowed_classes'' => false])` if PHP objects are unavoidable.'
+  severity: ERROR
+  languages:
+  - php
+  mode: taint
+  metadata:
+    cwe:
+    - 'CWE-502: Deserialization of Untrusted Data'
+    owasp:
+    - A08:2021 - Software and Data Integrity Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - php
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    vulnerability_class:
+    - Insecure Deserialization
+    references:
+    - https://cwe.mitre.org/data/definitions/502.html
+    - https://owasp.org/www-community/vulnerabilities/PHP_Object_Injection
+  paths:
+    exclude:
+    - '**/test/**'
+    - '**/tests/**'
+  pattern-sources:
+  - pattern: $_GET[...]
+  - pattern: $_POST[...]
+  - pattern: $_REQUEST[...]
+  - pattern: $_COOKIE[...]
+  pattern-sanitizers:
+  - pattern: json_decode(...)
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: unserialize($SINK)
+      - pattern: unserialize($SINK, $OPTS)
+    - pattern-not: unserialize($SINK, ['allowed_classes' => false])

@@ -1,0 +1,360 @@
+# Swift source rules, authored by Narvy.
+# Keychain, TLS, crypto, WebView, pasteboard, secrets.
+
+rules:
+  - id: ios-swift-ecb-mode
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      ECB mode is used for encryption (kCCOptionECBMode). ECB is insecure
+      because identical plaintext blocks encrypt to identical ciphertext
+      blocks, revealing patterns. Use GCM or CBC with a random IV instead.
+    metadata:
+      cwe: CWE-327
+      masvs: MSTG-CRYPTO-4
+      category: crypto
+    pattern-either:
+      - pattern: CCCrypt(..., kCCOptionECBMode, ...)
+      - pattern-regex: 'kCCOptionECBMode'
+
+  - id: ios-swift-weak-cipher
+    languages: [swift]
+    severity: ERROR
+    message: "DES/3DES/RC4 are broken ciphers (kCCAlgorithmDES/3DES/RC4). Use AES-256-GCM instead."
+    metadata:
+      cwe: CWE-327
+      masvs: MSTG-CRYPTO-4
+      category: crypto
+    pattern-regex: 'kCCAlgorithm(DES|3DES|RC4)\b'
+
+  - id: ios-swift-weak-hash
+    languages: [swift]
+    severity: WARNING
+    message: "MD5/SHA-1 are broken for security-sensitive hashing (CommonCrypto CC_MD5/CC_SHA1, CryptoKit Insecure.MD5/Insecure.SHA1, or a CryptoSwift .md5()/.sha1() call). Use SHA256+."
+    metadata:
+      cwe: CWE-328
+      masvs: MSTG-CRYPTO-4
+      category: crypto
+    pattern-either:
+      - pattern: CC_MD5(...)
+      - pattern: CC_SHA1(...)
+      - pattern: Insecure.MD5.hash(...)
+      - pattern: Insecure.SHA1.hash(...)
+      - pattern: Insecure.MD5()
+      - pattern: Insecure.SHA1()
+      # CryptoSwift adds .md5()/.sha1() extensions to String and Array<UInt8>.
+      - pattern: $X.md5()
+      - pattern: $X.sha1()
+
+  - id: ios-swift-weak-prng
+    languages: [swift]
+    severity: ERROR
+    message: "rand()/random()/drand48() are not cryptographically secure. Use SecRandomCopyBytes or CryptoKit for security-sensitive values."
+    metadata:
+      cwe: CWE-338
+      masvs: MSTG-CRYPTO-6
+      category: crypto
+    pattern-either:
+      - pattern: rand()
+      - pattern: random()
+      - pattern: drand48()
+      - pattern: arc4random() % $N
+
+  - id: ios-swift-hardcoded-crypto-key
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      A symmetric encryption key/passphrase is built directly from a string
+      literal (SymmetricKey/CCCrypt/CCCryptorCreate). Anyone who reads the
+      source (or decompiles a source-available build) recovers the exact
+      key used to encrypt/decrypt all protected data.
+    metadata:
+      cwe: CWE-321
+      masvs: MSTG-CRYPTO-1
+      category: crypto
+    pattern-either:
+      - pattern: 'SymmetricKey(data: Data("...".utf8))'
+      - pattern: 'SymmetricKey(data: "...".data(using: $ENC)!)'
+      - pattern: CCCrypt(..., "...", ...)
+      - pattern: CCCryptorCreate(..., "...", ...)
+
+  - id: ios-swift-trust-all-certs
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      URLSession authentication challenge handler calls completionHandler
+      with .useCredential unconditionally - this accepts ANY server
+      certificate, disabling TLS validation entirely (trivial MITM).
+    metadata:
+      cwe: CWE-295
+      masvs: MSTG-NETWORK-3
+      category: network
+    pattern-either:
+      - pattern: 'completionHandler(.useCredential, URLCredential(trust: $T))'
+      - pattern: 'completionHandler(URLSession.AuthChallengeDisposition.useCredential, URLCredential(trust: $T))'
+
+  - id: ios-swift-webview-js-untrusted-concat
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      evaluateJavaScript() is called with a string built via concatenation
+      or interpolation instead of a fixed literal. If any part of the
+      string can be influenced by untrusted input (deep link, server
+      response, user input), this is JavaScript injection into the WebView.
+    metadata:
+      cwe: CWE-79
+      masvs: MSTG-PLATFORM-5
+      category: webview
+    patterns:
+      - pattern-either:
+          - pattern: $WV.evaluateJavaScript($A + $B, ...)
+          - pattern: $WV.evaluateJavaScript("...\($X)...", ...)
+
+  - id: ios-swift-uiwebview-deprecated
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      UIWebView is deprecated (Apple rejects new App Store submissions using
+      it) and lacks WKWebView's process-isolation / modern security
+      protections (no per-origin sandboxing of JS, weaker WKUserContentController
+      controls). Migrate to WKWebView.
+    metadata:
+      cwe: CWE-1104
+      masvs: MSTG-PLATFORM-5
+      category: webview
+    pattern: UIWebView(...)
+
+  - id: ios-swift-log-sensitive-data
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      A log statement (print/NSLog/os_log) includes a value whose name
+      looks like a credential/token/secret - readable via device console
+      logs, crash reporters, or (for print) even shipped in release builds
+      if not stripped.
+    metadata:
+      cwe: CWE-532
+      masvs: MSTG-STORAGE-3
+      category: logging
+    patterns:
+      - pattern-either:
+          - pattern: print($MSG)
+          - pattern: NSLog($MSG, ...)
+          - pattern: os_log($MSG, ...)
+      - metavariable-pattern:
+          metavariable: $MSG
+          patterns:
+            - pattern-regex: '(?i)(password|token|secret|api[_-]?key)'
+
+  - id: ios-swift-keychain-insecure-accessibility
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      kSecAttrAccessibleAlways(ThisDeviceOnly) lets the Keychain item be
+      read even while the device is locked, and the non-"ThisDeviceOnly"
+      variants let it be restored onto a different device from an iCloud/
+      iTunes backup. Prefer kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
+    metadata:
+      cwe: CWE-922
+      masvs: MSTG-STORAGE-1
+      category: storage
+    pattern-regex: 'kSecAttrAccessibleAlways\b'
+
+  - id: ios-swift-sql-injection
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      SQL built via string concatenation/interpolation is passed to a raw
+      exec/query call (sqlite3_exec or an ORM's rawQuery-style API). Use
+      parameterized queries (bound placeholders) instead.
+    metadata:
+      cwe: CWE-89
+      masvs: MSTG-PLATFORM-2
+      category: injection
+    pattern-either:
+      - pattern: sqlite3_exec($DB, $A + $B, ...)
+      - pattern: sqlite3_exec($DB, "...\($X)...", ...)
+      - pattern: sqlite3_prepare_v2($DB, $A + $B, ...)
+      - pattern: sqlite3_prepare_v2($DB, "...\($X)...", ...)
+      - pattern: sqlite3_prepare($DB, "...\($X)...", ...)
+      - pattern: $DB.executeQuery("...\($X)...", ...)
+      - pattern: $DB.executeQuery($A + $B, ...)
+      - pattern: $DB.executeUpdate("...\($X)...", ...)
+      - pattern: $DB.executeUpdate($A + $B, ...)
+
+  - id: ios-swift-sql-injection-string-build
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      A SQL statement (SELECT/INSERT/UPDATE/DELETE/...) injects a value via
+      Swift string interpolation (\(...)) or concatenation (+). If the
+      interpolated/concatenated value derives from user input this is SQL
+      injection. Use parameterized queries with bound placeholders instead.
+    metadata:
+      cwe: CWE-89
+      masvs: MSTG-PLATFORM-2
+      category: injection
+    pattern-regex: |-
+      (?i)"\s*(?:SELECT\b[^"\n]*?\bFROM\b|INSERT\s+INTO\b|UPDATE\b[^"\n]*?\bSET\b|DELETE\s+FROM\b|REPLACE\s+INTO\b|(?:DROP|ALTER|CREATE)\s+TABLE\b)(?:[^"\n]*?'[^'\n]*\\\(|[^"\n]*?(?:=|==|<>|!=|<=|>=|<|>|\bLIKE\b|\bGLOB\b)\s*\\\(|[^"\n]*?(?:=|==|<>|!=|<=|>=|<|>|\bLIKE\b|\bGLOB\b)\s*"\s*\+)
+
+  - id: ios-swift-cleartext-http-url
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      A hardcoded http:// (non-TLS) URL literal is used. Traffic to this
+      endpoint is sent in cleartext unless ATS exception domains force it
+      to upgrade - verify this isn't a real network destination.
+    metadata:
+      cwe: CWE-319
+      masvs: MSTG-NETWORK-1
+      category: network
+    pattern-regex: '"http://(?!localhost|127\.0\.0\.1)[^"]+"'
+
+  # Hardcoded cloud / third-party credentials: fixed-prefix high-entropy tokens.
+  - id: ios-swift-hardcoded-aws-access-key
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      An AWS Access Key ID (AKIA...) is hardcoded in Swift source. Paired
+      with its secret (often nearby), it grants direct access to whatever the
+      key's IAM policy allows. Revoke it in IAM now and remove it; mobile apps
+      should use temporary credentials (Cognito Identity Pools or a
+      backend-issued token), never a long-lived AWS key.
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    pattern-regex: '\bAKIA[0-9A-Z]{16}\b'
+
+  - id: ios-swift-hardcoded-google-api-key
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      A Google API key (AIza...) is hardcoded in Swift source. Depending on
+      the key's API restrictions this can be abused for billed API calls or
+      data access. Restrict/rotate the key in the Google Cloud console and
+      load it from a secure backend instead of embedding it.
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    pattern-regex: '\bAIza[0-9A-Za-z\-_]{35}\b'
+
+  - id: ios-swift-hardcoded-stripe-secret-key
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      A Stripe LIVE secret key (sk_live_...) is hardcoded in Swift source.
+      It can create charges, issue refunds and read all payment data - a
+      direct financial exposure. Roll it in the Stripe dashboard immediately;
+      only publishable keys (pk_live_/pk_test_) belong in a mobile app, and
+      charge/refund logic must run server-side.
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    pattern-regex: '\bsk_live_[0-9a-zA-Z]{24,}\b'
+
+  - id: ios-swift-hardcoded-github-token
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      A GitHub personal-access token (ghp_...) is hardcoded in Swift source.
+      Anyone who reads it gains whatever repo/org access the token carries.
+      Revoke it in GitHub settings and remove it from the source tree.
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    pattern-regex: '\bghp_[A-Za-z0-9]{36}\b'
+
+  - id: ios-swift-hardcoded-slack-token
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      A Slack token (xox[baprs]-...) is hardcoded in Swift source. It grants
+      whatever workspace access the token type allows. Revoke it in Slack and
+      remove it; load it from a secure backend if the app truly needs it.
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    pattern-regex: '\bxox[baprs]-[0-9A-Za-z-]{10,48}\b'
+
+  - id: ios-swift-hardcoded-private-key
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      A PEM private-key block is embedded in Swift source. Shipping a private
+      key inside the app bundle fully compromises whatever it protects. Use
+      the Keychain / Secure Enclave for on-device key material, or fetch keys
+      from a secure server at runtime.
+    metadata:
+      cwe: CWE-321
+      masvs: MSTG-CRYPTO-1
+      category: secrets
+    # Require base64 key material after the header, so a bare "-----BEGIN PRIVATE KEY-----" marker constant is not flagged.
+    pattern-regex: '-----BEGIN( RSA| EC| OPENSSH| DSA)? PRIVATE KEY-----[\r\n\s]+[A-Za-z0-9+/]{40,}'
+
+  - id: ios-swift-credentials-in-url
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      A URL with embedded username:password credentials (Basic Auth in the
+      URL) is hardcoded in Swift source. These credentials leak into logs,
+      proxies and crash reports. Use an Authorization header set at request
+      time from a securely stored credential, or an OAuth token flow.
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    pattern-regex: '"https?://[^/\s:"]+:[^/\s@"]+@'
+
+  - id: ios-swift-hardcoded-secret-assignment
+    languages: [swift]
+    severity: ERROR
+    message: >-
+      A credential-like property (password / apiKey / clientSecret / auth
+      token) is assigned a hardcoded string literal. Anyone who inspects the
+      app bundle recovers this value. Load it from the Keychain or fetch it
+      from a backend at runtime instead of embedding it in source.
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    patterns:
+      # Only a string LITERAL initialiser; values read from env, Bundle, or a
+      # function call are not literals and never match.
+      - pattern-either:
+          - pattern: let $VAR = $VAL
+          - pattern: var $VAR = $VAL
+      # The property name must signal a secret, and must NOT end in a word that
+      # marks it as a key/field NAME rather than a secret VALUE (headerName,
+      # apiKeyName, secretHeaderField, ...).
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(?!.*(?:name|field|header|label|title|url|uri|path|column|type|action|hint)$)[a-z0-9_]*(?:password|passwd|pwd|apikey|api_key|clientsecret|client_secret|access_?token|auth_?token|authtoken|credential|secret_?token)[a-z0-9_]*$
+      # Value must be a non-trivial literal (>= 8 chars) and not an obvious
+      # placeholder or a URL.
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^"(?!.{0,7}")(?!.*(?i:example|sample|test|fake|placeholder|dummy|changeme|your_|replace|xxxx|todo|fixme))(?!https?://)[^"]{8,}"$
+
+  - id: ios-swift-userdefaults-sensitive-data
+    languages: [swift]
+    severity: WARNING
+    message: >-
+      A value is written to UserDefaults under a key that looks like a
+      credential/token/secret. UserDefaults (plist-backed) is unencrypted
+      and readable by anyone with filesystem access (jailbreak, backup
+      extraction) - use the Keychain for secrets instead.
+    metadata:
+      cwe: CWE-922
+      masvs: MSTG-STORAGE-1
+      category: storage
+    patterns:
+      - pattern: '$UD.set($VALUE, forKey: $KEY)'
+      - metavariable-pattern:
+          metavariable: $KEY
+          patterns:
+            - pattern-regex: '(?i)"[^"]*(password|token|secret|api[_-]?key)[^"]*"'

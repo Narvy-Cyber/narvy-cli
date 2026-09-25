@@ -1,0 +1,24 @@
+# Android local-storage checks.
+
+- id: AND-STORAGE-002
+  name: "Write to Unscoped External Storage"
+  pattern: 'Environment\.getExternalStorageDirectory\s*\(\s*\)'
+  severity: "MEDIUM"
+  confidence: "LOW"
+  details:
+    cwe: "CWE-922"
+    masvs: "MSTG-STORAGE-2"
+    description: "The app writes to the shared external storage root. Files placed here are world-readable pre-Android 10 (and reachable via scoped storage exemptions afterward), and survive app uninstall. This is a low-confidence heuristic - flags every use of the API, not just sensitive-data writes."
+    recommendation: "Verify manually whether sensitive data (tokens, PII, credentials) is ever written here. If so, use app-internal storage (getFilesDir()) or scoped storage, encrypted at rest if it must be shared."
+
+- id: AND-STORAGE-003
+  name: "Sensitive Data Possibly Copied to Clipboard"
+  pattern: |
+    (?i)ClipData\.newPlainText\s*\(\s*"[^"]*(password|token|secret|api_key)
+  severity: "MEDIUM"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-200"
+    masvs: "MSTG-PLATFORM-4"
+    description: "A value that looks like a password, token, or secret is copied to the system clipboard. Other apps (and, on some OEM skins, cloud clipboard sync) can read clipboard contents, making this a plaintext exfiltration path."
+    recommendation: "Avoid copying secrets to the clipboard. If unavoidable, mark the ClipDescription as sensitive (EXTRA_IS_SENSITIVE, API 33+) and clear the clipboard shortly after."

@@ -1,0 +1,45 @@
+# Objective-C WebView configuration checks.
+
+- id: IOS-OBJC-WEBVIEW-001
+  name: "Deprecated UIWebView Usage"
+  pattern: '\bUIWebView\s*\*'
+  severity: "MEDIUM"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-1104"
+    masvs: "MSTG-PLATFORM-5"
+    description: "UIWebView is deprecated - Apple has rejected new App Store submissions using it since April 2020. It also lacks WKWebView's out-of-process JS execution and per-origin sandboxing, making JS-injection issues more impactful."
+    recommendation: "Migrate to WKWebView, which runs web content in a separate process and offers WKUserContentController for tighter control over injected scripts and message handlers."
+
+- id: IOS-OBJC-WEBVIEW-002
+  name: "JavaScript Evaluated via String Concatenation"
+  pattern: 'stringByEvaluatingJavaScriptFromString\s*:\s*\[NSString stringWithFormat'
+  severity: "HIGH"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-79"
+    masvs: "MSTG-PLATFORM-5"
+    description: "JavaScript is built via stringWithFormat and evaluated in the WebView. If any interpolated value can be influenced by untrusted input (deep link, server response, user input), this is JavaScript injection into the WebView's context."
+    recommendation: "Avoid building JS strings via string formatting. If dynamic values must be passed into JS, JSON-encode them and use a fixed template, or use WKScriptMessageHandler for structured native<->JS communication instead."
+
+- id: IOS-OBJC-WEBVIEW-003
+  name: "WebView Authentication Challenge Accepts Any Credential"
+  pattern: '(?s)webView\s*:\s*didReceiveAuthenticationChallenge\s*:.*?completionHandler\s*\(\s*NSURLSessionAuthChallengeUseCredential'
+  severity: "CRITICAL"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-295"
+    masvs: "MSTG-NETWORK-3"
+    description: "The WebView's authentication-challenge delegate method calls completionHandler with NSURLSessionAuthChallengeUseCredential, which accepts the credential/certificate offered without validating it - a trivial MITM path for content loaded in the WebView."
+    recommendation: "Validate the server trust (SecTrustEvaluateWithError against the expected certificate/public key) before calling completionHandler with UseCredential. Prefer NSURLSessionAuthChallengePerformDefaultHandling for the common case."
+
+- id: IOS-OBJC-WEBVIEW-004
+  name: "Universal File Access From File URLs Enabled"
+  pattern: 'setAllowUniversalAccessFromFileURLs\s*:\s*YES'
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-940"
+    masvs: "MSTG-PLATFORM-5"
+    description: "allowUniversalAccessFromFileURLs lets JavaScript running in a file:// context reach any origin, including making cross-origin requests and reading local files - a well-known path to universal XSS / local file exfiltration."
+    recommendation: "Leave allowUniversalAccessFromFileURLs at its default (NO/false) unless there is a specific, reviewed need. If local HTML must load remote resources, load it via a custom URL scheme handler instead."

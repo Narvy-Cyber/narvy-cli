@@ -1,0 +1,23 @@
+# Android WebView configuration checks.
+
+- id: AND-WEBVIEW-002
+  name: "File Access Enabled in WebView"
+  pattern: 'setAllowFileAccess\s*\(\s*true\s*\)'
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-73"
+    masvs: "MSTG-PLATFORM-5"
+    description: "Allowing file access from a WebView can lead to local file theft if a malicious web page is loaded."
+    recommendation: "Disable file access by default using `setAllowFileAccess(false)` unless explicitly required."
+
+- id: AND-WEBVIEW-005
+  name: "Content Access Enabled in WebView"
+  pattern: 'setAllowContentAccess\s*\(\s*true\s*\)'
+  severity: "MEDIUM"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-668"
+    masvs: "MSTG-PLATFORM-5"
+    description: "content:// URL access is enabled in the WebView. If the WebView can be made to load an attacker-influenced content:// URL, this can expose data from other apps' ContentProviders."
+    recommendation: "Disable with setAllowContentAccess(false) unless the app specifically needs to load content:// URLs from trusted sources."

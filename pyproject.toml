@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "narvy-cli"
+description = "Free, local SAST scanner for Android, iOS, and polyglot web/backend source - plus passive web, host-audit, and cloud-posture scanning."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Narvy" }]
+# Version lives in narvy/__init__.py so `narvy --version` and
+# the wheel metadata cannot drift apart.
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "pyaxmlparser",
+    "pyyaml",
+    "rich",
+    "requests",
+    "semgrep==1.152.0",
+    "lief",
+]
+
+[project.urls]
+Homepage = "https://narvy.io"
+
+[project.optional-dependencies]
+# icdump only ships Linux/macOS wheels, so it's opt-in. Without it the iOS
+# binary analyzer falls back to LIEF-only symbols.
+ios-full = ["icdump"]
+# boto3 is ~35MB of transitive weight, so cloud-scan is opt-in.
+cloud = ["boto3"]
+
+[project.scripts]
+narvy = "narvy.main:cli"
+
+[tool.setuptools.dynamic]
+version = { attr = "narvy.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["narvy*"]
+# _pro_rules is never distributed. It carries no __init__.py, so it is not a
+# package; the exclusion keeps that true if one is ever added by accident.
+exclude = ["tests*", "tools*", "narvy._pro_rules*"]
+
+[tool.setuptools.package-data]
+# Data dirs without __init__.py. Never widen a glob to reach _pro_rules
+# (tests/test_no_pro_rules_in_package.py checks this).
+narvy = [
+    "rules/android/*.yml",
+    "rules/ios/objc/*.yml",
+    "rules/*.yml",
+    "rules/web/*.yml",
+    "rules/web/local/*/*.yml",
+    "ci_templates/*.yml",
+]
