@@ -1,0 +1,10 @@
+include README.md LICENSE SECURITY.md CHANGELOG.md
+
+# Never distributed, under any build path.
+prune narvy/_pro_rules
+prune tests
+prune tools
+prune private
+prune venv
+recursive-exclude narvy/_pro_rules *
+global-exclude *.pyc

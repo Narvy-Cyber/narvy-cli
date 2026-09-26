@@ -1,0 +1,29 @@
+name: Publish narvy-cli to PyPI
+
+# Publishes to PyPI via OpenID Connect trusted publishing (no API token stored).
+# Runs when a GitHub Release is published. Bump narvy/__init__.py first;
+# PyPI rejects re-uploads of an existing version.
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # required for trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,0 +1,15 @@
+# Narvy SAST for Bitbucket Pipelines. Written by `narvy init-ci --bitbucket`; edit freely.
+# Already have a bitbucket-pipelines.yml? Copy the step below into it instead of overwriting.
+# SARIF is kept as a build artifact (not Code Insights); --fail-on still fails the build.
+image: python:3.11
+
+pipelines:
+  default:
+    - step:
+        name: Narvy SAST
+        script:
+          - pip install --upgrade pip
+          - pip install narvy-cli
+          - narvy scan . --output sarif --file narvy-results.sarif --fail-on high
+        artifacts:
+          - narvy-results.sarif

@@ -1,0 +1,744 @@
+# Ruby and Rails web-source security rules.
+# Covers command/SQL injection, CSRF, mass assignment, TLS, weak hashing,
+# unsafe deserialization, send dispatch, unescaped output and open redirects.
+
+rules:
+
+# OS command injection - system / exec / spawn / popen / Open3 family
+- id: narvy.ruby.command-injection.command-injection-system.command-injection-system
+  message: >
+    Request data flows into a single-string shell invocation
+    (system/exec/spawn/IO.popen/Open3). Ruby hands a one-argument command
+    string to /bin/sh, so any shell metacharacter in the request lets an
+    attacker run arbitrary commands (CWE-78). Remediation: pass the program
+    and each argument as separate positional arguments
+    (system("cmd", arg1, arg2)) so no shell is spawned, or escape untrusted
+    fragments with Shellwords.escape and validate against an allow-list.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: params[...]
+            - pattern: params.$M
+            - pattern: params.fetch(...)
+            - pattern: request.params[...]
+            - pattern: request.query_parameters[...]
+            - pattern: request.request_parameters[...]
+            - pattern: request.GET[...]
+            - pattern: request.POST[...]
+            - pattern: cookies[...]
+            - pattern: request.env[...]
+            - pattern: request.headers[...]
+  pattern-sanitizers:
+    - pattern: Shellwords.escape(...)
+    - pattern: Shellwords.split(...)
+    - pattern: Integer(...)
+    - pattern: Float(...)
+  pattern-sinks:
+    - patterns:
+        - pattern-either:
+            - pattern: system($CMD)
+            - pattern: Kernel.system($CMD)
+            - pattern: exec($CMD)
+            - pattern: Kernel.exec($CMD)
+            - pattern: spawn($CMD)
+            - pattern: Process.spawn($CMD)
+            - pattern: IO.popen($CMD)
+            - pattern: IO.popen($CMD, ...)
+            - pattern: Open3.capture2($CMD)
+            - pattern: Open3.capture2e($CMD)
+            - pattern: Open3.capture3($CMD)
+            - pattern: Open3.popen2($CMD)
+            - pattern: Open3.popen2e($CMD)
+            - pattern: Open3.popen3($CMD)
+    - patterns:
+        # Focus taint on the program slot: literal program with tainted args is the safe form.
+        - pattern-either:
+            - pattern: system($CMD, ...)
+            - pattern: Kernel.system($CMD, ...)
+            - pattern: exec($CMD, ...)
+            - pattern: spawn($CMD, ...)
+            - pattern: Process.spawn($CMD, ...)
+        - focus-metavariable: $CMD
+
+# OS command injection - backtick execution
+- id: narvy.ruby.command-injection.command-injection-backtick.command-injection-backtick
+  message: >
+    Request data is interpolated into a backtick command string
+    (`...#{input}...`). Backticks execute their contents in a subshell, so an
+    attacker-controlled fragment yields arbitrary command execution (CWE-78).
+    Remediation: do not build backtick commands from request data; use an
+    argument-vector API such as system("cmd", arg) or IO.popen(["cmd", arg]),
+    and escape any remaining untrusted value with Shellwords.escape.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: params[...]
+            - pattern: params.$M
+            - pattern: request.params[...]
+            - pattern: cookies[...]
+            - pattern: request.env[...]
+            - pattern: request.headers[...]
+  pattern-sanitizers:
+    - pattern: Shellwords.escape(...)
+  pattern-sinks:
+    - pattern: "`...#{$X}...`"
+
+# OS command injection - %x[] execution
+- id: narvy.ruby.command-injection.command-injection-percent-x.command-injection-percent-x
+  message: >
+    Request data is interpolated into a %x{} / %x[] literal. %x is Ruby's
+    alternate spelling for backtick command execution and runs its contents
+    in a subshell, so untrusted input produces arbitrary command execution
+    (CWE-78). Remediation: build the command with an argument vector
+    (system("cmd", arg)) instead of a %x literal, and escape any untrusted
+    fragment with Shellwords.escape.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: params[...]
+            - pattern: params.$M
+            - pattern: request.params[...]
+            - pattern: cookies[...]
+            - pattern: request.env[...]
+            - pattern: request.headers[...]
+  pattern-sanitizers:
+    - pattern: Shellwords.escape(...)
+  pattern-sinks:
+    - pattern: "%x[...#{$X}...]"
+
+# SQL injection - ActiveRecord where() / find_by_sql / execute with a
+# non-parameterised string
+- id: narvy.ruby.sql-injection.sql-injection-where-string.sql-injection-where-string
+  message: >
+    Request data flows into the SQL-string argument of an ActiveRecord query
+    (where / find_by_sql / connection.execute / exec_query). Interpolating or
+    concatenating untrusted input into a SQL string allows an attacker to
+    alter the query and read or modify arbitrary data (CWE-89). Remediation:
+    use bound parameters - where("col = ?", value) or the hash form
+    where(col: value) - so the value can never be parsed as SQL.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    source: narvy-local
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: params[...]
+            - pattern: params.$M
+            - pattern: request.params[...]
+            - pattern: cookies[...]
+  pattern-sanitizers:
+    - pattern: ActiveRecord::Base.sanitize_sql(...)
+    - pattern: ActiveRecord::Base.sanitize_sql_array(...)
+    - pattern: ActiveRecord::Base.connection.quote(...)
+    - pattern: $M.sanitize_sql(...)
+    - pattern: quote(...)
+    - pattern: Integer(...)
+  pattern-sinks:
+    # Focus taint on the SQL-string slot only: bound-parameter args are the safe form.
+    - patterns:
+        - pattern-either:
+            - pattern: $M.where($SQL)
+            - pattern: $M.where($SQL, ...)
+            - pattern: $M.rewhere($SQL)
+            - pattern: $M.having($SQL)
+            - pattern: $M.find_by_sql($SQL)
+            - pattern: $M.find_by_sql($SQL, ...)
+        - focus-metavariable: $SQL
+    - patterns:
+        - pattern-either:
+            - pattern: $C.execute($SQL)
+            - pattern: $C.exec_query($SQL)
+            - pattern: $C.select_all($SQL)
+            - pattern: $C.select_values($SQL)
+        - focus-metavariable: $SQL
+
+# SQL injection - explicit tainted-string interpolation reaching where()
+- id: narvy.ruby.sql-injection.sql-injection-string-interpolation.sql-injection-string-interpolation
+  message: >
+    A local variable holding request data is interpolated directly into a SQL
+    string that is handed to ActiveRecord. String interpolation of untrusted
+    input into a query is the canonical SQL-injection sink (CWE-89).
+    Remediation: replace the interpolation with a bound placeholder -
+    where("name = ?", value) - or use the hash condition form.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    source: narvy-local
+  patterns:
+    - pattern-either:
+        - pattern: |
+            $V = params[...]
+            ...
+            $M.where("...#{$V}...")
+        - pattern: |
+            $V = params.$K
+            ...
+            $M.where("...#{$V}...")
+        - pattern: |
+            $V = params[...]
+            ...
+            $M.find_by_sql("...#{$V}...")
+        - pattern: |
+            $V = params[...]
+            ...
+            $C.execute("...#{$V}...")
+
+# Unsafe YAML deserialization
+- id: narvy.ruby.yaml-load-unsafe.yaml-load-unsafe.yaml-load-unsafe
+  message: >
+    Request data reaches YAML.load / Psych.load. The full YAML loader
+    instantiates arbitrary Ruby objects from tags such as
+    !ruby/object:..., which is a remote-code-execution primitive when the
+    document is attacker-controlled (CWE-502). Remediation: use
+    YAML.safe_load (or Psych.safe_load) with an explicit permitted-classes
+    allow-list.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-502: Deserialization of Untrusted Data"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: HIGH
+    source: narvy-local
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: params[...]
+            - pattern: params.$M
+            - pattern: request.body.read
+            - pattern: request.raw_post
+            - pattern: cookies[...]
+  pattern-sanitizers:
+    - pattern: YAML.safe_load(...)
+    - pattern: Psych.safe_load(...)
+  pattern-sinks:
+    - patterns:
+        - pattern-either:
+            - pattern: YAML.load($D)
+            - pattern: YAML.load($D, ...)
+            - pattern: YAML::load($D)
+            - pattern: Psych.load($D)
+            - pattern: Psych.load($D, ...)
+            - pattern: YAML.load_stream($D)
+            - pattern: YAML.parse($D)
+
+# Reflected method dispatch via send / public_send with a request-derived name
+- id: narvy.ruby.unsafe-send-direct-param.unsafe-send-direct-param.unsafe-send-direct-param
+  message: >
+    A method name taken from request data is passed to
+    send / public_send / __send__. This lets a caller invoke any reachable
+    method on the receiver - including destructive or privileged ones - which
+    is a code-execution / broken-access-control primitive (CWE-94).
+    Remediation: map the request value through an explicit allow-list of
+    permitted method names before dispatching, and never call the private
+    send/__send__ form with external input.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: params[...]
+            - pattern: params.$M
+            - pattern: request.params[...]
+  pattern-sinks:
+    - patterns:
+        - pattern-either:
+            - pattern: send($NAME)
+            - pattern: send($NAME, ...)
+            - pattern: public_send($NAME)
+            - pattern: public_send($NAME, ...)
+            - pattern: __send__($NAME)
+            - pattern: __send__($NAME, ...)
+            - pattern: $O.send($NAME)
+            - pattern: $O.send($NAME, ...)
+            - pattern: $O.public_send($NAME)
+            - pattern: $O.public_send($NAME, ...)
+            - pattern: $O.__send__($NAME)
+            - pattern: $O.__send__($NAME, ...)
+        - focus-metavariable: $NAME
+
+# Unescaped view output - raw() / html_safe on request data (XSS)
+- id: narvy.ruby.erb-raw-output.erb-raw-output.erb-raw-output
+  message: >
+    Request data is marked HTML-safe via raw() or .html_safe and rendered
+    without escaping. This disables Rails' automatic output encoding and
+    reflects attacker input into the page, producing cross-site scripting
+    (CWE-79). Remediation: render the value normally so Rails escapes it, or
+    sanitize with the sanitize() helper / Rails::Html::Sanitizer; never call
+    .html_safe on a string that contains untrusted data.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+    owasp:
+      - "A03:2021 - Injection"
+    subcategory: [vuln]
+    likelihood: HIGH
+    impact: MEDIUM
+    confidence: MEDIUM
+    source: narvy-local
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: params[...]
+            - pattern: params.$M
+            - pattern: request.params[...]
+  pattern-sanitizers:
+    - pattern: sanitize(...)
+    - pattern: ERB::Util.html_escape(...)
+    - pattern: CGI.escapeHTML(...)
+    - pattern: h(...)
+  pattern-sinks:
+    - patterns:
+        - pattern-either:
+            - pattern: raw($X)
+            - pattern: $X.html_safe
+            - pattern: content_tag($T, $X.html_safe)
+            - pattern: content_tag($T, raw($X))
+
+# Open redirect - redirect_to with a request-derived target
+- id: narvy.ruby.open-redirect.open-redirect.open-redirect
+  message: >
+    redirect_to receives a request-controlled URL. An attacker can point the
+    redirect at an external site to build a convincing phishing link or, on
+    older Rails, bypass host checks (CWE-601). Remediation: redirect to a
+    fixed internal path, look the target up in a server-side allow-list, or
+    pass only a relative path and set allow_other_host: false.
+  severity: WARNING
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+    owasp:
+      - "A01:2021 - Broken Access Control"
+    subcategory: [audit]
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: MEDIUM
+    source: narvy-local
+  mode: taint
+  pattern-sources:
+    - patterns:
+        - pattern-either:
+            - pattern: params[...]
+            - pattern: params.$M
+            - pattern: request.params[...]
+  pattern-sinks:
+    - patterns:
+        - pattern-either:
+            - pattern: redirect_to($URL)
+            - pattern: redirect_to($URL, ...)
+            - pattern: "redirect_back(fallback_location: $URL)"
+        - focus-metavariable: $URL
+
+# Weak hash - MD5
+- id: narvy.ruby.weak-hash.weak-hash-md5-digest.weak-hash-md5-digest
+  message: >
+    MD5 is used to compute a digest. MD5 offers no collision resistance and is
+    fast to brute-force, so it is unsuitable for signatures, integrity tokens,
+    or password/credential storage (CWE-328). Remediation: use SHA-256 or
+    SHA-3 for integrity, an HMAC with a strong hash for authentication, and a
+    dedicated password KDF (bcrypt, scrypt, Argon2) for credentials.
+  severity: WARNING
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-328: Use of Weak Hash"
+    owasp:
+      - "A02:2021 - Cryptographic Failures"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  pattern-either:
+    - pattern: Digest::MD5
+    - pattern: OpenSSL::Digest::MD5
+    - pattern: OpenSSL::Digest.new("MD5")
+    - pattern: OpenSSL::Digest.new('MD5')
+    - pattern: OpenSSL::Digest.digest("MD5", ...)
+    - pattern: OpenSSL::HMAC.hexdigest("MD5", ...)
+    - pattern: OpenSSL::HMAC.digest("MD5", ...)
+    - pattern: OpenSSL::HMAC.hexdigest("md5", ...)
+
+# Weak hash - SHA-1
+- id: narvy.ruby.weak-hash.weak-hash-sha1-digest.weak-hash-sha1-digest
+  message: >
+    SHA-1 is used to compute a digest. SHA-1 has a practical, publicly
+    demonstrated collision and must not be relied on for signatures,
+    certificates, integrity tokens, or credential storage (CWE-328).
+    Remediation: migrate to SHA-256 or SHA-3; for message authentication use
+    an HMAC over a strong hash, and for passwords use bcrypt/scrypt/Argon2.
+  severity: WARNING
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-328: Use of Weak Hash"
+    owasp:
+      - "A02:2021 - Cryptographic Failures"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: MEDIUM
+    source: narvy-local
+  pattern-either:
+    - pattern: Digest::SHA1
+    - pattern: OpenSSL::Digest::SHA1
+    - pattern: OpenSSL::Digest.new("SHA1")
+    - pattern: OpenSSL::Digest.new('SHA1')
+    - pattern: OpenSSL::Digest.digest("SHA1", ...)
+    - pattern: OpenSSL::HMAC.hexdigest("SHA1", ...)
+    - pattern: OpenSSL::HMAC.digest("SHA1", ...)
+    - pattern: OpenSSL::HMAC.hexdigest("sha1", ...)
+    - pattern: OpenSSL::HMAC.digest("sha1", ...)
+
+# CSRF - controller with no forgery protection
+- id: narvy.ruby.csrf.csrf-protection-not-enabled.csrf-protection-not-enabled
+  message: >
+    This controller subclasses ActionController::Base but never calls
+    protect_from_forgery, so state-changing requests are accepted without a
+    verified CSRF token unless protection is enabled app-wide (CWE-352).
+    Remediation: add protect_from_forgery with: :exception (the Rails
+    default), or confirm forgery protection is configured globally for this
+    application.
+  severity: WARNING
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-352: Cross-Site Request Forgery (CSRF)"
+    owasp:
+      - "A01:2021 - Broken Access Control"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    source: narvy-local
+  patterns:
+    - pattern: |
+        class $K < ActionController::Base
+          ...
+        end
+    - pattern-not: |
+        class $K < ActionController::Base
+          ...
+          protect_from_forgery
+          ...
+        end
+    - pattern-not: |
+        class $K < ActionController::Base
+          ...
+          protect_from_forgery(...)
+          ...
+        end
+
+# CSRF - token verification skipped
+- id: narvy.ruby.csrf.csrf-verification-skipped.csrf-verification-skipped
+  message: >
+    CSRF token verification is turned off for this controller via
+    skip_before_action/skip_before_filter :verify_authenticity_token. This is
+    only safe for endpoints that do not rely on cookie/session authentication
+    (for example token-authenticated API or webhook actions). If any skipped
+    action performs a state change while trusting the session cookie, it is
+    exploitable via CSRF (CWE-352). Remediation: scope the skip to specific
+    actions and confirm none of them authenticate via the session.
+  severity: WARNING
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-352: Cross-Site Request Forgery (CSRF)"
+    owasp:
+      - "A01:2021 - Broken Access Control"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: MEDIUM
+    confidence: LOW
+    source: narvy-local
+  pattern-either:
+    - pattern: skip_before_action :verify_authenticity_token
+    - pattern: skip_before_action :verify_authenticity_token, ...
+    - pattern: skip_before_action(:verify_authenticity_token, ...)
+    - pattern: skip_before_filter :verify_authenticity_token
+    - pattern: skip_before_filter :verify_authenticity_token, ...
+    - pattern: skip_before_filter(:verify_authenticity_token, ...)
+    - pattern: skip_forgery_protection
+    - pattern: skip_forgery_protection(...)
+
+# CSRF - protection disabled at application/environment config level
+- id: narvy.ruby.csrf.csrf-protection-disabled-globally.csrf-protection-disabled-globally
+  message: >
+    Application-level forgery protection is switched off
+    (allow_forgery_protection = false or default_protect_from_forgery =
+    false), which removes CSRF defenses from every controller in the app
+    (CWE-352). This is only defensible for a pure token-authenticated API
+    with no session cookies. Remediation: leave allow_forgery_protection at
+    its default (true) for any app that uses cookie/session authentication,
+    and never disable it in production.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-352: Cross-Site Request Forgery (CSRF)"
+    owasp:
+      - "A01:2021 - Broken Access Control"
+    subcategory: [vuln]
+    likelihood: LOW
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  pattern-either:
+    - pattern: $X.action_controller.allow_forgery_protection = false
+    - pattern: config.action_controller.allow_forgery_protection = false
+    - pattern: $X.action_controller.default_protect_from_forgery = false
+    - pattern: config.action_controller.default_protect_from_forgery = false
+
+# Mass assignment - raw params slice into a model
+- id: narvy.ruby.mass-assignment.mass-assignment-unpermitted-params.mass-assignment-unpermitted-params
+  message: >
+    A model is built or updated from a raw params slice with no .permit(...)
+    filtering in between. An attacker can supply extra fields
+    (role, admin, verified, ...) that map straight onto model attributes,
+    escalating privilege or tampering with records (CWE-915). Remediation:
+    pass request attributes through strong parameters -
+    params.require(:model).permit(:field1, :field2) - before .new / .create /
+    .update.
+  severity: WARNING
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [audit]
+    likelihood: LOW
+    impact: HIGH
+    confidence: LOW
+    source: narvy-local
+  pattern-either:
+    - pattern: $M.new(params[$K])
+    - pattern: $M.create(params[$K])
+    - pattern: $M.create!(params[$K])
+    - pattern: $R.update(params[$K])
+    - pattern: $R.update!(params[$K])
+    - pattern: $R.update_attributes(params[$K])
+    - pattern: $R.update_attributes!(params[$K])
+    - pattern: $R.assign_attributes(params[$K])
+    - pattern: $M.new(params.to_unsafe_h)
+    - pattern: $M.new(params[$K].to_unsafe_h)
+    - pattern: $M.create(params.to_unsafe_h)
+
+# Mass assignment - permit! / attr_accessible :all
+- id: narvy.ruby.mass-assignment.mass-assignment-permit-bang.mass-assignment-permit-bang
+  message: >
+    permit! whitelists every key in the parameter hash instead of an explicit
+    field list, and the legacy attr_accessible :all has the same effect. Both
+    fully defeat strong-parameter filtering and re-open mass assignment
+    (CWE-915). Remediation: replace permit! with an explicit
+    permit(:field1, :field2) enumerating only the attributes the action is
+    allowed to set.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-915: Improperly Controlled Modification of Dynamically-Determined Object Attributes"
+    owasp:
+      - "A08:2021 - Software and Data Integrity Failures"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    source: narvy-local
+  pattern-either:
+    - pattern: params.permit!
+    - pattern: params[$K].permit!
+    - pattern: params.require($K).permit!
+    - pattern: params.fetch($K).permit!
+    - pattern: attr_accessible :all
+
+# TLS - certificate verification explicitly disabled (SSLContext)
+- id: narvy.ruby.ssl-verify-mode-none.ssl-verify-mode-none.ssl-verify-mode-none
+  message: >
+    TLS peer verification is explicitly set to OpenSSL::SSL::VERIFY_NONE. The
+    client will accept any certificate, so an active network attacker can
+    present a forged certificate and transparently intercept the connection
+    (CWE-295). Remediation: use OpenSSL::SSL::VERIFY_PEER (the default). If a
+    private CA is required, supply it through ca_file / ca_path / cert_store
+    rather than disabling verification.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-295: Improper Certificate Validation"
+    owasp:
+      - "A07:2021 - Identification and Authentication Failures"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    source: narvy-local
+  pattern-either:
+    - pattern: $X.verify_mode = OpenSSL::SSL::VERIFY_NONE
+    - pattern: $H[$K] = OpenSSL::SSL::VERIFY_NONE
+    - pattern: "OpenSSL::SSL::SSLContext.new(verify_mode: OpenSSL::SSL::VERIFY_NONE)"
+
+# TLS - Net::HTTP with SSL but verification disabled
+- id: narvy.ruby.net-http-ssl-verify-disabled.net-http-ssl-verify-disabled.net-http-ssl-verify-disabled
+  message: >
+    A Net::HTTP client uses TLS (use_ssl) but disables certificate
+    verification with verify_mode = OpenSSL::SSL::VERIFY_NONE. Any
+    certificate, including an attacker's, is accepted, defeating the point of
+    TLS (CWE-295). Remediation: remove the verify_mode override so Net::HTTP
+    validates against the system trust store, or provide a specific ca_file
+    for a private CA.
+  severity: ERROR
+  languages: [ruby]
+  metadata:
+    category: security
+    cwe:
+      - "CWE-295: Improper Certificate Validation"
+    owasp:
+      - "A07:2021 - Identification and Authentication Failures"
+    subcategory: [vuln]
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: HIGH
+    source: narvy-local
+  pattern-either:
+    - pattern: "Net::HTTP.start(..., verify_mode: OpenSSL::SSL::VERIFY_NONE, ...)"
+    - patterns:
+        - pattern-inside: |
+            $H = Net::HTTP.new(...)
+            ...
+        - pattern: $H.verify_mode = OpenSSL::SSL::VERIFY_NONE
+- id: narvy.ruby.ssrf.net-http-host-from-user-input
+  message: 'A request URL or host passed to `Net::HTTP` / `open-uri` is derived from request input (CWE-918, SSRF). The server
+    can be made to reach cloud metadata endpoints (169.254.169.254), internal admin panels, or `file://` URLs. Validate the
+    parsed host against an allow-list and reject link-local, loopback and private ranges after DNS resolution.
+
+    '
+  severity: ERROR
+  languages:
+  - ruby
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-918: Server-Side Request Forgery (SSRF)'
+    owasp:
+    - A10:2021 - Server-Side Request Forgery
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+  mode: taint
+  pattern-sources:
+  - patterns:
+    - pattern-either:
+      - pattern: params[...]
+      - pattern: params.$KEY
+      - pattern: request.params[...]
+      - pattern: cookies[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: Net::HTTP.get($U)
+      - pattern: Net::HTTP.get($U, ...)
+      - pattern: Net::HTTP.get_response($U)
+      - pattern: Net::HTTP.get_response($U, ...)
+      - pattern: Net::HTTP.post($U, ...)
+      - pattern: Net::HTTP.post_form($U, ...)
+      - pattern: Net::HTTP.start($U, ...)
+      - pattern: Net::HTTP.new($U, ...)
+      - pattern: URI.open($U, ...)
+      - pattern: URI.open($U)

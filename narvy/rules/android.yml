@@ -1,0 +1,334 @@
+# Android source rules, authored by Narvy.
+# WebView, crypto, storage, logging, SQL injection, secrets.
+
+rules:
+  - id: android-ecb-mode
+    languages: [java, kotlin]
+    severity: ERROR
+    message: >-
+      ECB mode is used for encryption. ECB is insecure because identical
+      plaintext blocks encrypt to identical ciphertext blocks, revealing
+      patterns. Use GCM or CBC with proper padding instead.
+    metadata:
+      cwe: CWE-327
+      masvs: MSTG-CRYPTO-4
+      category: crypto
+    patterns:
+      - pattern: $CIPHER.getInstance($ALGO)
+      - metavariable-regex:
+          metavariable: $ALGO
+          regex: '.*ECB.*'
+
+  - id: android-weak-cipher
+    languages: [java, kotlin]
+    severity: ERROR
+    message: "DES/RC4 are broken ciphers. Use AES-256-GCM instead."
+    metadata:
+      cwe: CWE-327
+      masvs: MSTG-CRYPTO-4
+      category: crypto
+    patterns:
+      - pattern: $CIPHER.getInstance($ALGO)
+      - metavariable-regex:
+          metavariable: $ALGO
+          regex: '^"(DES|DESede|RC4).*'
+
+  - id: android-weak-hash
+    languages: [java, kotlin]
+    severity: WARNING
+    message: "MD5/SHA-1 are broken for security-sensitive hashing. Use SHA-256+."
+    metadata:
+      cwe: CWE-328
+      masvs: MSTG-CRYPTO-4
+      category: crypto
+    patterns:
+      - pattern: java.security.MessageDigest.getInstance($ALGO)
+      - metavariable-regex:
+          metavariable: $ALGO
+          regex: '^"(MD5|SHA-?1)"$'
+
+  - id: android-weak-prng
+    languages: [java, kotlin]
+    severity: WARNING
+    message: "java.util.Random / Math.random() is not cryptographically secure. Use SecureRandom for security-sensitive values (tokens, keys, nonces, salts, session ids)."
+    metadata:
+      cwe: CWE-338
+      masvs: MSTG-CRYPTO-6
+      category: crypto
+    patterns:
+      - pattern-either:
+          - pattern: new java.util.Random(...)
+          - pattern: new Random(...)
+          - pattern: Math.random()
+
+  - id: android-hardcoded-keystore-password
+    languages: [java, kotlin]
+    severity: ERROR
+    message: "Hardcoded KeyStore/keystore password - fully recoverable by decompilation."
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    patterns:
+      - pattern-either:
+          - pattern: $KS.load($IN, "$PASS".toCharArray())
+          - pattern: $KS.getKey($ALIAS, "$PASS".toCharArray())
+
+  - id: android-webview-js-enabled
+    languages: [java, kotlin]
+    severity: WARNING
+    message: "JavaScript enabled in WebView - can enable XSS if untrusted content is loaded."
+    metadata:
+      cwe: CWE-749
+      masvs: MSTG-PLATFORM-5
+      category: webview
+    patterns:
+      - pattern: $SETTINGS.setJavaScriptEnabled(true)
+
+  - id: android-webview-universal-file-access
+    languages: [java, kotlin]
+    severity: ERROR
+    message: "setAllowUniversalAccessFromFileURLs(true) allows JS in a file:// context to reach any origin - classic path to universal XSS / local file exfiltration."
+    metadata:
+      cwe: CWE-940
+      masvs: MSTG-PLATFORM-5
+      category: webview
+    patterns:
+      - pattern: $SETTINGS.setAllowUniversalAccessFromFileURLs(true)
+
+  - id: android-webview-addjavascriptinterface
+    languages: [java, kotlin]
+    severity: WARNING
+    message: "addJavascriptInterface() exposes a native object to JS in the WebView. Ensure the WebView only loads trusted content and methods are @JavascriptInterface-annotated."
+    metadata:
+      cwe: CWE-749
+      masvs: MSTG-PLATFORM-7
+      category: webview
+    patterns:
+      - pattern: $WV.addJavascriptInterface($OBJ, $NAME)
+
+  # SQLi via string-concat into a SQL sink, split by sink (rawQuery -> HIGH, execSQL -> MEDIUM); pure-literal concats suppressed.
+  - id: android-sql-injection-rawquery
+    languages: [java, kotlin]
+    severity: WARNING
+    message: "SQL built via string concatenation reaches rawQuery(). If any operand is user-controlled this is SQL injection; use parameterized queries (? placeholders + selectionArgs)."
+    metadata:
+      cwe: CWE-89
+      masvs: MSTG-PLATFORM-2
+      category: injection
+      confidence: LOW
+    patterns:
+      - pattern: $DB.rawQuery($A + $B, ...)
+      - pattern-not:
+          patterns:
+            - pattern: $DB.rawQuery($A + $B, ...)
+            - metavariable-pattern:
+                metavariable: $A
+                patterns:
+                  - pattern-regex: (?s)^(?:\s|\+)*(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*)(?:(?:\s|\+)+(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*))*(?:\s|\+)*$
+            - metavariable-pattern:
+                metavariable: $B
+                patterns:
+                  - pattern-regex: (?s)^(?:\s|\+)*(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*)(?:(?:\s|\+)+(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*))*(?:\s|\+)*$
+
+  - id: android-sql-injection-execsql
+    languages: [java, kotlin]
+    severity: INFO
+    message: "SQL built via string concatenation passed to execSQL(). Often DDL or a Room migration with app-internal values (lower risk); but if any operand is user-controlled it is injectable. Prefer parameterized statements."
+    metadata:
+      cwe: CWE-89
+      masvs: MSTG-PLATFORM-2
+      category: injection
+      confidence: LOW
+    patterns:
+      - pattern: $DB.execSQL($A + $B)
+      - pattern-not:
+          patterns:
+            - pattern: $DB.execSQL($A + $B)
+            - metavariable-pattern:
+                metavariable: $A
+                patterns:
+                  - pattern-regex: (?s)^(?:\s|\+)*(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*)(?:(?:\s|\+)+(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*))*(?:\s|\+)*$
+            - metavariable-pattern:
+                metavariable: $B
+                patterns:
+                  - pattern-regex: (?s)^(?:\s|\+)*(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*)(?:(?:\s|\+)+(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*))*(?:\s|\+)*$
+
+  - id: android-trust-all-certs
+    languages: [java, kotlin]
+    severity: ERROR
+    message: "Custom TrustManager - verify checkServerTrusted() actually validates the chain. An empty/no-op body disables TLS certificate validation entirely (trivial MITM)."
+    metadata:
+      cwe: CWE-295
+      masvs: MSTG-NETWORK-3
+      category: network
+    patterns:
+      - pattern: |
+          new X509TrustManager() {
+            ...
+            public void checkServerTrusted(...) { }
+            ...
+          }
+
+  - id: android-trust-all-hostname-verifier
+    languages: [java, kotlin]
+    severity: ERROR
+    message: "HostnameVerifier that always returns true disables hostname validation - MITM-exploitable even with a valid cert."
+    metadata:
+      cwe: CWE-297
+      masvs: MSTG-NETWORK-3
+      category: network
+    patterns:
+      - pattern: |
+          new HostnameVerifier() {
+            ...
+            public boolean verify(...) { return true; }
+            ...
+          }
+
+  - id: android-cleartext-mixed-content
+    languages: [java, kotlin]
+    severity: WARNING
+    message: "MIXED_CONTENT_ALWAYS_ALLOW permits an HTTPS page to load HTTP sub-resources - lets a network attacker inject content despite the top-level page being HTTPS."
+    metadata:
+      cwe: CWE-296
+      masvs: MSTG-NETWORK-2
+      category: network
+    patterns:
+      - pattern: $SETTINGS.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW)
+
+  - id: android-log-sensitive-data
+    languages: [java, kotlin]
+    severity: WARNING
+    message: "Logging a value that looks like a credential/token/secret - readable via adb/crash reporters on many devices."
+    metadata:
+      cwe: CWE-532
+      masvs: MSTG-STORAGE-3
+      category: logging
+    patterns:
+      - pattern-either:
+          - pattern: android.util.Log.$LEVEL($TAG, $MSG)
+          - pattern: Log.$LEVEL($TAG, $MSG)
+      - metavariable-pattern:
+          metavariable: $MSG
+          patterns:
+            - pattern-regex: '(?i)(password|token|secret|api[_-]?key)'
+      - metavariable-pattern:
+          metavariable: $MSG
+          patterns:
+            - pattern-not-regex: '^"[^"]*"$'
+
+  # exec()/ProcessBuilder command built by string concatenation (pure-literal concats suppressed).
+  - id: android-command-injection-runtime-exec
+    languages: [java, kotlin]
+    severity: ERROR
+    message: >-
+      A shell/process command is built with string concatenation and passed to
+      Runtime.exec()/ProcessBuilder. If any concatenated operand is
+      user-controlled this is command injection (CWE-78). Pass a fixed program
+      and its arguments as a String[] / argument list, never a concatenated
+      command line, and validate any dynamic argument against an allow-list.
+    metadata:
+      cwe: CWE-78
+      masvs: MSTG-PLATFORM-2
+      category: injection
+      confidence: LOW
+    patterns:
+      - pattern-either:
+          - pattern: $RT.exec($A + $B, ...)
+          - pattern: new ProcessBuilder($A + $B, ...)
+          - pattern: new ProcessBuilder().command($A + $B, ...)
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $RT.exec($A + $B, ...)
+                - pattern: new ProcessBuilder($A + $B, ...)
+                - pattern: new ProcessBuilder().command($A + $B, ...)
+            - metavariable-pattern:
+                metavariable: $A
+                patterns:
+                  - pattern-regex: (?s)^(?:\s|\+)*(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*)(?:(?:\s|\+)+(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*))*(?:\s|\+)*$
+            - metavariable-pattern:
+                metavariable: $B
+                patterns:
+                  - pattern-regex: (?s)^(?:\s|\+)*(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*)(?:(?:\s|\+)+(?:"[^"]*"|[A-Za-z_][A-Za-z0-9_.]*\.[A-Z][A-Z0-9_]*|[A-Z][A-Z0-9_]*))*(?:\s|\+)*$
+
+  # exec/ProcessBuilder given an argument array or arg list with a non-literal element;
+  # fully-literal arrays/lists (every element a string literal) are left alone.
+  - id: android-command-injection-array
+    languages: [java, kotlin]
+    severity: ERROR
+    message: >-
+      A shell/process command is passed to Runtime.exec()/ProcessBuilder as an
+      argument array (or arg list) in which at least one element is not a string
+      literal. If that element is user-controlled this is command injection
+      (CWE-78). Validate every dynamic argument against an allow-list, and never
+      pass unchecked input as an argument to a shell such as sh -c.
+    metadata:
+      cwe: CWE-78
+      masvs: MSTG-PLATFORM-2
+      category: injection
+      confidence: LOW
+    patterns:
+      - pattern-either:
+          - pattern: $RT.exec(new String[]{..., $X, ...})
+          - pattern: new ProcessBuilder(new String[]{..., $X, ...})
+          - pattern: $PB.command(new String[]{..., $X, ...})
+          - pattern: new ProcessBuilder(Arrays.asList(..., $X, ...))
+          - pattern: new ProcessBuilder(List.of(..., $X, ...))
+          - pattern: $PB.command(Arrays.asList(..., $X, ...))
+          - pattern: $PB.command(List.of(..., $X, ...))
+          - pattern: new ProcessBuilder(..., $X, ...)
+          - pattern: $PB.command(..., $X, ...)
+      - metavariable-regex:
+          metavariable: $X
+          regex: '^(?!"[^"]*"$)(?!new )(?!Arrays\.)(?!List\.)(?!Collections\.)(?!Set\.)(?!ImmutableList\.)(?!Lists\.)(?!R\.).+'
+
+  # Credential-named variable assigned a hardcoded literal (name-only vars and placeholders excluded); split java/kotlin for parse compatibility.
+  - id: android-hardcoded-credential-java
+    languages: [java]
+    severity: ERROR
+    message: >-
+      A credential-like variable (password / token / credential) is assigned a
+      hardcoded string literal. Anyone who decompiles the APK recovers this
+      value. Do not embed credentials in code - load them from the Android
+      Keystore / EncryptedSharedPreferences, or fetch them from a backend at
+      runtime.
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    patterns:
+      - pattern-either:
+          - pattern: $T $VAR = $VAL;
+          - pattern: $VAR = $VAL;
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(?!.*(?:name|field|header|label|title|url|uri|path|column|type|action|extra|pref|prefs|hint|key)$)[a-z0-9_]*(?:password|passwd|pwd|apitoken|access_?token|auth_?token|credential|secret_?token|sessiontoken)[a-z0-9_]*$
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^"(?!.{0,5}")(?!.*(?i:example|sample|test|fake|placeholder|dummy|changeme|your_|replace|xxxx|todo|fixme))(?!https?://)[^"]{6,}"$
+
+  - id: android-hardcoded-credential-kotlin
+    languages: [kotlin]
+    severity: ERROR
+    message: >-
+      A credential-like variable (password / token / credential) is assigned a
+      hardcoded string literal. Anyone who decompiles the APK recovers this
+      value. Do not embed credentials in code - load them from the Android
+      Keystore / EncryptedSharedPreferences, or fetch them from a backend at
+      runtime.
+    metadata:
+      cwe: CWE-798
+      masvs: MSTG-STORAGE-1
+      category: secrets
+    patterns:
+      - pattern-either:
+          - pattern: val $VAR = $VAL
+          - pattern: var $VAR = $VAL
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(?!.*(?:name|field|header|label|title|url|uri|path|column|type|action|extra|pref|prefs|hint|key)$)[a-z0-9_]*(?:password|passwd|pwd|apitoken|access_?token|auth_?token|credential|secret_?token|sessiontoken)[a-z0-9_]*$
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^"(?!.{0,5}")(?!.*(?i:example|sample|test|fake|placeholder|dummy|changeme|your_|replace|xxxx|todo|fixme))(?!https?://)[^"]{6,}"$

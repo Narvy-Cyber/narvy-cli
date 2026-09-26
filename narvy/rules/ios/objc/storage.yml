@@ -1,0 +1,45 @@
+# Objective-C local-storage checks.
+
+- id: IOS-OBJC-STORAGE-001
+  name: "Sensitive Data Stored in NSUserDefaults"
+  pattern: '(?i)\[[\w\s.\[\]]*userdefaults[\w\s.\]]*\s+setObject\s*:[^;]*forKey\s*:\s*@"[^"]*(password|token|secret|api[_-]?key)[^"]*"'
+  severity: "HIGH"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-922"
+    masvs: "MSTG-STORAGE-1"
+    description: "A value is written to NSUserDefaults under a key that looks like a credential/token/secret. NSUserDefaults is a plaintext plist file, readable by anyone with filesystem access (jailbreak, backup extraction, or another process on a compromised device)."
+    recommendation: "Store credentials, tokens, and secrets in the Keychain (SecItemAdd with an appropriate kSecAttrAccessible level), never in NSUserDefaults."
+
+- id: IOS-OBJC-STORAGE-002
+  name: "Insecure Keychain Accessibility (Always)"
+  pattern: 'kSecAttrAccessibleAlways(ThisDeviceOnly)?\b'
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-922"
+    masvs: "MSTG-STORAGE-1"
+    description: "kSecAttrAccessibleAlways lets the Keychain item be read even while the device is locked. The non-'ThisDeviceOnly' variant additionally allows the item to be restored onto a different device from an iCloud/iTunes backup."
+    recommendation: "Use kSecAttrAccessibleWhenUnlockedThisDeviceOnly (or WhenPasscodeSetThisDeviceOnly for the strongest guarantee) unless the item genuinely must be available before first unlock."
+
+- id: IOS-OBJC-STORAGE-003
+  name: "Sensitive Data Logged via NSLog"
+  pattern: '(?i)NSLog\s*\(\s*@"[^"]*(password|token|secret|api[_-]?key)[^"]*"'
+  severity: "MEDIUM"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-532"
+    masvs: "MSTG-STORAGE-3"
+    description: "NSLog output is readable via the device console, Console.app, and (on many crash reporters) uploaded with crash logs. Logging a value whose format string references a credential/token/secret risks leaking it."
+    recommendation: "Remove sensitive values from log statements entirely, or redact them (e.g. log only the last 4 characters) before logging."
+
+- id: IOS-OBJC-STORAGE-004
+  name: "File Protection Explicitly Disabled"
+  pattern: 'NSFileProtectionNone\b'
+  severity: "MEDIUM"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-922"
+    masvs: "MSTG-STORAGE-1"
+    description: "NSFileProtectionNone explicitly disables Data Protection encryption for a file, making it readable even while the device is locked (e.g. after a jailbreak that bypasses the lock screen)."
+    recommendation: "Use NSFileProtectionCompleteUntilFirstUserAuthentication (the iOS default) or NSFileProtectionComplete for files containing sensitive data. Only use NSFileProtectionNone for genuinely non-sensitive files that must be accessible during background execution while locked."

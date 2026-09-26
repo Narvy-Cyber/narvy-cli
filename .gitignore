@@ -1,0 +1,18 @@
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+.venv/
+narvy-results.sarif
+venv/
+dist/
+
+# Extended rule tree and benchmark corpus live in a separate private repo.
+# They must never be tracked or shipped here.
+narvy/_pro_rules/
+_pro_rules/
+private/
+
+# Local scan output artifacts
+narvy-results.json
+*-results.json

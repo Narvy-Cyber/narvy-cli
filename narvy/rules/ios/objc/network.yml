@@ -1,0 +1,67 @@
+# Objective-C transport-security checks.
+
+- id: IOS-OBJC-NET-001
+  name: "Undocumented API Disables All HTTPS Certificate Validation"
+  pattern: 'allowsAnyHTTPSCertificateForHost'
+  severity: "CRITICAL"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-295"
+    masvs: "MSTG-NETWORK-3"
+    description: "setAllowsAnyHTTPSCertificateForHost:forHost: is a private/undocumented NSURLRequest API that disables ALL certificate validation for the given host. Its mere presence in a shipped binary is itself an App Store review red flag, and it is a trivial MITM path."
+    recommendation: "Remove this call entirely. Use NSURLSession with a proper URLSessionDelegate that validates the server trust (SecTrustEvaluateWithError), or implement certificate pinning."
+
+- id: IOS-OBJC-NET-002
+  name: "NSURLConnection Accepts Any Certificate/Protection Space"
+  pattern: '(?s)canAuthenticateAgainstProtectionSpace\s*:.*?return\s+YES\s*;'
+  severity: "CRITICAL"
+  confidence: "MEDIUM"
+  details:
+    cwe: "CWE-295"
+    masvs: "MSTG-NETWORK-3"
+    description: "The NSURLConnection delegate's canAuthenticateAgainstProtectionSpace: unconditionally returns YES, meaning the connection will authenticate against ANY protection space/authentication method presented - including self-signed or attacker-controlled certificates."
+    recommendation: "Migrate to NSURLSession. If NSURLConnection must be kept, restrict this to only the expected authentication methods and validate the server trust before returning YES."
+
+- id: IOS-OBJC-NET-003
+  name: "Continues Without Credential on Auth Challenge"
+  pattern: 'continueWithoutCredentialForAuthenticationChallenge\s*:'
+  severity: "HIGH"
+  confidence: "LOW"
+  details:
+    cwe: "CWE-295"
+    masvs: "MSTG-NETWORK-3"
+    description: "continueWithoutCredentialForAuthenticationChallenge: proceeds with the connection despite an unresolved authentication challenge (e.g. an untrusted server certificate). This is a low-confidence heuristic - it flags every call site, not just certificate-bypass usage; verify the surrounding logic manually."
+    recommendation: "Verify this is not being used to silently accept an untrusted server certificate. If it is, validate the server trust explicitly before deciding whether to proceed."
+
+- id: IOS-OBJC-NET-004
+  name: "AFNetworking Certificate Validation Disabled"
+  pattern: 'allowInvalidCertificates\s*=\s*YES'
+  severity: "CRITICAL"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-295"
+    masvs: "MSTG-NETWORK-3"
+    description: "AFSecurityPolicy.allowInvalidCertificates is set to YES, which disables TLS certificate validation for this AFNetworking session - the app will accept any certificate, including a self-signed one from an attacker performing a MITM."
+    recommendation: "Set allowInvalidCertificates to NO (the default) in release builds. If pinning is required, use AFSecurityPolicy's pinning modes (AFSSLPinningModeCertificate/PublicKey) instead of disabling validation."
+
+- id: IOS-OBJC-NET-005
+  name: "AFNetworking Domain Name Validation Disabled"
+  pattern: 'validatesDomainName\s*=\s*NO'
+  severity: "HIGH"
+  confidence: "HIGH"
+  details:
+    cwe: "CWE-297"
+    masvs: "MSTG-NETWORK-3"
+    description: "AFSecurityPolicy.validatesDomainName is set to NO, which disables hostname validation - a certificate for any domain will be accepted for this connection, enabling MITM even with a validly-signed certificate."
+    recommendation: "Leave validatesDomainName at its default (YES). If a specific case genuinely requires disabling it, pin the exact expected certificate/public key instead."
+
+- id: IOS-OBJC-NET-006
+  name: "Hardcoded Cleartext HTTP URL"
+  pattern: '@"http://(?!localhost|127\.0\.0\.1)[^"]+"'
+  severity: "MEDIUM"
+  confidence: "LOW"
+  details:
+    cwe: "CWE-319"
+    masvs: "MSTG-NETWORK-1"
+    description: "A hardcoded http:// (non-TLS) URL literal is used. Traffic to this endpoint is sent in cleartext unless an ATS exception domain forces an upgrade. Low-confidence heuristic - some of these may be intentional (e.g. local dev servers, non-sensitive third-party feeds); verify manually."
+    recommendation: "Use https:// for any endpoint that carries sensitive data or app logic. Remove NSAllowsArbitraryLoads / per-domain HTTP exceptions from Info.plist for production builds."

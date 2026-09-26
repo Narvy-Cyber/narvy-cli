@@ -1,0 +1,48 @@
+# Narvy SAST for GitHub Actions. Written by `narvy init-ci --github`; edit freely.
+# Scans this repo, uploads SARIF to the Security tab, and fails the build on --fail-on.
+name: Narvy SAST
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF to code scanning
+
+jobs:
+  narvy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Narvy CLI
+        run: |
+          python -m pip install --upgrade pip
+          pip install narvy-cli
+
+      - name: Run Narvy scan
+        # SARIF is written before the --fail-on gate, so the Security tab fills even on a failing build.
+        run: |
+          narvy scan . \
+            --output sarif \
+            --file narvy-results.sarif \
+            --fail-on high
+
+      - name: Upload SARIF to GitHub code scanning
+        if: always()   # upload even when the scan step failed the build via --fail-on
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: narvy-results.sarif
+
+# To also scan a web app URL, add a step:
+#   - run: narvy web-scan "https://staging.example.com" --format sarif --output-file web.sarif --fail-on high
+#   - if: always()
+#     uses: github/codeql-action/upload-sarif@v3
+#     with: { sarif_file: web.sarif, category: narvy-web }
