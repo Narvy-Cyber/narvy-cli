@@ -207,88 +207,89 @@ rules:
 
 # SQL injection - explicit tainted-string interpolation reaching where()
 - id: narvy.ruby.sql-injection.sql-injection-string-interpolation.sql-injection-string-interpolation
-  message: >
-    A local variable holding request data is interpolated directly into a SQL
-    string that is handed to ActiveRecord. String interpolation of untrusted
-    input into a query is the canonical SQL-injection sink (CWE-89).
-    Remediation: replace the interpolation with a bound placeholder -
-    where("name = ?", value) - or use the hash condition form.
+  message: 'A local variable holding request data is interpolated directly into a SQL string that is handed to ActiveRecord.
+    String interpolation of untrusted input into a query is the canonical SQL-injection sink (CWE-89). Remediation: replace
+    the interpolation with a bound placeholder - where("name = ?", value) - or use the hash condition form.
+
+    '
   severity: ERROR
-  languages: [ruby]
+  languages:
+  - ruby
   metadata:
     category: security
     cwe:
-      - "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+    - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
     owasp:
-      - "A03:2021 - Injection"
-    subcategory: [vuln]
+    - A03:2021 - Injection
+    subcategory:
+    - vuln
     likelihood: HIGH
     impact: HIGH
     confidence: HIGH
     source: narvy-local
-  patterns:
-    - pattern-either:
-        - pattern: |
-            $V = params[...]
-            ...
-            $M.where("...#{$V}...")
-        - pattern: |
-            $V = params.$K
-            ...
-            $M.where("...#{$V}...")
-        - pattern: |
-            $V = params[...]
-            ...
-            $M.find_by_sql("...#{$V}...")
-        - pattern: |
-            $V = params[...]
-            ...
-            $C.execute("...#{$V}...")
+  pattern-either:
+  - pattern: '$X = params[...]
+
+      ...
+
+      $MODEL.where("...#{$X}...")
+
+      '
+  - pattern: '$X = params.$KEY
+
+      ...
+
+      $MODEL.where("...#{$X}...")
+
+      '
+  - pattern: '$X = params[...]
+
+      ...
+
+      $MODEL.find_by_sql("...#{$X}...")
+
+      '
 
 # Unsafe YAML deserialization
 - id: narvy.ruby.yaml-load-unsafe.yaml-load-unsafe.yaml-load-unsafe
-  message: >
-    Request data reaches YAML.load / Psych.load. The full YAML loader
-    instantiates arbitrary Ruby objects from tags such as
-    !ruby/object:..., which is a remote-code-execution primitive when the
-    document is attacker-controlled (CWE-502). Remediation: use
-    YAML.safe_load (or Psych.safe_load) with an explicit permitted-classes
-    allow-list.
+  message: 'Request data reaches YAML.load / Psych.load. The full YAML loader instantiates arbitrary Ruby objects from tags
+    such as !ruby/object:..., which is a remote-code-execution primitive when the document is attacker-controlled (CWE-502).
+    Remediation: use YAML.safe_load (or Psych.safe_load) with an explicit permitted-classes allow-list.
+
+    '
   severity: ERROR
-  languages: [ruby]
+  languages:
+  - ruby
   metadata:
     category: security
     cwe:
-      - "CWE-502: Deserialization of Untrusted Data"
+    - 'CWE-502: Deserialization of Untrusted Data'
     owasp:
-      - "A08:2021 - Software and Data Integrity Failures"
-    subcategory: [vuln]
+    - A08:2021 - Software and Data Integrity Failures
+    subcategory:
+    - vuln
     likelihood: HIGH
     impact: HIGH
     confidence: HIGH
     source: narvy-local
   mode: taint
   pattern-sources:
-    - patterns:
-        - pattern-either:
-            - pattern: params[...]
-            - pattern: params.$M
-            - pattern: request.body.read
-            - pattern: request.raw_post
-            - pattern: cookies[...]
+  - patterns:
+    - pattern-either:
+      - pattern: params[...]
+      - pattern: params.$KEY
+      - pattern: request.body.read
+      - pattern: request.raw_post
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: YAML.load($DATA)
+      - pattern: YAML::load($DATA)
+      - pattern: Psych.load($DATA)
   pattern-sanitizers:
+  - pattern-either:
     - pattern: YAML.safe_load(...)
     - pattern: Psych.safe_load(...)
-  pattern-sinks:
-    - patterns:
-        - pattern-either:
-            - pattern: YAML.load($D)
-            - pattern: YAML.load($D, ...)
-            - pattern: YAML::load($D)
-            - pattern: Psych.load($D)
-            - pattern: Psych.load($D, ...)
-            - pattern: YAML.load_stream($D)
-            - pattern: YAML.parse($D)
 
 # Reflected method dispatch via send / public_send with a request-derived name
 - id: narvy.ruby.unsafe-send-direct-param.unsafe-send-direct-param.unsafe-send-direct-param
@@ -381,39 +382,50 @@ rules:
 
 # Open redirect - redirect_to with a request-derived target
 - id: narvy.ruby.open-redirect.open-redirect.open-redirect
-  message: >
-    redirect_to receives a request-controlled URL. An attacker can point the
-    redirect at an external site to build a convincing phishing link or, on
-    older Rails, bypass host checks (CWE-601). Remediation: redirect to a
-    fixed internal path, look the target up in a server-side allow-list, or
-    pass only a relative path and set allow_other_host: false.
+  message: 'redirect_to receives a request-controlled URL. An attacker can point the redirect at an external site to build
+    a convincing phishing link or, on older Rails, bypass host checks (CWE-601). Remediation: redirect to a fixed internal
+    path, look the target up in a server-side allow-list, or pass only a relative path and set allow_other_host: false.
+
+    '
   severity: WARNING
-  languages: [ruby]
+  languages:
+  - ruby
   metadata:
     category: security
     cwe:
-      - "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+    - 'CWE-601: URL Redirection to Untrusted Site (''Open Redirect'')'
     owasp:
-      - "A01:2021 - Broken Access Control"
-    subcategory: [audit]
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - audit
     likelihood: MEDIUM
     impact: MEDIUM
     confidence: MEDIUM
     source: narvy-local
   mode: taint
   pattern-sources:
-    - patterns:
-        - pattern-either:
-            - pattern: params[...]
-            - pattern: params.$M
-            - pattern: request.params[...]
+  - patterns:
+    - pattern-either:
+      - pattern: params[...]
+      - pattern: params.$KEY
   pattern-sinks:
-    - patterns:
-        - pattern-either:
-            - pattern: redirect_to($URL)
-            - pattern: redirect_to($URL, ...)
-            - pattern: "redirect_back(fallback_location: $URL)"
-        - focus-metavariable: $URL
+  - patterns:
+    - pattern: redirect_to($URL)
+    - pattern: redirect_to($URL, ...)
+  pattern-sanitizers:
+  - patterns:
+    - pattern: $HELPER(...)
+    - metavariable-regex:
+        metavariable: $HELPER
+        regex: ^[a-z_][a-z0-9_]*_(path|url)$
+  - patterns:
+    - pattern: $ROUTES.$HELPER(...)
+    - metavariable-regex:
+        metavariable: $HELPER
+        regex: ^[a-z_][a-z0-9_]*_(path|url)$
+  - patterns:
+    - pattern-inside: "if <... $U.host == $HOST ...>\n  ...\nend\n"
+    - pattern: $U
 
 # Weak hash - MD5
 - id: narvy.ruby.weak-hash.weak-hash-md5-digest.weak-hash-md5-digest

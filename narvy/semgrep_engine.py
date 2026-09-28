@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -99,6 +100,25 @@ def semgrep_jobs(single: bool = False) -> int:
     return max(1, min(DEFAULT_MAX_JOBS, os.cpu_count() or 1))
 
 
+_TAINT_CACHE: Dict[str, bool] = {}
+
+
+def config_has_taint(path: str) -> bool:
+    """True when a rule file holds a `mode: taint` rule (unreadable = True).
+
+    semgrep with more than one worker drops taint results at random, with no
+    error in its output, so such configs always run with one worker.
+    """
+    key = os.path.abspath(path)
+    if key not in _TAINT_CACHE:
+        try:
+            with open(key, 'r', encoding='utf-8', errors='ignore') as fh:
+                _TAINT_CACHE[key] = bool(re.search(r'(?m)^\s*mode:\s*taint\b', fh.read()))
+        except OSError:
+            _TAINT_CACHE[key] = True
+    return _TAINT_CACHE[key]
+
+
 def semgrep_max_memory_mb() -> int:
     """NARVY_SEMGREP_MAX_MEMORY_MB overrides; 0 disables the ceiling."""
     env = _env_int('NARVY_SEMGREP_MAX_MEMORY_MB')
@@ -145,8 +165,19 @@ def degraded_coverage_note() -> Optional[str]:
 def semgrep_bin() -> Optional[str]:
     """Path to semgrep, preferring the copy next to this interpreter (pipx/venv), or None."""
     exe = 'semgrep.exe' if os.name == 'nt' else 'semgrep'
-    d = os.path.dirname(sys.executable or '')
-    if d:
+    # pip installed semgrep next to narvy: in the interpreter's Scripts/bin, or,
+    # for `pip install --user`, the user Scripts/bin (%APPDATA%\Python\Python3xx\Scripts,
+    # ~/Library/Python/3.x/bin, ~/.local/bin), which is often not on PATH. Run as
+    # `python -m narvy`, the PATH lookup alone missed it and the code pass was skipped.
+    from .pathhint import _candidate_script_dirs
+    dirs = [os.path.dirname(sys.executable or '')]
+    try:
+        dirs += _candidate_script_dirs()
+    except Exception:
+        pass
+    for d in dirs:
+        if not d:
+            continue
         cand = os.path.join(d, exe)
         if os.path.isfile(cand) and os.access(cand, os.X_OK):
             return cand
@@ -158,6 +189,17 @@ def semgrep_env() -> Dict[str, str]:
     env = os.environ.copy()
     env['SEMGREP_ENABLE_VERSION_CHECK'] = '0'
     env['SEMGREP_SEND_METRICS'] = 'off'
+    # semgrep is Python: on Windows it would write its JSON in the console code page.
+    env['PYTHONUTF8'] = '1'
+    env['PYTHONIOENCODING'] = 'utf-8'
+    # semgrep (osemgrep) execs `pysemgrep` through PATH; when semgrep sits in a
+    # Scripts/bin dir that is not on PATH, it fails with "execvp pysemgrep".
+    bin_path = semgrep_bin()
+    if bin_path:
+        bin_dir = os.path.dirname(bin_path)
+        parts = env.get('PATH', '').split(os.pathsep) if env.get('PATH') else []
+        if bin_dir and os.path.normcase(bin_dir) not in {os.path.normcase(p) for p in parts}:
+            env['PATH'] = os.pathsep.join([bin_dir] + parts)
     return env
 
 

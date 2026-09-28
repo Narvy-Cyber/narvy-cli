@@ -73,7 +73,7 @@ def available_ram_mb() -> Optional[int]:
         elif system == "Darwin":
             # vm_stat exposes reclaimable inactive+purgeable pools that SC_AVPHYS_PAGES omits.
             import subprocess
-            out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10).stdout
+            out = subprocess.run(["vm_stat"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10).stdout
             page = 4096
             pm = re.search(r"page size of (\d+) bytes", out)
             if pm:

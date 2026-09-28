@@ -92,7 +92,7 @@ def resolve_nuclei_binary() -> str:
 def verify_nuclei(nuclei_bin: str) -> str:
     try:
         result = subprocess.run(
-            [nuclei_bin, "-version"], capture_output=True, text=True, timeout=15
+            [nuclei_bin, "-version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15
         )
     except Exception as e:
         raise RuntimeError(f"Could not run nuclei ({nuclei_bin}): {e}")

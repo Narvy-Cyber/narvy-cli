@@ -225,7 +225,7 @@ def scp_to_remote(conn: HostConn, local_path: str, remote_path: str,
             argv = ["sshpass", "-e", *argv]
 
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True,
+            proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                   timeout=timeout, env=env)
         except subprocess.TimeoutExpired as exc:
             raise LynisBootstrapError(

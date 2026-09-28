@@ -856,7 +856,7 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
     sca_cov = None
     with scan_progress() as progress:
         task1 = progress.add_task("[green]Decompiling APK...", total=1)
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             ok, decompile_error = decompile_apk(apk_path, temp_dir, max_mem, force=force,
                                                 extra_inputs=extra_dex_inputs)
             if not ok:
@@ -2676,8 +2676,23 @@ def cmd_init_ci(args):
     )
 
 
-def cli():
-    parser = _ArgumentParser(allow_abbrev=False, description=(
+def _safe_console_streams():
+    """Redirected output on Windows uses the ANSI code page (cp1252): a finding
+    snippet with a character outside it would crash the whole run with
+    UnicodeEncodeError. Replace such characters instead of dying."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if enc.startswith("utf"):
+            continue
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+def cli(prog=None):
+    _safe_console_streams()
+    parser =_ArgumentParser(prog=prog, allow_abbrev=False, description=(
         "Narvy CLI - Static Analysis for Android APKs/AABs, iOS IPAs, "
         "Android/iOS source projects, and web/backend source projects "
         f"({web_source_analyzer.SUPPORTED_LANGUAGES_LABEL})"

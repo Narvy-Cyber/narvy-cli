@@ -326,7 +326,7 @@ class NucleiScanner:
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=subprocess_timeout
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=subprocess_timeout
             )
         except subprocess.TimeoutExpired:
             logger.error(f"Nuclei scan timed out after {subprocess_timeout}s")

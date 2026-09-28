@@ -471,7 +471,7 @@ def scan(apk_path: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dic
             if not arch_members:
                 return findings, [], stats
 
-            with tempfile.TemporaryDirectory(prefix="narvy-nh-") as tmpdir:
+            with tempfile.TemporaryDirectory(prefix="narvy-nh-", ignore_cleanup_errors=True) as tmpdir:
                 for basename in sorted(arch_members):
                     member = arch_members[basename]
                     local_path = _safe_extract(zf, member, tmpdir)

@@ -30,8 +30,14 @@ JADX_BIN = os.path.join(JADX_HOME, "bin", "jadx.bat" if _IS_WINDOWS else "jadx")
 # jadx 1.5.0 needs Java 11+; a JRE is fetched when the system has none.
 _JRE_MAJOR = "17"
 _JRE_ADOPTIUM_OS = "windows" if _IS_WINDOWS else ("mac" if _IS_MAC else "linux")
-# x64 only: ARM Linux is unsupported and fails loudly on the archive.
-_JRE_ADOPTIUM_ARCH = "x64"
+# Apple Silicon and ARM Linux get the native aarch64 build (an x64 JRE needs
+# Rosetta on a Mac and does not run at all on ARM Linux). Windows stays x64:
+# Temurin 17 has no Windows ARM JRE, and Windows on ARM emulates x64.
+_JRE_ADOPTIUM_ARCH = (
+    "aarch64"
+    if not _IS_WINDOWS and platform.machine().lower() in ("arm64", "aarch64")
+    else "x64"
+)
 JRE_URL = (
     f"https://api.adoptium.net/v3/binary/latest/{_JRE_MAJOR}/ga/"
     f"{_JRE_ADOPTIUM_OS}/{_JRE_ADOPTIUM_ARCH}/jre/hotspot/normal/eclipse"
@@ -69,7 +75,7 @@ def resolve_jadx_binary():
 
 def _java_major_version(java_bin):
     try:
-        result = subprocess.run([java_bin, "-version"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run([java_bin, "-version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
     except Exception:
         return None
     out = result.stderr or result.stdout or ""
@@ -87,10 +93,12 @@ def _jre_bin_dir():
     # Discovered, not hardcoded: the Adoptium top-level dir carries the patch version.
     if not os.path.isdir(JRE_HOME):
         return None
-    for entry in os.listdir(JRE_HOME):
-        candidate = os.path.join(JRE_HOME, entry, "bin")
-        if os.path.isdir(candidate):
-            return candidate
+    for entry in sorted(os.listdir(JRE_HOME)):
+        # Linux/Windows: <jdk-17...-jre>/bin. macOS: <jdk-17...-jre>/Contents/Home/bin.
+        for sub in (("bin",), ("Contents", "Home", "bin")):
+            candidate = os.path.join(JRE_HOME, entry, *sub)
+            if os.path.isdir(candidate):
+                return candidate
     return None
 
 
@@ -133,16 +141,31 @@ def resolve_java_home():
 
     bin_dir = _jre_bin_dir()
     if bin_dir:
-        return bin_dir
+        java = os.path.join(bin_dir, "java.exe" if _IS_WINDOWS else "java")
+        # A JRE left by an older narvy can be the wrong architecture (x64 on
+        # Apple Silicon without Rosetta): it must actually run, or it is replaced.
+        if (_java_major_version(java) or 0) >= 11:
+            return bin_dir
+        logger.warning(f"The cached JRE in {JRE_HOME} does not run here - downloading a fresh one")
 
     return _download_jre()
 
 
 def _jadx_cmd(jadx_bin, extra_args):
-    # A .bat needs `cmd /c`; shell=True would mis-quote paths.
-    if _IS_WINDOWS and jadx_bin.lower().endswith(".bat"):
-        return ["cmd", "/c", jadx_bin] + extra_args
-    return [jadx_bin] + extra_args
+    """argv for jadx. On Windows a .bat goes through cmd.exe as ONE string.
+
+    A list like ["cmd", "/c", bat, ...] breaks as soon as the .bat path is quoted
+    (a space in the user name, or C:\\Program Files): cmd /c strips the first
+    and the last quote of the line and runs `C:\\Users\\Jean`. With /s and the
+    whole line wrapped in one extra pair of quotes, cmd strips exactly that pair.
+    """
+    if _IS_WINDOWS and jadx_bin.lower().endswith((".bat", ".cmd")):
+        return 'cmd /d /s /c "' + subprocess.list2cmdline([jadx_bin] + list(extra_args)) + '"'
+    return [jadx_bin] + list(extra_args)
+
+
+def _cmd_text(cmd):
+    return cmd if isinstance(cmd, str) else " ".join(str(c) for c in cmd)
 
 
 def _validate_apk_zip(apk_path: str):
@@ -260,7 +283,7 @@ def decompile_apk(apk_path: str, output_dir: str, max_mem: str = "4g", force: bo
         process = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             check=True,
             timeout=900,
             env=jadx_env,
@@ -269,7 +292,7 @@ def decompile_apk(apk_path: str, output_dir: str, max_mem: str = "4g", force: bo
         return True, ""
     except subprocess.CalledProcessError as e:
         # jadx/cmd.exe don't consistently use stderr; report both streams.
-        parts = [f"JADX failed (exit code {e.returncode})", f"Command run: {' '.join(str(c) for c in cmd)}"]
+        parts = [f"JADX failed (exit code {e.returncode})", f"Command run: {_cmd_text(cmd)}"]
         if e.stdout:
             parts.append(f"JADX stdout:\n{e.stdout}")
         if e.stderr:
@@ -279,7 +302,7 @@ def decompile_apk(apk_path: str, output_dir: str, max_mem: str = "4g", force: bo
                 "No output captured on either stdout or stderr. Run "
                 "`narvy doctor` to check your Java/jadx setup, or try "
                 f"running this exact command yourself to see the raw error: "
-                f"{' '.join(str(c) for c in cmd)}"
+                f"{_cmd_text(cmd)}"
             )
         # OOM is unambiguous; a bare -9 (SIGKILL) is ambiguous, so they differ.
         _combined_output = (e.stdout or "") + (e.stderr or "")

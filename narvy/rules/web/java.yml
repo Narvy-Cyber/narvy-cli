@@ -466,6 +466,11 @@ rules:
     - pattern: $P.toRealPath()
   - patterns:
     - pattern: FilenameUtils.getName(...)
+  - patterns:
+    - pattern-either:
+      - pattern: File.createTempFile(...)
+      - pattern: java.io.File.createTempFile(...)
+      - pattern: Files.createTempFile(...)
 - id: narvy.java.pathtraversal.jaxrs-pathparam-to-file.jaxrs-pathparam-to-file
   message: 'A JAX-RS `@PathParam`/`@QueryParam` value flows into a `File`/`Path` constructor with no canonicalisation or allow-list
     check. Same risk as the Servlet case: a `../` segment escapes the intended base directory (CWE-22). Canonicalise the resolved
@@ -1409,6 +1414,9 @@ rules:
     - pattern: ThreadLocalRandom.current()
   - pattern-not: new java.security.SecureRandom(...)
   - pattern-not: new SecureRandom(...)
+  - pattern-not-inside: $ARR[new Random().nextInt($ARR.length)]
+  - pattern-not-inside: $ARR[new java.util.Random().nextInt($ARR.length)]
+  - pattern-not-inside: $ARR[ThreadLocalRandom.current().nextInt($ARR.length)]
 - id: narvy.java.xss.servlet-writer-tainted-request-param.servlet-writer-tainted-request-param
   message: A value read from the HTTP request (`getParameter`, `getHeader`, `getQueryString`) is written to `HttpServletResponse.getWriter()`
     (or `getOutputStream()`) without HTML-escaping. The value is reflected into the response body verbatim; an attacker who
@@ -1457,6 +1465,18 @@ rules:
     - pattern: HtmlUtils.htmlEscape(...)
   - patterns:
     - pattern: Integer.parseInt(...)
+  - patterns:
+    - pattern: $C.$ESC(...)
+    - metavariable-regex:
+        metavariable: $ESC
+        regex: (?i)^(escape(html\d?|xml\d?|ecmascript|javascript|json)|htmlescape|forhtml\w*|forxml\w*|forjavascript\w*|sanitize\w*)$
+  - patterns:
+    - pattern-inside: '$R.setContentType("=~/^(application\/([a-z.+-]*json|[a-z.+-]*xml)|text\/(plain|csv|xml))/");
+
+        ...
+
+        '
+    - pattern: $X
 - id: narvy.java.xss.modelandview-tainted-attribute.modelandview-tainted-attribute
   message: A request parameter is added to a `ModelAndView`/`Model` attribute and the view is a `text/*` or a hand-built HTML
     string view (not a `Thymeleaf`/`JSP` template that auto-escapes with `${...}`). If the rendering layer does not HTML-escape

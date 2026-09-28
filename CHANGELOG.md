@@ -5,6 +5,60 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2]
+
+### Added
+
+- `python -m narvy` (`py -m narvy` on Windows) runs the CLI. It works when
+  pip put the `narvy` command in a directory that is not on PATH, the
+  default for a user install on Windows and macOS. Run that way, Narvy
+  prints once the command that adds the directory to PATH (PowerShell on
+  Windows, your shell rc file elsewhere). It never changes PATH itself;
+  `NARVY_NO_PATH_HINT=1` turns the hint off.
+- README: install steps for Windows, macOS (Homebrew
+  `externally-managed-environment`) and Linux, with pipx first.
+
+### Fixed
+
+- A user install run as `python -m narvy` (or by the launcher's full path)
+  did not find semgrep in the same off-PATH directory, skipped the code pass
+  and reported only dependency CVEs. semgrep is now looked up there and its
+  directory is put on the PATH it runs with (it starts `pysemgrep` through
+  PATH).
+- macOS: when no Java 11+ was installed, the downloaded JRE was never found
+  ("no bin/ dir found inside"), so APK scans failed on every such Mac. The
+  macOS layout (`Contents/Home/bin`) is handled, Apple Silicon and ARM Linux
+  get the native aarch64 JRE instead of x64, and a cached JRE that does not
+  run is downloaded again.
+- Windows: jadx failed to start when its path contained a space (a user name
+  like `Jean Dupont`, or `C:\Program Files`), because `cmd /c` stripped the
+  wrong quotes. The jadx command line now goes through `cmd /d /s /c` as one
+  quoted string.
+- Windows: tool output (semgrep, jadx, nuclei, ssh) is decoded as UTF-8
+  instead of the console code page, semgrep runs in Python UTF-8 mode, and
+  output redirected to a file or pipe replaces a character the code page
+  cannot encode instead of stopping the scan with `UnicodeEncodeError`.
+- A file still locked in a temporary directory (antivirus, a slow child
+  process) no longer fails the scan at cleanup.
+- SCA: only one version of each package was checked. A lockfile that holds
+  `minimist 1.2.8` and a nested `minimist 0.0.8` now checks both. A version
+  taken from a manifest range is still dropped when a lockfile resolves that
+  package.
+- yarn.lock (berry): the package comes from the `resolution:` line, so
+  aliases (`string-width-cjs@npm:string-width@...`) and `patch:` entries
+  name the real package, and `__metadata`, workspace, git and local entries
+  are no longer sent to OSV as packages.
+- semgrep with more than one worker drops taint-mode results at random with
+  no error. Every rule pack that holds a taint rule now runs in its own
+  single-worker semgrep process (packs still run side by side). Files where
+  a rule hit the per-file timeout are named in the scan notes.
+
+### Changed
+
+- Community rule precision round (PHP, JavaScript, Go, Java, Python, Ruby):
+  fewer findings on code that is not reachable by an attacker. Informational
+  rules are lowered to LOW with the reason.
+
 ## [1.1.1]
 
 ### Added

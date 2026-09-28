@@ -280,8 +280,14 @@ def test_php_packs_run_single_worker():
     assert "/r/web/javascript.yml" in other[0]
 
 
-def test_non_php_packs_keep_one_group():
-    groups = web_sa._semgrep_groups(["/r/web/python.yml", "/r/web/secrets.yml"])
+def test_pattern_only_packs_keep_one_group(tmp_path):
+    # 1.1.2: packs holding a taint rule each get their own single-worker run
+    # (semgrep -j > 1 drops taint results); pattern-only packs still share one.
+    a, b = tmp_path / "a.yml", tmp_path / "b.yml"
+    for p in (a, b):
+        p.write_text("rules:\n- id: x\n  pattern: foo()\n  languages: [python]\n"
+                     "  message: m\n  severity: INFO\n")
+    groups = web_sa._semgrep_groups([str(a), str(b)])
     assert len(groups) == 1
 
 

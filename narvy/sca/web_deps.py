@@ -146,6 +146,56 @@ def _yarn_name_from_spec(spec: str) -> Optional[str]:
     return name or None
 
 
+_YARN_RESOLUTION_RE = re.compile(r'^\s+resolution:\s+"?([^"]+?)"?\s*$')
+# Berry resolutions that are not a registry package (the project's own
+# workspaces, local folders, git checkouts): no OSV record can match them.
+_YARN_NON_REGISTRY = ("workspace:", "link:", "portal:", "file:", "exec:", "git", "http:", "https:")
+
+
+def _split_name_rest(spec: str) -> Tuple[Optional[str], str]:
+    """'@scope/pkg@npm:1.2.3' -> ('@scope/pkg', 'npm:1.2.3'); keeps the scope's '@'."""
+    idx = spec.find("@", 1 if spec.startswith("@") else 0)
+    if idx <= 0:
+        return None, ""
+    return spec[:idx], spec[idx + 1:]
+
+
+def _yarn_real_name(header_spec: str) -> Optional[str]:
+    """Package name of a lock entry header, resolving an 'alias@npm:real@range' alias."""
+    name, rest = _split_name_rest(header_spec.strip().strip('"').strip("'"))
+    if rest.startswith("npm:") and "@" in rest[4:].lstrip("@"):
+        real, _ = _split_name_rest(rest[4:])
+        return real or name
+    return name or _yarn_name_from_spec(header_spec)
+
+
+def _yarn_entry(header: str, version: Optional[str], resolution: Optional[str]) -> Optional[Tuple[str, str]]:
+    """(name, version) for one yarn.lock entry, or None when it is not a registry package."""
+    if not version:
+        return None
+    if resolution:
+        # berry: resolution names the real package: 'name@npm:1.2.3',
+        # 'name@patch:name@npm%3A1.2.3#...' (a patched registry package).
+        name, rest = _split_name_rest(resolution)
+        if not name:
+            return None
+        if rest.startswith("patch:"):
+            inner = rest[len("patch:"):].replace("%3A", ":")
+            _, inner_rest = _split_name_rest(inner)
+            rest = inner_rest
+        if not rest.startswith("npm:"):
+            return None
+        return name, version
+    first = header.split(",")[0]
+    name = _yarn_real_name(first)
+    if not name or name == "__metadata":
+        return None
+    _, rest = _split_name_rest(first.strip().strip('"').strip("'"))
+    if rest.startswith(_YARN_NON_REGISTRY):
+        return None
+    return name, version
+
+
 def _parse_yarn_lock(path: str) -> List[_WebDep]:
     """Parse yarn.lock (v1 and berry) resolved versions for OSV lookup."""
     try:
@@ -155,24 +205,34 @@ def _parse_yarn_lock(path: str) -> List[_WebDep]:
         return []
     deps: List[_WebDep] = []
     seen: Set[Tuple[str, str]] = set()
-    current_name: Optional[str] = None
+    entry: Optional[Dict[str, Optional[str]]] = None
+
+    def _flush(e):
+        if not e or e["header"].strip().strip('"') == "__metadata":
+            return
+        got = _yarn_entry(e["header"], e["version"], e["resolution"])
+        if got and got not in seen:
+            seen.add(got)
+            deps.append(_WebDep(got[0], got[1], "npm", "yarn.lock"))
+
     for raw in lines:
-        line = raw.rstrip("\n")
-        if not line or line.lstrip().startswith("#"):
+        line = raw.rstrip("\r\n")
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
         if not line[0].isspace() and line.rstrip().endswith(":"):
-            header = line.rstrip()[:-1]
-            first = header.split(",")[0]
-            current_name = _yarn_name_from_spec(first)
+            _flush(entry)
+            entry = {"header": line.rstrip()[:-1], "version": None, "resolution": None}
             continue
-        if current_name:
-            m = _YARN_VERSION_RE.match(line)
-            if m:
-                version = m.group(1)
-                if (current_name, version) not in seen:
-                    seen.add((current_name, version))
-                    deps.append(_WebDep(current_name, version, "npm", "yarn.lock"))
-                current_name = None
+        if entry is None:
+            continue
+        m = _YARN_VERSION_RE.match(line)
+        if m and entry["version"] is None:
+            entry["version"] = m.group(1)
+            continue
+        r = _YARN_RESOLUTION_RE.match(line)
+        if r and entry["resolution"] is None:
+            entry["resolution"] = r.group(1)
+    _flush(entry)
     return deps
 
 
@@ -951,10 +1011,32 @@ def _collect_nuget_deps(root_path: str) -> List[_WebDep]:
     return deps
 
 
+# Sources that record the version actually installed. A manifest (package.json,
+# composer.json, Cargo.toml...) only gives the floor of a range.
+_RESOLVED_SOURCES = frozenset({
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Pipfile.lock",
+    "composer.lock", "Gemfile.lock", "Cargo.lock", "go.mod", "go.sum", "packages.lock.json",
+})
+
+
+def _is_resolved(dep: _WebDep) -> bool:
+    return os.path.basename(dep.source.replace("\\", "/")) in _RESOLVED_SOURCES
+
+
 def _dedupe(deps: List[_WebDep]) -> List[_WebDep]:
-    best: Dict[Tuple[str, str], _WebDep] = {}
+    """One entry per (ecosystem, name, version).
+
+    A lockfile often holds several versions of one package (lodash 4.17.21 at
+    the top, 4.17.4 nested under an old dependency); every one is checked. A
+    manifest-only version is dropped when a lockfile resolves that package,
+    since the manifest range floor is not what is installed.
+    """
+    resolved_names = {(d.ecosystem, d.name) for d in deps if _is_resolved(d)}
+    best: Dict[Tuple[str, str, str], _WebDep] = {}
     for dep in deps:
-        key = (dep.ecosystem, dep.name)
+        if (dep.ecosystem, dep.name) in resolved_names and not _is_resolved(dep):
+            continue
+        key = (dep.ecosystem, dep.name, dep.version)
         if key not in best:
             best[key] = dep
     return list(best.values())

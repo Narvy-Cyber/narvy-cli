@@ -30,11 +30,83 @@ exactly in [Telemetry](#telemetry), which you can turn off.
 ## Install
 
 ```bash
-pip install narvy-cli
+pipx install narvy-cli      # recommended, puts `narvy` on PATH (run `pipx ensurepath` once)
+pip install narvy-cli       # or plain pip
 ```
 
-Requires a Java 11+ JRE on your `PATH` for Android scanning (jadx itself is
-auto-downloaded on first scan into `~/.narvy/tools`). Everything else
+If your shell says `narvy: command not found` / `The term 'narvy' is not
+recognized`, pip installed the command into a directory that is not on your
+PATH. `python -m narvy` always works (`py -m narvy` on Windows), and prints
+once the command that adds that directory to PATH. Narvy never edits PATH
+itself.
+
+### Windows
+
+Recommended, with [pipx](https://pipx.pypa.io):
+
+```powershell
+py -m pip install --user pipx
+py -m pipx ensurepath          # then close and reopen the terminal
+pipx install narvy-cli
+narvy scan app.apk
+```
+
+Without pipx:
+
+```powershell
+py -m pip install narvy-cli
+py -m narvy scan app.apk
+```
+
+To use the short `narvy` command after a plain `pip install`, add pip's
+Scripts directory to PATH. For the current PowerShell window only
+(Python 3.14 from python.org; change `Python314` to your version):
+
+```powershell
+$env:Path += ";$env:APPDATA\Python\Python314\Scripts"
+```
+
+To make it permanent for your user account, then open a new terminal:
+
+```powershell
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:APPDATA\Python\Python314\Scripts", "User")
+```
+
+The exact directory is in pip's `WARNING: The script narvy.exe is installed
+in ... which is not on PATH` line, and in the hint `py -m narvy` prints. The
+Microsoft Store Python uses a different one (under
+`%LOCALAPPDATA%\Packages\PythonSoftwareFoundation.Python.3.x_...\LocalCache\local-packages`).
+Windows on ARM: semgrep has no Windows ARM64 build, use x64 Python.
+
+### macOS
+
+Homebrew's Python refuses `pip install` outside a virtualenv
+(`error: externally-managed-environment`). Use pipx:
+
+```bash
+brew install pipx && pipx ensurepath   # then open a new terminal
+pipx install narvy-cli
+```
+
+or a virtualenv (`python3 -m venv ~/.venvs/narvy && ~/.venvs/narvy/bin/pip install narvy-cli`).
+A `pip install --user` puts `narvy` in `~/Library/Python/3.x/bin`, which is
+not on PATH: add it with
+`echo 'export PATH="$HOME/Library/Python/3.14/bin:$PATH"' >> ~/.zshrc`, or run
+`python3 -m narvy`.
+
+### Linux
+
+pipx (`sudo apt install pipx` / `dnf install pipx`, then `pipx ensurepath`) is
+the simplest. Debian 12+ and Ubuntu 23.04+ refuse a system-wide `pip install`
+the same way Homebrew does. A `pip install --user` puts `narvy` in
+`~/.local/bin`; if that is not on PATH, add
+`export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`, or run
+`python3 -m narvy`.
+
+### Requirements
+
+Android scans need Java 11+. If none is found, a JRE (and jadx) is
+downloaded into `~/.narvy/tools` on the first APK scan. Everything else
 is pure Python plus a couple of optional extras:
 
 ```bash
@@ -182,6 +254,9 @@ number of checks it did not run. It never hides a finding it did compute.
   in its own output when it applies.
 - Only one architecture's native libraries are checked in a multi-ABI
   APK/split bundle.
+- Windows: a decompiled file whose full path passes 260 characters is only
+  read when Windows long-path support is enabled
+  (`LongPathsEnabled`); a very deep package tree in `%TEMP%` can hit it.
 
 See [SETUP.md](SETUP.md) for detailed install/troubleshooting steps and the
 exact commands this README's examples were run against.

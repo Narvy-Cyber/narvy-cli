@@ -87,12 +87,21 @@ rules:
     technology:
     - go
   patterns:
-  - pattern: 'http.SetCookie($W, &http.Cookie{..., Name: $NAME, ...})
+  - pattern-either:
+    - patterns:
+      - pattern: 'http.SetCookie($W, &http.Cookie{..., Name: $NAME, ...})
 
-      '
-  - pattern-not: 'http.SetCookie($W, &http.Cookie{..., Secure: true, ...})
+          '
+      - pattern-not: 'http.SetCookie($W, &http.Cookie{..., Secure: $SECURE, ...})
 
-      '
+          '
+    - patterns:
+      - pattern: 'http.SetCookie($W, &http.Cookie{..., Name: $NAME, ...})
+
+          '
+      - pattern: 'http.SetCookie($W, &http.Cookie{..., Secure: false, ...})
+
+          '
   - metavariable-regex:
       metavariable: $NAME
       regex: (?i).*session.*
@@ -445,6 +454,10 @@ rules:
     confidence: MEDIUM
     technology:
     - go
+    default_view: hidden
+    hidden_reason: 'Access-Control-Allow-Origin * without credentials: browsers never attach cookies or HTTP auth to such
+      requests, so only data that is already public (or protected only by network position) is readable cross-origin. Informational,
+      shown under show all.'
   paths:
     exclude:
     - '**/*_test.go'
@@ -677,10 +690,17 @@ rules:
     confidence: LOW
     technology:
     - go
+    default_view: hidden
+    hidden_reason: Listening on all interfaces is how a server is normally deployed (container, reverse proxy). It only matters
+      if the service must stay private, which the code alone cannot tell. Informational, shown under show all.
   patterns:
   - pattern-either:
-    - pattern: net.Listen("tcp", "0.0.0.0:...")
-    - pattern: http.ListenAndServe("0.0.0.0:...", ...)
+    - pattern: net.Listen($NET, "$ADDR")
+    - pattern: http.ListenAndServe("$ADDR", ...)
+    - pattern: http.ListenAndServeTLS("$ADDR", ...)
+  - metavariable-regex:
+      metavariable: $ADDR
+      regex: '^0\.0\.0\.0:'
 - id: narvy.go.misc.fileserver-directory-listing-unguarded.fileserver-directory-listing-unguarded
   message: '`http.FileServer(http.Dir($DIR))` mounted directly with no directory- listing guard. Without an `index.html` in
     every directory, Go''s default file server returns a browsable directory listing for any path with no index file, potentially
@@ -893,6 +913,9 @@ rules:
     confidence: LOW
     technology:
     - go
+    hidden_if_file_matches: (ListenAndServeTLS|ServeTLS|autocert\.|TLSConfig\s*(:|=))
+    hidden_if_file_reason: This file also configures TLS; the plaintext listener is the fallback used when no certificate
+      is configured (usually behind a reverse proxy). Shown under show all.
   paths:
     exclude:
     - '**/*_test.go'
@@ -910,6 +933,11 @@ rules:
 
           '
       - pattern-not-inside: '$SRV.TLSConfig = $CFG
+
+          ...
+
+          '
+      - pattern-not-inside: '$SRV := &http.Server{..., Handler: $M.HTTPHandler(...), ...}
 
           ...
 
@@ -1434,25 +1462,11 @@ rules:
   patterns:
   - pattern: "http.Cookie{\n  ...,\n  HttpOnly: false,\n  ...\n}\n"
 - id: narvy-go-sqli-concat
-  patterns:
-  - pattern-either:
-    - pattern: $DB.Query($A + $B)
-    - pattern: $DB.QueryContext($CTX, $A + $B)
-    - pattern: $DB.QueryRow($A + $B)
-    - pattern: $DB.QueryRowContext($CTX, $A + $B)
-    - pattern: $DB.Exec($A + $B)
-    - pattern: $DB.ExecContext($CTX, $A + $B)
-  - pattern-not: $DB.Query("..." + "...")
-  - pattern-not: $DB.QueryContext($CTX, "..." + "...")
-  - pattern-not: $DB.QueryRow("..." + "...")
-  - pattern-not: $DB.QueryRowContext($CTX, "..." + "...")
-  - pattern-not: $DB.Exec("..." + "...")
-  - pattern-not: $DB.ExecContext($CTX, "..." + "...")
   message: 'Dynamic SQL: query string is built with the Go concat operator (`+`) rather than a bound placeholder. This is
-    a code-smell audit signal (HIGH), not a proven CRITICAL: without data-flow proof the concatenated operand may be an
-    internal constant (e.g. a table name in a migration) rather than user input. IF the operand is request-derived this is
-    SQL injection (CWE-89) - see the CRITICAL taint rule narvy-go-sqli-request-taint. Prefer placeholders regardless:
-    `db.Query("SELECT ... WHERE id = ?", userID)`.'
+    a code-smell audit signal (HIGH), not a proven CRITICAL: without data-flow proof the concatenated operand may be an internal
+    constant (e.g. a table name in a migration) rather than user input. IF the operand is request-derived this is SQL injection
+    (CWE-89) - see the CRITICAL taint rule narvy-go-sqli-request-taint. Prefer placeholders regardless: `db.Query("SELECT
+    ... WHERE id = ?", userID)`.'
   metadata:
     cwe:
     - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
@@ -1469,6 +1483,43 @@ rules:
   severity: WARNING
   languages:
   - go
+  patterns:
+  - pattern-either:
+    - pattern: $DB.Query($A + $B)
+    - pattern: $DB.QueryContext($CTX, $A + $B)
+    - pattern: $DB.QueryRow($A + $B)
+    - pattern: $DB.QueryRowContext($CTX, $A + $B)
+    - pattern: $DB.Exec($A + $B)
+    - pattern: $DB.ExecContext($CTX, $A + $B)
+  - pattern-not: $DB.Query("..." + "...")
+  - pattern-not: $DB.QueryContext($CTX, "..." + "...")
+  - pattern-not: $DB.QueryRow("..." + "...")
+  - pattern-not: $DB.QueryRowContext($CTX, "..." + "...")
+  - pattern-not: $DB.Exec("..." + "...")
+  - pattern-not: $DB.ExecContext($CTX, "..." + "...")
+  - pattern-either:
+    - patterns:
+      - pattern-either:
+        - pattern: $DB.Query($A + $B)
+        - pattern: $DB.QueryContext($CTX, $A + $B)
+        - pattern: $DB.QueryRow($A + $B)
+        - pattern: $DB.QueryRowContext($CTX, $A + $B)
+        - pattern: $DB.Exec($A + $B)
+        - pattern: $DB.ExecContext($CTX, $A + $B)
+      - metavariable-regex:
+          metavariable: $B
+          regex: (?s)^\s*[A-Za-z_][\w.]*(\[[^\]]*\])*\s*$
+    - patterns:
+      - pattern-either:
+        - pattern: $DB.Query($A + $B)
+        - pattern: $DB.QueryContext($CTX, $A + $B)
+        - pattern: $DB.QueryRow($A + $B)
+        - pattern: $DB.QueryRowContext($CTX, $A + $B)
+        - pattern: $DB.Exec($A + $B)
+        - pattern: $DB.ExecContext($CTX, $A + $B)
+      - metavariable-regex:
+          metavariable: $A
+          regex: (?s)^(.*\+)?\s*[A-Za-z_][\w.]*(\[[^\]]*\])*\s*(\+.*)?$
 - id: narvy-go-sqli-sprintf-via-var
   patterns:
   - pattern-either:
@@ -1577,11 +1628,11 @@ rules:
   - go
 - id: narvy.go.sqli.queryrow-exec-concat.queryrow-exec-concat
   message: 'Dynamic SQL: `db.QueryRow()` / `db.Exec()` called with a query string built by concatenation or `fmt.Sprintf`
-    instead of using a `?`/`$1` placeholder with a separate argument. Code-smell audit signal (HIGH), not a proven
-    CRITICAL - without data-flow proof the interpolated operand may be an internal constant (e.g. a migration table
-    name) rather than user input. IF request-derived the operand is interpreted as SQL syntax, not data - SQL injection
-    (CWE-89), reported at CRITICAL by narvy-go-sqli-request-taint. Move the value to a bound parameter regardless:
-    `db.QueryRow("... WHERE id = ?", id)`.'
+    instead of using a `?`/`$1` placeholder with a separate argument. Code-smell audit signal (HIGH), not a proven CRITICAL
+    - without data-flow proof the interpolated operand may be an internal constant (e.g. a migration table name) rather than
+    user input. IF request-derived the operand is interpreted as SQL syntax, not data - SQL injection (CWE-89), reported at
+    CRITICAL by narvy-go-sqli-request-taint. Move the value to a bound parameter regardless: `db.QueryRow("... WHERE id =
+    ?", id)`.'
   severity: WARNING
   languages:
   - go
@@ -1598,14 +1649,23 @@ rules:
     confidence: MEDIUM
     technology:
     - go
-  patterns:
-  - pattern-either:
-    - pattern: $DB.QueryRow("..." + $X)
-    - pattern: $DB.QueryRow("..." + $X + "...")
-    - pattern: $DB.QueryRow(fmt.Sprintf("...%s...", $X))
-    - pattern: $DB.Exec("..." + $X)
-    - pattern: $DB.Exec("..." + $X + "...")
-    - pattern: $DB.Exec(fmt.Sprintf("...%s...", $X))
+  pattern-either:
+  - patterns:
+    - pattern-either:
+      - pattern: $DB.QueryRow("..." + $X)
+      - pattern: $DB.QueryRow("..." + $X + "...")
+      - pattern: $DB.Exec("..." + $X)
+      - pattern: $DB.Exec("..." + $X + "...")
+    - metavariable-regex:
+        metavariable: $X
+        regex: (?s)^\s*[A-Za-z_][\w.]*(\[[^\]]*\])*\s*$
+  - patterns:
+    - pattern-either:
+      - pattern: $DB.QueryRow(fmt.Sprintf("$FMT", $X, ...), ...)
+      - pattern: $DB.Exec(fmt.Sprintf("$FMT", $X, ...), ...)
+    - metavariable-regex:
+        metavariable: $FMT
+        regex: (?is)^(?=.*%[sv])(?=.*\b(select|insert|update|delete|replace|where|from|into|values|set)\b)
 # Taint-proven CRITICAL tier: the two rules below use mode:taint to fire only when a request-derived value reaches the sink.
 - id: narvy-go-sqli-request-taint
   mode: taint
@@ -1790,19 +1850,6 @@ rules:
   languages:
   - go
 - id: narvy-go-ssrf-client-get
-  patterns:
-  - pattern-either:
-    - pattern: $CLIENT.Get($URL)
-    - pattern: $CLIENT.Post($URL, $CT, $BODY)
-    - pattern: $CLIENT.PostForm($URL, $DATA)
-  - pattern-inside: '$CLIENT := &http.Client{...}
-
-      ...
-
-      '
-  - pattern-not: $CLIENT.Get("...")
-  - pattern-not: $CLIENT.Post("...", $CT, $BODY)
-  - pattern-not: $CLIENT.PostForm("...", $DATA)
   message: 'SSRF risk: custom `http.Client` is invoked with a non-literal URL. Same risk as `http.Get` - validate against
     an allow-list of hosts.'
   metadata:
@@ -1821,6 +1868,26 @@ rules:
   severity: WARNING
   languages:
   - go
+  patterns:
+  - pattern-either:
+    - pattern: $CLIENT.Get($URL)
+    - pattern: $CLIENT.Post($URL, $CT, $BODY)
+    - pattern: $CLIENT.PostForm($URL, $DATA)
+  - pattern-inside: '$CLIENT := &http.Client{...}
+
+      ...
+
+      '
+  - pattern-not: $CLIENT.Get("...")
+  - pattern-not: $CLIENT.Post("...", $CT, $BODY)
+  - pattern-not: $CLIENT.PostForm("...", $DATA)
+  - pattern-either:
+    - pattern-inside: "func $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $R *http.Request, ...) {\n  ...\n}\n"
+    - pattern-inside: "func ($RECV $T) $FN(..., $W http.ResponseWriter, ...) {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C echo.Context, ...) $RET {\n  ...\n}\n"
+    - pattern-inside: "func $FN(..., $C *gin.Context, ...) {\n  ...\n}\n"
 - id: narvy.go.ssrf.net-dial-tainted-host.net-dial-tainted-host
   message: '`net.Dial()` / `net.DialTimeout()` called with a host/address built from request data. This lets an attacker make
     the server open a raw TCP connection to any internal host/port it can reach (cloud metadata endpoints, internal admin
@@ -1913,6 +1980,21 @@ rules:
   - pattern: '$T{..., InsecureSkipVerify: true, ...}
 
       '
+  - pattern-either:
+    - patterns:
+      - pattern: '$T{..., InsecureSkipVerify: true, ...}
+
+          '
+      - pattern-not-inside: 'if $COND { ... }
+
+          '
+    - patterns:
+      - pattern-inside: 'if $COND { ... }
+
+          '
+      - metavariable-regex:
+          metavariable: $COND
+          regex: (?is)^(?!.*(ignore|insecure|skip|allow|self.?signed|unsafe|disable|trust)).*$
 - id: narvy.go.transport.tls-insecure-skip-verify.tls-insecure-skip-verify
   message: '`InsecureSkipVerify` field on a TLS config is set to `true` via field assignment (not the struct-literal form).
     This disables certificate validation on that connection - any certificate is accepted, defeating TLS (CWE-295). Remove

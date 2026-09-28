@@ -92,10 +92,9 @@ rules:
   - pattern-not: subprocess.run("...", ..., shell=True, ...)
   - pattern-not: subprocess.Popen("...", ..., shell=True, ...)
 - id: narvy.python.deserialization.yaml-load-unsafe.yaml-load-unsafe
-  message: 'Detected `yaml.load()` without an explicit Loader. Without a Loader, PyYAML defaults to FullLoader
-    (PyYAML >= 5.1) or an even more dangerous loader in older versions, both of which can deserialise
-    arbitrary Python objects when the input is untrusted (CWE-502). Use `yaml.safe_load()` for untrusted
-    input.
+  message: 'Detected `yaml.load()` without an explicit Loader. Without a Loader, PyYAML defaults to FullLoader (PyYAML >=
+    5.1) or an even more dangerous loader in older versions, both of which can deserialise arbitrary Python objects when the
+    input is untrusted (CWE-502). Use `yaml.safe_load()` for untrusted input.
 
     '
   severity: ERROR
@@ -113,10 +112,23 @@ rules:
     impact: HIGH
     confidence: HIGH
   patterns:
-  - pattern: yaml.load($DATA)
-  - pattern-not: yaml.load($DATA, Loader=yaml.SafeLoader)
-  - pattern-not: yaml.load($DATA, Loader=yaml.BaseLoader)
-  - pattern-not: yaml.safe_load(...)
+  - pattern-either:
+    - pattern: yaml.load(...)
+    - pattern: yaml.load_all(...)
+    - pattern: yaml.unsafe_load(...)
+    - pattern: yaml.unsafe_load_all(...)
+  - pattern-not: yaml.$LOAD($DATA, Loader=yaml.SafeLoader)
+  - pattern-not: yaml.$LOAD($DATA, Loader=yaml.CSafeLoader)
+  - pattern-not: yaml.$LOAD($DATA, Loader=yaml.BaseLoader)
+  - pattern-not: yaml.$LOAD($DATA, Loader=SafeLoader)
+  - pattern-not: yaml.$LOAD($DATA, Loader=CSafeLoader)
+  - pattern-not: yaml.$LOAD($DATA, Loader=BaseLoader)
+  - pattern-not: yaml.$LOAD($DATA, yaml.SafeLoader)
+  - pattern-not: yaml.$LOAD($DATA, yaml.CSafeLoader)
+  - pattern-not: yaml.$LOAD($DATA, yaml.BaseLoader)
+  - pattern-not: yaml.$LOAD($DATA, SafeLoader)
+  - pattern-not: yaml.$LOAD($DATA, CSafeLoader)
+  - pattern-not: yaml.$LOAD($DATA, BaseLoader)
 - id: narvy.python.code-injection.compile-exec-tainted.compile-exec-tainted
   message: '`compile()` output is passed to `exec()`/`eval()` where the source text passed to `compile()`
     is not a fixed literal. This is the same RCE risk as calling `eval()`/`exec()` directly on tainted
@@ -1067,9 +1079,9 @@ rules:
       metavariable: $ALGO
       regex: ^(MD5|SHA1)$
 - id: narvy.python.crypto.weak-hash-hashlib.weak-hash-hashlib
-  message: Weak hash algorithm '$ALGO' from hashlib. MD5, SHA1, MD4 and MD2 are broken for collision resistance
-    and unsuitable for integrity checks, digital signatures, or password storage. Use SHA-256 or better
-    for integrity, and Argon2/bcrypt/scrypt for passwords. CWE-327.
+  message: Weak hash algorithm '$ALGO' from hashlib. MD5, SHA1, MD4 and MD2 are broken for collision resistance and unsuitable
+    for integrity checks, digital signatures, or password storage. Use SHA-256 or better for integrity, and Argon2/bcrypt/scrypt
+    for passwords. CWE-327.
   severity: WARNING
   languages:
   - python
@@ -1101,6 +1113,19 @@ rules:
       regex: (?i)^(md5|md4|md2|sha1|sha)$
   - pattern-not: hashlib.$ALGO(..., usedforsecurity=False, ...)
   - pattern-not: hashlib.new("$ALGO", ..., usedforsecurity=False, ...)
+  - pattern-either:
+    - patterns:
+      - pattern-inside: '$V = <... hashlib.$ALGO(...) ...>
+
+          '
+      - metavariable-regex:
+          metavariable: $V
+          regex: (?i)^.*(passw|passwd|pwd|token|secret|signature|otp|reset|nonce|credential|api_?key|session_?(id|key)).*$
+    - patterns:
+      - pattern-inside: "def $FN(...):\n    ...\n"
+      - metavariable-regex:
+          metavariable: $FN
+          regex: (?i)^.*(passw|passwd|pwd|token|secret|signature|otp|reset|nonce|credential|api_?key|session_?(id|key)).*$
 - id: narvy.python.crypto.weak-hash-pycryptodome.weak-hash-pycryptodome
   message: Weak hash algorithm '$ALGO' from PyCryptodome/PyCrypto. MD5/MD2/MD4/SHA1 are broken for collision
     resistance. Use SHA256, SHA3_256, or BLAKE2 instead. CWE-327.
@@ -1904,9 +1929,9 @@ rules:
       - pattern-not: SignedCookieSessionFactory(..., **$KW)
       - pattern-not: pyramid.session.SignedCookieSessionFactory(..., **$KW)
 - id: narvy.python.secrets.hardcoded-credential-assignment.hardcoded-credential-assignment
-  message: A variable named like a credential (password/api_key/secret/token) is assigned a plain string
-    literal rather than being read from an environment variable or secret store. Anyone with source or
-    VCS history access recovers the value (CWE-798). Load it from `os.environ` and fail startup if missing.
+  message: A variable named like a credential (password/api_key/secret/token) is assigned a plain string literal rather than
+    being read from an environment variable or secret store. Anyone with source or VCS history access recovers the value (CWE-798).
+    Load it from `os.environ` and fail startup if missing.
   severity: WARNING
   languages:
   - python
@@ -1927,9 +1952,6 @@ rules:
     - Hard-coded Secrets
   paths:
     exclude:
-    # Test/fixture paths are NOT excluded: a real credential committed there is a
-    # common leak vector; it is emitted then down-ranked to LOW. Only example/doc
-    # code (whose literals are illustrative, not live) stays excluded.
     - '**/*example*.py'
     - '**/docs_src/**'
     - '**/examples/**'
@@ -1947,6 +1969,7 @@ rules:
       regex: ^(?!.*(\{\}|\{\d|\{[a-zA-Z_]|%s|%d|xxxx|XXXX|changeme|CHANGEME|your[-_ ]|placeholder|example|redacted|\*\*\*)).*$
   - pattern-not: $VAR = os.environ[$X]
   - pattern-not: $VAR = os.getenv($X)
+  - pattern-not-regex: (?i)\b(\w+)\s*=\s*["']\1["']
   - pattern-not: $VAR = ""
 - id: narvy.python.secrets.logger-credential-leak.logger-credential-leak
   message: A logging call includes a variable named like a credential (password/token/secret/api_key)
@@ -2401,11 +2424,10 @@ rules:
       metavariable: $KIND
       regex: ^(args|form|json|values|GET|POST)$
 - id: narvy.python.transport.bind-all-interfaces.bind-all-interfaces
-  message: Server socket / dev-server binds to `0.0.0.0` (all interfaces) explicitly in application code.
-    This exposes the service on every network interface, including ones only meant to be internal/loopback,
-    bypassing whatever network-level restriction the deployment intended (CWE-668). Bind to a specific
-    interface, or make the bind address configurable via environment and default it to `127.0.0.1` for
-    anything not meant to be internet-facing.
+  message: Server socket / dev-server binds to `0.0.0.0` (all interfaces) explicitly in application code. This exposes the
+    service on every network interface, including ones only meant to be internal/loopback, bypassing whatever network-level
+    restriction the deployment intended (CWE-668). Bind to a specific interface, or make the bind address configurable via
+    environment and default it to `127.0.0.1` for anything not meant to be internet-facing.
   severity: WARNING
   languages:
   - python
@@ -2425,6 +2447,9 @@ rules:
     confidence: LOW
     vulnerability_class:
     - Mishandled Sensitive Information
+    default_view: hidden
+    hidden_reason: Listening on all interfaces is how a server is normally deployed (container, reverse proxy). It only matters
+      if the service must stay private, which the code alone cannot tell. Informational, shown under show all.
   patterns:
   - pattern-either:
     - pattern: $APP.run(host="0.0.0.0", ...)
@@ -2535,9 +2560,9 @@ rules:
       - pattern-not: jinja2.Environment(..., autoescape=$AUTOESCAPE, ...)
       - pattern-not: Environment(..., autoescape=$AUTOESCAPE, ...)
 - id: narvy.python.xss.markup-wrap-non-literal.markup-wrap-non-literal
-  message: '`Markup()` wraps a non-literal value, marking it as pre-escaped HTML. Jinja2 will render it
-    unescaped. If the value contains attacker-controlled data this is XSS (CWE-79). Only wrap already-sanitized
-    output (e.g. from `bleach.clean()`) with `Markup`, never raw user input.'
+  message: '`Markup()` wraps a non-literal value, marking it as pre-escaped HTML. Jinja2 will render it unescaped. If the
+    value contains attacker-controlled data this is XSS (CWE-79). Only wrap already-sanitized output (e.g. from `bleach.clean()`)
+    with `Markup`, never raw user input.'
   severity: ERROR
   languages:
   - python
@@ -2569,6 +2594,11 @@ rules:
   - pattern-not: flask.Markup("...")
   - pattern-not: Markup(bleach.clean(...))
   - pattern-not: Markup($SANITIZER.clean(...))
+  - pattern-not: Markup(escape(...))
+  - pattern-not: Markup(markupsafe.escape(...))
+  - pattern-not: Markup($M.escape(...))
+  - pattern-not: markupsafe.Markup(escape(...))
+  - pattern-not: markupsafe.Markup(markupsafe.escape(...))
 - id: narvy.python.xss.raw-html-fragment-built-from-request-data.raw-html-fragment-built-from-request-data
   message: A value derived from the HTTP request flows into a string that is built to look like an HTML
     fragment (an f-string/%-format/.format() call/concatenation containing a literal `<tag ...>`), without
@@ -2957,3 +2987,56 @@ rules:
       - pattern: $X.replace("\r", ...)
       - pattern: $X.replace("\n", ...)
       - pattern: int(...)
+
+- id: narvy.python.crypto.weak-hash-hashlib-no-security-context.weak-hash-hashlib-no-security-context
+  message: Weak hash algorithm '$ALGO' from hashlib. MD5, SHA1, MD4 and MD2 are broken for collision resistance and unsuitable
+    for integrity checks, digital signatures, or password storage. Use SHA-256 or better for integrity, and Argon2/bcrypt/scrypt
+    for passwords. CWE-327. No security use of the result was found in the surrounding code.
+  severity: INFO
+  languages:
+  - python
+  metadata:
+    default_view: hidden
+    hidden_reason: 'MD5/SHA1 used with no password, token, secret or signature in sight: typically a checksum, cache key,
+      rate-limit bucket or file name. Review only if the digest protects something. Shown under show all.'
+    cwe:
+    - 'CWE-327: Use of a Broken or Risky Cryptographic Algorithm'
+    owasp:
+    - A02:2021 - Cryptographic Failures
+    category: security
+    subcategory:
+    - vuln
+    technology:
+    - python
+    - hashlib
+    likelihood: MEDIUM
+    impact: MEDIUM
+    confidence: HIGH
+    vulnerability_class:
+    - Cryptographic Issues
+    references:
+    - https://cwe.mitre.org/data/definitions/327.html
+  patterns:
+  - pattern-either:
+    - pattern: hashlib.$ALGO(...)
+    - pattern: hashlib.new("$ALGO", ...)
+    - pattern: hashlib.new($X, name="$ALGO", ...)
+  - metavariable-regex:
+      metavariable: $ALGO
+      regex: (?i)^(md5|md4|md2|sha1|sha)$
+  - pattern-not: hashlib.$ALGO(..., usedforsecurity=False, ...)
+  - pattern-not: hashlib.new("$ALGO", ..., usedforsecurity=False, ...)
+  - pattern-not:
+      pattern-either:
+      - patterns:
+        - pattern-inside: '$V = <... hashlib.$ALGO(...) ...>
+
+            '
+        - metavariable-regex:
+            metavariable: $V
+            regex: (?i)^.*(passw|passwd|pwd|token|secret|signature|otp|reset|nonce|credential|api_?key|session_?(id|key)).*$
+      - patterns:
+        - pattern-inside: "def $FN(...):\n    ...\n"
+        - metavariable-regex:
+            metavariable: $FN
+            regex: (?i)^.*(passw|passwd|pwd|token|secret|signature|otp|reset|nonce|credential|api_?key|session_?(id|key)).*$

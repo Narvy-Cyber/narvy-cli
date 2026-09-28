@@ -155,6 +155,10 @@ rules:
     - Security Misconfiguration
     references:
     - https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
+    default_view: hidden
+    hidden_reason: 'Access-Control-Allow-Origin * without credentials: browsers never attach cookies or HTTP auth to such
+      requests, so only data that is already public (or protected only by network position) is readable cross-origin. Informational,
+      shown under show all.'
   patterns:
   - pattern-either:
     - pattern: 'header("Access-Control-Allow-Origin: *")'
@@ -653,9 +657,17 @@ rules:
   pattern-sinks:
   - patterns:
     - pattern-either:
-      - pattern: 'header("Location: " . $SINK)'
+      - pattern: header($L . $SINK)
+      - pattern: header($L . $SINK, ...)
+      - pattern: header($L . $SINK . $REST)
+    - metavariable-regex:
+        metavariable: $L
+        regex: (?i)^["']\s*location\s*:\s*["']$
+    - focus-metavariable: $SINK
+  - patterns:
+    - pattern-either:
       - pattern: 'header("Location: $SINK")'
-      - pattern: 'header("Location: " . $SINK . "...")'
+      - pattern: 'header("location: $SINK")'
 - id: narvy.php.info.phpinfo-call.phpinfo-call
   message: '`phpinfo()` call found in application code reachable via a web request. It dumps the full PHP configuration -
     loaded extensions, disabled functions, include paths, environment variables, and (with `INFO_ALL`/default flags) request
@@ -688,7 +700,6 @@ rules:
   severity: ERROR
   languages:
   - php
-  mode: taint
   metadata:
     cwe:
     - 'CWE-89: Improper Neutralization of Special Elements used in an SQL Command (''SQL Injection'')'
@@ -712,18 +723,17 @@ rules:
     - '**/test/**'
     - '**/tests/**'
     - '**/*Test.php'
+  mode: taint
   pattern-sources:
   - pattern: $_GET[...]
   - pattern: $_POST[...]
   - pattern: $_REQUEST[...]
   - pattern: $_COOKIE[...]
-  pattern-sanitizers:
-  - pattern: mysqli_real_escape_string(...)
-  - pattern: $CONN->real_escape_string(...)
-  - pattern: addslashes(...)
-  - pattern: intval(...)
-  - pattern: (int)$X
-  - pattern: (int) $X
+  - patterns:
+    - pattern: $_SERVER[$H]
+    - metavariable-regex:
+        metavariable: $H
+        regex: ^["']HTTP_
   pattern-sinks:
   - pattern: mysqli_query($CONN, $SINK)
   - pattern: mysql_query($SINK)
@@ -733,6 +743,25 @@ rules:
   - pattern: $PDO->query($SINK)
   - pattern: $PDO->exec($SINK)
   - pattern: $PDO->prepare($SINK)
+  pattern-sanitizers:
+  - pattern: mysqli_real_escape_string(...)
+  - pattern: $CONN->real_escape_string(...)
+  - pattern: addslashes(...)
+  - pattern: intval(...)
+  - pattern: (int)$X
+  - pattern: (int) $X
+  - patterns:
+    - pattern-either:
+      - pattern-inside: 'if (preg_match($RE, $X)) { ... }
+
+          '
+      - pattern-inside: 'if (!preg_match($RE, $X)) { ... } else { ... }
+
+          '
+    - pattern: $X
+    - metavariable-regex:
+        metavariable: $RE
+        regex: ^['"]([/#~])\^(\\d|\[[A-Za-z0-9_\\-]+\])(\+|\*|\{\d+(,\d*)?\})?\$\1[a-zA-Z]*['"]$
 - id: narvy.php.generic.sqli-mysqli-query-tainted.sqli-mysqli-query-tainted
   message: SQL query built with string concatenation/interpolation and passed to `mysqli_query()` / `$mysqli->query()` / `mysql_query()`.
     These functions run the string as-is with no parameter binding; a tainted value is a SQL injection (CWE-89). Use `mysqli_prepare()`
@@ -771,9 +800,7 @@ rules:
       - pattern: mysql_query("..." . $SINK . "...")
       - pattern: mysql_query("...$SINK...")
   pattern-sanitizers:
-  - patterns:
-    - pattern: mysqli_real_escape_string(...)
-    - pattern: $CONN->real_escape_string(...)
+  - pattern-either:
     - pattern: intval(...)
     - pattern: (int)$X
 - id: narvy.php.generic.sqli-pdo-query-exec-tainted.sqli-pdo-query-exec-tainted
@@ -812,7 +839,7 @@ rules:
       - pattern: $PDO->exec("..." . $SINK . "...")
       - pattern: $PDO->exec("...$SINK...")
   pattern-sanitizers:
-  - patterns:
+  - pattern-either:
     - pattern: intval(...)
     - pattern: (int)$X
 - id: narvy.php.generic.sqli-prepare-string-built-tainted.sqli-prepare-string-built-tainted
@@ -850,7 +877,7 @@ rules:
       - pattern: mysqli_prepare($CONN, "..." . $SINK . "...")
       - pattern: mysqli_prepare($CONN, "...$SINK...")
   pattern-sanitizers:
-  - patterns:
+  - pattern-either:
     - pattern: intval(...)
     - pattern: (int)$X
 - id: narvy.php.crypto.aes-cbc-static-iv-literal.aes-cbc-static-iv-literal
@@ -1064,17 +1091,9 @@ rules:
     - pattern: escapeshellcmd(...)
     - pattern: intval(...)
     - pattern: (int)$X
-    - patterns:
-      - pattern-inside: if (<... is_numeric($V) ...>) { ... }
-      - pattern: $V
-    - patterns:
-      - pattern-inside: if (<... ctype_digit($V) ...>) { ... }
-      - pattern: $V
-    - patterns:
-      - pattern-inside: if (<... filter_var($V, FILTER_VALIDATE_IP, ...) ...>) { ... }
-      - pattern: $V
-    - pattern: filter_var($V, FILTER_VALIDATE_INT, ...)
-    - pattern: filter_var($V, FILTER_VALIDATE_IP, ...)
+  - patterns:
+    - pattern-inside: if (<... is_numeric($X) ...>) { ... }
+    - pattern: $X
 - id: narvy.php.lang.tainted-proc-popen.tainted-proc-popen
   message: '`proc_open()` / `popen()` called with a command string built from user input. Both spawn the command through the
     shell; a tainted value is an OS command injection (CWE-78). Prefer `proc_open()` with the command passed as an argv array
@@ -1211,6 +1230,8 @@ rules:
     technology:
     - php
   mode: taint
+  options:
+    taint_assume_safe_indexes: true
   pattern-sources:
   - patterns:
     - pattern-either:
@@ -1220,15 +1241,70 @@ rules:
   pattern-sinks:
   - patterns:
     - pattern-either:
-      - pattern: file_get_contents($SINK)
-      - pattern: file_get_contents("..." . $SINK . "...")
-      - pattern: file_get_contents("...$SINK...")
+      - pattern: file_get_contents($SINK, ...)
       - pattern: fopen($SINK, ...)
-      - pattern: fopen("..." . $SINK . "...", ...)
-      - pattern: readfile($SINK)
+      - pattern: readfile($SINK, ...)
+    - focus-metavariable: $SINK
+    - metavariable-regex:
+        metavariable: $SINK
+        regex: (?s)^(\$|[a-z_][A-Za-z0-9_]*\s*\(|"(\{?\$|[a-zA-Z][a-zA-Z0-9+.-]*://)|'[a-zA-Z][a-zA-Z0-9+.-]*://)
   pattern-sanitizers:
+  - pattern: parse_url(...)
+- id: narvy.php.pathtraversal.tainted-file-read-path.tainted-file-read-path
+  message: A file is opened with a path that contains user input (`$_GET` / `$_POST` / `$_REQUEST` / `$_COOKIE`) behind a
+    fixed directory prefix. `../` sequences in that input walk out of the intended directory and read any file the web server
+    can read, such as configuration files with database credentials (CWE-22). Map the input to an allow-list of known files,
+    or reduce it with `basename()` and check the resolved `realpath()` stays under the intended directory.
+  severity: ERROR
+  languages:
+  - php
+  metadata:
+    category: security
+    cwe:
+    - 'CWE-22: Improper Limitation of a Pathname to a Restricted Directory (''Path Traversal'')'
+    owasp:
+    - A01:2021 - Broken Access Control
+    subcategory:
+    - vuln
+    likelihood: MEDIUM
+    impact: HIGH
+    confidence: MEDIUM
+    technology:
+    - php
+    vulnerability_class:
+    - Path Traversal
+  mode: taint
+  options:
+    taint_assume_safe_indexes: true
+  pattern-sources:
   - patterns:
-    - pattern: parse_url(...)
+    - pattern-either:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+  pattern-sinks:
+  - patterns:
+    - pattern-either:
+      - pattern: file_get_contents($SINK, ...)
+      - pattern: fopen($SINK, ...)
+      - pattern: readfile($SINK, ...)
+      - pattern: file($SINK, ...)
+      - pattern: highlight_file($SINK, ...)
+      - pattern: show_source($SINK, ...)
+    - pattern-not-inside: eval(...)
+    - focus-metavariable: $SINK
+    - metavariable-regex:
+        metavariable: $SINK
+        regex: (?s)^(?!(\$|[a-z_][A-Za-z0-9_]*\s*\(|"(\{?\$|[a-zA-Z][a-zA-Z0-9+.-]*://)|'[a-zA-Z][a-zA-Z0-9+.-]*://)).+
+    - metavariable-regex:
+        metavariable: $SINK
+        regex: (?s)^.*\$[A-Za-z_]\w*(\[[^\]]*\])*\}?[^/$]*$
+  pattern-sanitizers:
+  - pattern-either:
+    - pattern: basename(...)
+    - pattern: intval(...)
+    - pattern: (int)$X
 - id: narvy.php.ssrf.tainted-curl-url.tainted-curl-url
   message: '`CURLOPT_URL` (or `curl_init()`''s URL argument) set from user input. An attacker who controls the target host
     can make the server issue requests on their behalf to internal-only endpoints - SSRF (CWE-918). Validate the host against

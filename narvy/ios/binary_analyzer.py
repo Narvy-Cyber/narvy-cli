@@ -54,7 +54,7 @@ def _icdump_class_count(binary_path: str, timeout: int = 60
     try:
         proc = subprocess.run(
             [_sys.executable, "-c", _ICDUMP_PROBE_SCRIPT, binary_path],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return False, 0, 0, f"timed out after {timeout}s"
@@ -997,7 +997,7 @@ def analyze_ipa(ipa_path: str, override_config: Optional[ScopeConfig] = None) ->
             framework_members = [n for n in names if n.startswith(frameworks_prefix)]
 
             import tempfile
-            with tempfile.TemporaryDirectory(prefix="narvy-ios-") as tmpdir:
+            with tempfile.TemporaryDirectory(prefix="narvy-ios-", ignore_cleanup_errors=True) as tmpdir:
                 main_binary_path = _safe_extract_member(zf, main_binary_member, tmpdir)
                 if main_binary_path is None:
                     result["error"] = f"Failed to extract main binary {main_binary_member} " \

@@ -54,6 +54,10 @@ def run_tree(cmd: List[str], timeout: Optional[float] = None, check: bool = Fals
     kwargs.setdefault("stdout", subprocess.PIPE)
     kwargs.setdefault("stderr", subprocess.PIPE)
     kwargs.setdefault("text", True)
+    if kwargs.get("text"):
+        # Tools emit UTF-8; the Windows default (cp1252) raises on some of those bytes.
+        kwargs.setdefault("encoding", "utf-8")
+        kwargs.setdefault("errors", "replace")
     if _POSIX and "preexec_fn" not in kwargs:
         kwargs["start_new_session"] = True
     elif _POSIX:

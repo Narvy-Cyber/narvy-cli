@@ -18,7 +18,7 @@ console = Console()
 
 def _java_version(java_bin):
     """Run `java -version` and return (version_line, major_version_int_or_None)."""
-    result = subprocess.run([java_bin, "-version"], capture_output=True, text=True, timeout=10)
+    result = subprocess.run([java_bin, "-version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
     out = result.stderr or result.stdout or ""
     version_line = out.splitlines()[0] if out else "unknown version"
     # Handles both the old "1.8.0_501" scheme and the modern "17.0.2" one.

@@ -85,7 +85,7 @@ def capture_host_key(hostname: str, port: int = 22,
     try:
         proc = subprocess.run(
             ["ssh-keyscan", "-p", str(port), "-T", str(timeout), hostname],
-            capture_output=True, text=True, timeout=timeout + 10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout + 10,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -178,7 +178,7 @@ def ssh_exec(conn: HostConn, remote_cmd: str,
 
         try:
             proc = subprocess.run(
-                argv, capture_output=True, text=True, timeout=timeout, env=env,
+                argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env,
             )
         except subprocess.TimeoutExpired as exc:
             raise SSHExecError(

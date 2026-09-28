@@ -6,50 +6,100 @@ rules:
 # CLEARTEXT HTTP
 
   - id: narvy.javascript.transport.cleartext-http-literal.cleartext-http-literal
-    message: >-
-      Cleartext HTTP URL detected. Traffic to this endpoint is unencrypted
-      and vulnerable to MITM (eavesdropping, tampering, session hijacking).
-      Use HTTPS. CWE-319.
+    message: Cleartext HTTP URL detected. Traffic to this endpoint is unencrypted and vulnerable to MITM (eavesdropping, tampering,
+      session hijacking). Use HTTPS. CWE-319.
     severity: WARNING
-    languages: [javascript, typescript]
+    languages:
+    - javascript
+    - typescript
     metadata:
       cwe:
-        - "CWE-319: Cleartext Transmission of Sensitive Information"
+      - 'CWE-319: Cleartext Transmission of Sensitive Information'
       owasp:
-        - "A02:2021 - Cryptographic Failures"
-        - "A03:2017 - Sensitive Data Exposure"
+      - A02:2021 - Cryptographic Failures
+      - A03:2017 - Sensitive Data Exposure
       category: security
-      subcategory: [vuln]
-      technology: [javascript, typescript]
+      subcategory:
+      - vuln
+      technology:
+      - javascript
+      - typescript
       likelihood: MEDIUM
       impact: MEDIUM
       confidence: HIGH
       vulnerability_class:
-        - Insecure Communication
+      - Insecure Communication
       references:
-        - https://cwe.mitre.org/data/definitions/319.html
-        - https://owasp.org/www-community/vulnerabilities/Insecure_Transport
+      - https://cwe.mitre.org/data/definitions/319.html
+      - https://owasp.org/www-community/vulnerabilities/Insecure_Transport
     paths:
       exclude:
-        - "**/fuzzer/payloads.js"
-        - "**/fuzzer/payloads.ts"
-        - "**/payloads/*.js"
-        - "**/payloads/*.ts"
-        - "**/test/**"
-        - "**/tests/**"
-        - "**/__tests__/**"
-        - "**/*.test.js"
-        - "**/*.test.ts"
-        - "**/*.spec.js"
-        - "**/*.spec.ts"
+      - '**/fuzzer/payloads.js'
+      - '**/fuzzer/payloads.ts'
+      - '**/payloads/*.js'
+      - '**/payloads/*.ts'
+      - '**/test/**'
+      - '**/tests/**'
+      - '**/__tests__/**'
+      - '**/*.test.js'
+      - '**/*.test.ts'
+      - '**/*.spec.js'
+      - '**/*.spec.ts'
+    options:
+      constant_propagation: false
     patterns:
-      - pattern-either:
-          - pattern: "\"$URL\""
-          - pattern: "'$URL'"
-          - pattern: "`$URL`"
-      - metavariable-regex:
-          metavariable: $URL
-          regex: ^http://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|169\.254\.|10\.\d+\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|\[::1\]|[a-zA-Z0-9.-]+\.(local|internal|test|example)(/|$|:)|schemas\.|www\.w3\.org|xmlns\.com|purl\.org|ns\.adobe\.com|java\.sun\.com|jabber\.org|x\.org|evil\.com)[a-zA-Z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$
+    - pattern-either:
+      - pattern: '"$URL"'
+      - pattern: '''$URL'''
+      - pattern: '`$URL`'
+    - metavariable-regex:
+        metavariable: $URL
+        regex: ^http://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|169\.254\.|10\.\d+\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|\[::1\]|[a-zA-Z0-9.-]+\.(local|internal|test|example)(/|$|:)|schemas\.|www\.w3\.org|xmlns\.com|purl\.org|ns\.adobe\.com|java\.sun\.com|jabber\.org|x\.org|evil\.com)(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:[/?#][a-zA-Z0-9._~:/?#\[\]@!$&'()*+,;=%-]*)?$
+    - pattern-either:
+      - pattern-inside: fetch(...)
+      - pattern-inside: axios(...)
+      - pattern-inside: axios.$M(...)
+      - pattern-inside: got(...)
+      - pattern-inside: got.$M(...)
+      - pattern-inside: request(...)
+      - pattern-inside: request.$M(...)
+      - pattern-inside: superagent.$M(...)
+      - pattern-inside: needle(...)
+      - pattern-inside: needle.$M(...)
+      - pattern-inside: ky(...)
+      - pattern-inside: ky.$M(...)
+      - pattern-inside: http.get(...)
+      - pattern-inside: http.request(...)
+      - pattern-inside: $.ajax(...)
+      - pattern-inside: $.get(...)
+      - pattern-inside: $.post(...)
+      - pattern-inside: $.getJSON(...)
+      - pattern-inside: jQuery.ajax(...)
+      - pattern-inside: $XHR.open($METHOD, ...)
+      - pattern-inside: new WebSocket(...)
+      - pattern-inside: new EventSource(...)
+      - pattern-inside: navigator.sendBeacon(...)
+      - patterns:
+        - pattern-inside: $CLIENT.$M(...)
+        - metavariable-regex:
+            metavariable: $M
+            regex: ^(get|post|put|patch|delete|head|options|request|fetch|getJSON|postJSON)$
+      - patterns:
+        - pattern-inside: '{..., $KEY: $V, ...}
+
+            '
+        - metavariable-regex:
+            metavariable: $KEY
+            regex: (?i)^["']?(url|uri|href|src|action|endpoint|base_?url|base_?uri|api_?url|api_?base|api_?endpoint|server_?url|host_?url|webhook_?url|callback_?url|target|remote|origin|proxy)["']?$
+      - patterns:
+        - pattern-either:
+          - pattern-inside: $VAR = $V
+          - pattern-inside: const $VAR = $V;
+          - pattern-inside: let $VAR = $V;
+          - pattern-inside: var $VAR = $V;
+        - metavariable-regex:
+            metavariable: $VAR
+            regex: (?i)^.*(url|uri|endpoint|href|host|server|api|base|webhook|callback|origin|location|proxy)$
 
 # CORS ORIGIN REFLECTION
 
@@ -652,59 +702,63 @@ rules:
   # Rule 7: bare-literal secret reaching a JWT sign/verify call (no env var
   # at all). Covers jsonwebtoken, jose and passport-jwt in one taint rule.
   - id: narvy.javascript.crypto.hardcoded-jwt-sign-secret.hardcoded-jwt-sign-secret
-    message: >-
-      A hardcoded string literal secret reaches a JWT signing or
-      verification call (jsonwebtoken, jose, or passport-jwt). The literal
-      is a public constant baked into the source - anyone who reads it can
-      forge valid tokens (CWE-321 / CWE-798). Load the secret from an
-      environment variable or a secrets manager, and fail startup if it is
-      missing.
+    message: A hardcoded string literal secret reaches a JWT signing or verification call (jsonwebtoken, jose, or passport-jwt).
+      The literal is a public constant baked into the source - anyone who reads it can forge valid tokens (CWE-321 / CWE-798).
+      Load the secret from an environment variable or a secrets manager, and fail startup if it is missing.
     severity: ERROR
-    languages: [javascript, typescript]
-    mode: taint
+    languages:
+    - javascript
+    - typescript
     metadata:
       cwe:
-        - "CWE-321: Use of Hard-coded Cryptographic Key"
-        - "CWE-798: Use of Hard-coded Credentials"
+      - 'CWE-321: Use of Hard-coded Cryptographic Key'
+      - 'CWE-798: Use of Hard-coded Credentials'
       owasp:
-        - "A02:2021 - Cryptographic Failures"
-        - "A07:2021 - Identification and Authentication Failures"
+      - A02:2021 - Cryptographic Failures
+      - A07:2021 - Identification and Authentication Failures
       category: security
-      subcategory: [vuln]
-      technology: [jsonwebtoken, jose, passport-jwt, jwt, javascript, typescript]
+      subcategory:
+      - vuln
+      technology:
+      - jsonwebtoken
+      - jose
+      - passport-jwt
+      - jwt
+      - javascript
+      - typescript
       likelihood: HIGH
       impact: HIGH
       confidence: HIGH
       vulnerability_class:
-        - Cryptographic Issues
-        - Hard-coded Credentials
+      - Cryptographic Issues
+      - Hard-coded Credentials
+    mode: taint
     pattern-sources:
-      # Bare literal reaching a JWT secret argument; narrow sinks keep it off other strings.
-      - pattern: '"..."'
+    - pattern: '"..."'
     pattern-sinks:
-      # jsonwebtoken sign/verify; $JWT name-constrained to jwt/jsonwebtoken.
-      - patterns:
-          - pattern-either:
-              - pattern: $JWT.sign($PAYLOAD, $SECRET, ...)
-              - pattern: $JWT.sign($PAYLOAD, $SECRET)
-              - pattern: $JWT.verify($TOKEN, $SECRET, ...)
-              - pattern: $JWT.verify($TOKEN, $SECRET)
-          - focus-metavariable: $SECRET
-          - metavariable-regex:
-              metavariable: $JWT
-              regex: (?i)^(jwt|jsonwebtoken|jsonWebToken)$
-      # jose: new SignJWT(payload)....sign(secretBytes), secret wrapped
-      # as a Uint8Array via TextEncoder/Buffer (jose's documented shape).
-      - patterns:
-          - pattern-either:
-              - pattern: $CHAIN.sign(new TextEncoder().encode($SECRET))
-              - pattern: $CHAIN.sign(Buffer.from($SECRET))
-          - focus-metavariable: $SECRET
-      # passport-jwt: new JwtStrategy({ secretOrKey: secret, ... }, cb).
-      - patterns:
-          - pattern: |
-              new JwtStrategy({..., secretOrKey: $SECRET, ...}, ...)
-          - focus-metavariable: $SECRET
+    - patterns:
+      - pattern-either:
+        - pattern: $JWT.sign($PAYLOAD, $SECRET, ...)
+        - pattern: $JWT.sign($PAYLOAD, $SECRET)
+        - pattern: $JWT.verify($TOKEN, $SECRET, ...)
+        - pattern: $JWT.verify($TOKEN, $SECRET)
+      - focus-metavariable: $SECRET
+      - metavariable-regex:
+          metavariable: $JWT
+          regex: (?i)^(jwt|jsonwebtoken|jsonWebToken)$
+      - metavariable-regex:
+          metavariable: $SECRET
+          regex: (?is)^(?!.*(public|pubkey|pub_key)).*$
+    - patterns:
+      - pattern-either:
+        - pattern: $CHAIN.sign(new TextEncoder().encode($SECRET))
+        - pattern: $CHAIN.sign(Buffer.from($SECRET))
+      - focus-metavariable: $SECRET
+    - patterns:
+      - pattern: 'new JwtStrategy({..., secretOrKey: $SECRET, ...}, ...)
+
+          '
+      - focus-metavariable: $SECRET
 
 # JWT SESSION
 
@@ -2176,43 +2230,48 @@ rules:
 # WEAK TLS
 
   - id: narvy.javascript.tls.reject-unauthorized-disabled.reject-unauthorized-disabled
-    message: >-
-      TLS certificate validation is disabled via `rejectUnauthorized:
-      false`. This accepts ANY certificate, including a self-signed one
-      presented by an attacker performing a man-in-the-middle attack,
-      defeating the entire purpose of TLS (CWE-295). Remove this option;
-      if a private/internal CA is in use, add its certificate to the
-      trust store (the `ca` option) instead of disabling verification.
+    message: 'TLS certificate validation is disabled via `rejectUnauthorized: false`. This accepts ANY certificate, including
+      a self-signed one presented by an attacker performing a man-in-the-middle attack, defeating the entire purpose of TLS
+      (CWE-295). Remove this option; if a private/internal CA is in use, add its certificate to the trust store (the `ca` option)
+      instead of disabling verification.'
     severity: ERROR
-    languages: [javascript, typescript]
+    languages:
+    - javascript
+    - typescript
     metadata:
       cwe:
-        - "CWE-295: Improper Certificate Validation"
+      - 'CWE-295: Improper Certificate Validation'
       owasp:
-        - "A02:2021 - Cryptographic Failures"
+      - A02:2021 - Cryptographic Failures
       category: security
-      subcategory: [vuln]
-      technology: [nodejs, javascript, typescript]
+      subcategory:
+      - vuln
+      technology:
+      - nodejs
+      - javascript
+      - typescript
       likelihood: MEDIUM
       impact: HIGH
       confidence: HIGH
       vulnerability_class:
-        - Cryptographic Issues
+      - Cryptographic Issues
       references:
-        - https://cwe.mitre.org/data/definitions/295.html
+      - https://cwe.mitre.org/data/definitions/295.html
     paths:
       exclude:
-        - "**/test/**"
-        - "**/tests/**"
-        - "**/__tests__/**"
-        - "**/*.test.js"
-        - "**/*.test.ts"
+      - '**/test/**'
+      - '**/tests/**'
+      - '**/__tests__/**'
+      - '**/*.test.js'
+      - '**/*.test.ts'
     patterns:
-      - pattern-either:
-          - pattern: |
-              {..., rejectUnauthorized: false, ...}
-          - pattern: 'new https.Agent({..., rejectUnauthorized: false, ...})'
-          - pattern: 'new tls.TLSSocket(..., {..., rejectUnauthorized: false, ...})'
+    - pattern-either:
+      - pattern: '{..., rejectUnauthorized: false, ...}
+
+          '
+      - pattern: 'new https.Agent({..., rejectUnauthorized: false, ...})'
+      - pattern: 'new tls.TLSSocket(..., {..., rejectUnauthorized: false, ...})'
+    - pattern-not-regex: (?s)if\s*\([^(){};]*(?i:ignore|unsafe|insecure|skip|allow|self.?signed|disable|trust.?all)[^(){};]*\)\s*\{[^{}]*?(?:\{[^{}]*?)?rejectUnauthorized\s*:\s*false[^{}]*\}\s*\)?
 
   - id: narvy.javascript.tls.node-tls-reject-unauthorized-env-disabled.node-tls-reject-unauthorized-env-disabled
     message: >-
@@ -2279,111 +2338,184 @@ rules:
 
   # Rule 1: innerHTML / outerHTML assignment
   - id: narvy.javascript.xss.dom-innerhtml-assign.dom-innerhtml-assign
-    message: >-
-      Assignment to `.innerHTML` / `.outerHTML` with a non-literal value.
-      The browser parses this value as HTML, so if it contains
-      attacker-controlled data this is DOM-based XSS (CWE-79). Use
-      `.textContent` for plain text, or sanitize with DOMPurify before
-      assigning.
+    message: Assignment to `.innerHTML` / `.outerHTML` with a non-literal value. The browser parses this value as HTML, so if
+      it contains attacker-controlled data this is DOM-based XSS (CWE-79). Use `.textContent` for plain text, or sanitize with
+      DOMPurify before assigning.
     severity: ERROR
-    languages: [javascript, typescript]
+    languages:
+    - javascript
+    - typescript
     metadata:
       cwe:
-        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
       owasp:
-        - "A03:2021 - Injection"
+      - A03:2021 - Injection
       category: security
-      subcategory: [vuln]
-      technology: [javascript, typescript, dom]
+      subcategory:
+      - vuln
+      technology:
+      - javascript
+      - typescript
+      - dom
       likelihood: MEDIUM
       impact: HIGH
       confidence: MEDIUM
       vulnerability_class:
-        - Cross-Site-Scripting (XSS)
+      - Cross-Site-Scripting (XSS)
     patterns:
-      - pattern-either:
-          - pattern: $EL.innerHTML = $X
-          - pattern: $EL.outerHTML = $X
-      - pattern-not: $EL.innerHTML = "..."
-      - pattern-not: $EL.outerHTML = "..."
-      - pattern-not: $EL.innerHTML = `...`
-      - pattern-not: $EL.outerHTML = `...`
-      - pattern-not: $EL.innerHTML = ""
-      - pattern-not: $EL.innerHTML = $SANITIZER.sanitize(...)
-      - pattern-not: $EL.outerHTML = $SANITIZER.sanitize(...)
-      # Exclude sanitizer-named calls and SCREAMING_SNAKE_CASE markup constants (naming heuristic, RE2-safe).
-      - pattern-not:
-          patterns:
-            - pattern-either:
-                - pattern: $EL.innerHTML = $SAN(...)
-                - pattern: $EL.outerHTML = $SAN(...)
-                - pattern: $EL.innerHTML = await $SAN(...)
-                - pattern: $EL.outerHTML = await $SAN(...)
-            - metavariable-regex:
-                metavariable: $SAN
-                regex: (?i).*(saniti[sz]|purif|dompurify|xss[_-]?clean|clean[_-]?html|html[_-]?clean|escape[_-]?html|html[_-]?escape|encode[_-]?html|html[_-]?encode|safe[_-]?html|html[_-]?safe).*
-      # -- sanitizer-named method call (optionally awaited).
-      - pattern-not:
-          patterns:
-            - pattern-either:
-                - pattern: $EL.innerHTML = $O.$SAN(...)
-                - pattern: $EL.outerHTML = $O.$SAN(...)
-                - pattern: $EL.innerHTML = await $O.$SAN(...)
-                - pattern: $EL.outerHTML = await $O.$SAN(...)
-            - metavariable-regex:
-                metavariable: $SAN
-                regex: (?i).*(saniti[sz]|purif|xss[_-]?clean|clean[_-]?html|html[_-]?clean|escape[_-]?html|html[_-]?escape|encode[_-]?html|html[_-]?encode|safe[_-]?html|html[_-]?safe).*
-      # -- module CONSTANT of static markup (SCREAMING_SNAKE_CASE identifier).
-      - pattern-not:
-          patterns:
-            - pattern-either:
-                - pattern: $EL.innerHTML = $CONST
-                - pattern: $EL.outerHTML = $CONST
-            - metavariable-regex:
-                metavariable: $CONST
-                regex: ^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$
-      # Exclude static icon/SVG constants and no-input builders (icon/SVG naming) so real data flow still fires.
-      - pattern-not:
-          patterns:
-            - pattern-either:
-                - pattern: $EL.innerHTML = $ICONS.$ICO
-                - pattern: $EL.outerHTML = $ICONS.$ICO
-            - metavariable-regex:
-                metavariable: $ICONS
-                regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
-      # Static icon constant concatenated with a string literal:
-      # `tag.innerHTML = IC.crown + ' Owner'` (either operand order).
-      - pattern-not:
-          patterns:
-            - pattern-either:
-                - pattern: $EL.innerHTML = $ICONS.$ICO + "..."
-                - pattern: $EL.innerHTML = "..." + $ICONS.$ICO
-                - pattern: $EL.outerHTML = $ICONS.$ICO + "..."
-                - pattern: $EL.outerHTML = "..." + $ICONS.$ICO
-            - metavariable-regex:
-                metavariable: $ICONS
-                regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
-      # Ternary between two icon constants of the SAME registry object:
-      # `btn.innerHTML = muted ? IC.micOff : IC.mic`.
-      - pattern-not:
-          patterns:
-            - pattern-either:
-                - pattern: "$EL.innerHTML = $C ? $ICONS.$A : $ICONS.$B"
-                - pattern: "$EL.outerHTML = $C ? $ICONS.$A : $ICONS.$B"
-            - metavariable-regex:
-                metavariable: $ICONS
-                regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
-      # No-input static icon/SVG builder call, gated on the method name.
-      - pattern-not:
-          patterns:
-            - pattern-either:
-                - pattern: $EL.innerHTML = $O.$M(...)
-                - pattern: $EL.outerHTML = $O.$M(...)
-                - pattern: $EL.innerHTML = $M(...)
-                - pattern: $EL.outerHTML = $M(...)
-            - metavariable-regex:
-                metavariable: $M
-                regex: (?i).*(icon|svg|glyph|chevron|arrow|caret|spinner).*
+    - pattern-either:
+      - pattern: $EL.innerHTML = $X
+      - pattern: $EL.outerHTML = $X
+    - pattern-not: $EL.innerHTML = "..."
+    - pattern-not: $EL.outerHTML = "..."
+    - pattern-not: $EL.innerHTML = `...`
+    - pattern-not: $EL.outerHTML = `...`
+    - pattern-not: $EL.innerHTML = ""
+    - pattern-not: $EL.innerHTML = $SANITIZER.sanitize(...)
+    - pattern-not: $EL.outerHTML = $SANITIZER.sanitize(...)
+    - pattern-not: $EL.innerHTML = $OTHER.innerHTML
+    - pattern-not: $EL.outerHTML = $OTHER.innerHTML
+    - pattern-not: $EL.innerHTML += "..."
+    - pattern-not: $EL.innerHTML = he.encode(...)
+    - pattern-not: $EL.innerHTML = he.escape(...)
+    - pattern-not: $EL.innerHTML = _.escape(...)
+    - pattern-not-inside: 'function $F(..., $X, ...) { ... }
+
+        '
+    - pattern-not-inside: 'function (..., $X, ...) { ... }
+
+        '
+    - pattern-not-inside: '(..., $X, ...) => { ... }
+
+        '
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $SAN(...)
+          - pattern: $EL.outerHTML = $SAN(...)
+          - pattern: $EL.innerHTML = await $SAN(...)
+          - pattern: $EL.outerHTML = await $SAN(...)
+        - metavariable-regex:
+            metavariable: $SAN
+            regex: (?i).*(saniti[sz]|purif|dompurify|xss[_-]?clean|clean[_-]?html|html[_-]?clean|escape[_-]?html|html[_-]?escape|encode[_-]?html|html[_-]?encode|safe[_-]?html|html[_-]?safe).*
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $O.$SAN(...)
+          - pattern: $EL.outerHTML = $O.$SAN(...)
+          - pattern: $EL.innerHTML = await $O.$SAN(...)
+          - pattern: $EL.outerHTML = await $O.$SAN(...)
+        - metavariable-regex:
+            metavariable: $SAN
+            regex: (?i).*(saniti[sz]|purif|xss[_-]?clean|clean[_-]?html|html[_-]?clean|escape[_-]?html|html[_-]?escape|encode[_-]?html|html[_-]?encode|safe[_-]?html|html[_-]?safe).*
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $CONST
+          - pattern: $EL.outerHTML = $CONST
+        - metavariable-regex:
+            metavariable: $CONST
+            regex: ^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $ICONS.$ICO
+          - pattern: $EL.outerHTML = $ICONS.$ICO
+        - metavariable-regex:
+            metavariable: $ICONS
+            regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $ICONS.$ICO + "..."
+          - pattern: $EL.innerHTML = "..." + $ICONS.$ICO
+          - pattern: $EL.outerHTML = $ICONS.$ICO + "..."
+          - pattern: $EL.outerHTML = "..." + $ICONS.$ICO
+        - metavariable-regex:
+            metavariable: $ICONS
+            regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: '$EL.innerHTML = $C ? $ICONS.$A : $ICONS.$B'
+          - pattern: '$EL.outerHTML = $C ? $ICONS.$A : $ICONS.$B'
+        - metavariable-regex:
+            metavariable: $ICONS
+            regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $O.$M(...)
+          - pattern: $EL.outerHTML = $O.$M(...)
+          - pattern: $EL.innerHTML = $M(...)
+          - pattern: $EL.outerHTML = $M(...)
+        - metavariable-regex:
+            metavariable: $M
+            regex: (?i).*(icon|svg|glyph|chevron|arrow|caret|spinner).*
+    - pattern-either:
+      - pattern: $EL.$PROP = <... location.$A ...>
+      - pattern: $EL.$PROP = <... window.location ...>
+      - pattern: $EL.$PROP = <... document.URL ...>
+      - pattern: $EL.$PROP = <... document.documentURI ...>
+      - pattern: $EL.$PROP = <... document.referrer ...>
+      - pattern: $EL.$PROP = <... document.cookie ...>
+      - pattern: $EL.$PROP = <... window.name ...>
+      - pattern: $EL.$PROP = <... new URLSearchParams(...) ...>
+      - pattern: $EL.$PROP = <... decodeURIComponent(...) ...>
+      - pattern: $EL.$PROP = <... decodeURI(...) ...>
+      - patterns:
+        - pattern-either:
+          - pattern-inside: '$V = <... location.$A ...>
+
+              ...
+
+              '
+          - pattern-inside: '$V = <... new URLSearchParams(...) ...>
+
+              ...
+
+              '
+          - pattern-inside: '$V = <... document.referrer ...>
+
+              ...
+
+              '
+          - pattern-inside: '$V = <... decodeURIComponent(...) ...>
+
+              ...
+
+              '
+        - pattern: $EL.$PROP = <... $V ...>
+      - patterns:
+        - pattern-either:
+          - pattern-inside: '$W.addEventListener("message", function ($EV) { ... })
+
+              '
+          - pattern-inside: '$W.addEventListener("message", ($EV) => { ... })
+
+              '
+          - pattern-inside: '$W.onmessage = function ($EV) { ... }
+
+              '
+        - pattern: $EL.$PROP = <... $EV.data ...>
+      - patterns:
+        - pattern-either:
+          - pattern-inside: 'function $FN(..., $P, ...) { ... }
+
+              '
+          - pattern-inside: 'function (..., $P, ...) { ... }
+
+              '
+          - pattern-inside: '(..., $P, ...) => { ... }
+
+              '
+        - pattern-either:
+          - pattern: $EL.$PROP = <... $P[$K] ...>
+          - pattern: $EL.$PROP = <... $P.$F ...>
+        - pattern: $EL.$PROP = <... "$LIT" ...>
+        - metavariable-regex:
+            metavariable: $LIT
+            regex: <[a-zA-Z]
 
   # Rule 2: insertAdjacentHTML
   - id: narvy.javascript.xss.insert-adjacent-html.insert-adjacent-html
@@ -2662,46 +2794,44 @@ rules:
   # Rule 7: Angular DomSanitizer.
   # bypassSecurityTrust*() with a non-literal argument.
   - id: narvy.javascript.xss.angular-bypass-security-trust.angular-bypass-security-trust
-    message: >-
-      Angular's DomSanitizer.bypassSecurityTrust*() is called with a
-      non-literal value. These methods exist specifically to turn OFF
-      Angular's built-in sanitization for the value they wrap - marking
-      attacker-influenced data as "trusted" reintroduces DOM-based XSS
-      that Angular would otherwise have blocked (CWE-79). Sanitize the
-      value yourself first (or better, avoid needing to bypass
-      sanitization at all) before wrapping it.
+    message: Angular's DomSanitizer.bypassSecurityTrust*() is called with a non-literal value. These methods exist specifically
+      to turn OFF Angular's built-in sanitization for the value they wrap - marking attacker-influenced data as "trusted" reintroduces
+      DOM-based XSS that Angular would otherwise have blocked (CWE-79). Sanitize the value yourself first (or better, avoid
+      needing to bypass sanitization at all) before wrapping it.
     severity: ERROR
-    languages: [javascript, typescript]
+    languages:
+    - javascript
+    - typescript
     metadata:
       cwe:
-        - "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+      - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
       owasp:
-        - "A03:2021 - Injection"
+      - A03:2021 - Injection
       category: security
-      subcategory: [vuln]
-      technology: [angular, javascript, typescript]
+      subcategory:
+      - vuln
+      technology:
+      - angular
+      - javascript
+      - typescript
       likelihood: MEDIUM
       impact: HIGH
       confidence: MEDIUM
       vulnerability_class:
-        - Cross-Site-Scripting (XSS)
+      - Cross-Site-Scripting (XSS)
     patterns:
-      - pattern-either:
-          - pattern: $SANITIZER.bypassSecurityTrustHtml($X)
-          - pattern: $SANITIZER.bypassSecurityTrustUrl($X)
-          - pattern: $SANITIZER.bypassSecurityTrustResourceUrl($X)
-          - pattern: $SANITIZER.bypassSecurityTrustScript($X)
-          - pattern: $SANITIZER.bypassSecurityTrustStyle($X)
-      - pattern-not: $SANITIZER.bypassSecurityTrustHtml("...")
-      - pattern-not: $SANITIZER.bypassSecurityTrustUrl("...")
-      - pattern-not: $SANITIZER.bypassSecurityTrustResourceUrl("...")
-      - pattern-not: $SANITIZER.bypassSecurityTrustScript("...")
-      - pattern-not: $SANITIZER.bypassSecurityTrustStyle("...")
-      - pattern-not: $SANITIZER.bypassSecurityTrustHtml(`...`)
-      - pattern-not: $SANITIZER.bypassSecurityTrustUrl(`...`)
-      - pattern-not: $SANITIZER.bypassSecurityTrustResourceUrl(`...`)
-      - pattern-not: $SANITIZER.bypassSecurityTrustScript(`...`)
-      - pattern-not: $SANITIZER.bypassSecurityTrustStyle(`...`)
+    - pattern-either:
+      - pattern: $SANITIZER.bypassSecurityTrustHtml($X)
+      - pattern: $SANITIZER.bypassSecurityTrustUrl($X)
+      - pattern: $SANITIZER.bypassSecurityTrustResourceUrl($X)
+      - pattern: $SANITIZER.bypassSecurityTrustScript($X)
+      - pattern: $SANITIZER.bypassSecurityTrustStyle($X)
+    - pattern-not: $SANITIZER.bypassSecurityTrustHtml("...")
+    - pattern-not: $SANITIZER.bypassSecurityTrustUrl("...")
+    - pattern-not: $SANITIZER.bypassSecurityTrustResourceUrl("...")
+    - pattern-not: $SANITIZER.bypassSecurityTrustScript("...")
+    - pattern-not: $SANITIZER.bypassSecurityTrustStyle("...")
+    - pattern-not-regex: (?s)[\w$.]*\.bypassSecurityTrust(Html|Url|ResourceUrl|Script|Style)\(\s*`[^`$]*`\s*\)
 
 # XXE
 
@@ -2983,31 +3113,36 @@ rules:
 
   # Rule 2: new Function(...) with non-literal body
   - id: narvy.javascript.code-injection.dynamic-function-constructor.dynamic-function-constructor
-    message: >-
-      `new Function(...)` constructs and compiles a function from string
-      arguments at runtime - functionally equivalent to eval(). If any
-      argument (especially the final one, the function body) is
-      attacker-influenced this is remote code execution (CWE-94). Avoid
-      the Function constructor with dynamic input.
+    message: '`new Function(...)` constructs and compiles a function from string arguments at runtime - functionally equivalent
+      to eval(). If any argument (especially the final one, the function body) is attacker-influenced this is remote code execution
+      (CWE-94). Avoid the Function constructor with dynamic input.'
     severity: ERROR
-    languages: [javascript, typescript]
+    languages:
+    - javascript
+    - typescript
     metadata:
       cwe:
-        - "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+      - 'CWE-94: Improper Control of Generation of Code (''Code Injection'')'
       owasp:
-        - "A03:2021 - Injection"
+      - A03:2021 - Injection
       category: security
-      subcategory: [vuln]
-      technology: [javascript, typescript]
+      subcategory:
+      - vuln
+      technology:
+      - javascript
+      - typescript
       likelihood: LOW
       impact: HIGH
       confidence: MEDIUM
       vulnerability_class:
-        - Code Injection
+      - Code Injection
     patterns:
-      - pattern: new Function(...)
-      - pattern-not: new Function("...")
-      - pattern-not: new Function()
+    - pattern: new Function(...)
+    - pattern-not: new Function("...")
+    - pattern-not: new Function()
+    - pattern-not: new Function("...", "...")
+    - pattern-not: new Function("...", "...", "...")
+    - pattern-not: new Function("...", "...", "...", "...")
 
   # Rule 3: vm module running non-literal script string
   - id: narvy.javascript.code-injection.vm-run-non-literal.vm-run-non-literal
@@ -3174,50 +3309,57 @@ rules:
 
   # Bearer/refresh token in localStorage: readable by any script, no expiry/HttpOnly/SameSite; key-name allow-list separates credentials from UI state.
   - id: narvy.javascript.jwt.token-in-localstorage.token-in-localstorage
-    message: >-
-      An authentication token is written to `localStorage`. Anything stored
-      there is readable by every script on the origin, survives the browser
-      session, and cannot be protected with HttpOnly/SameSite - so a single
-      XSS anywhere on the site steals a long-lived credential (CWE-522).
-      Prefer an HttpOnly + Secure + SameSite cookie, or keep the access
-      token in memory only.
+    message: An authentication token is written to `localStorage`. Anything stored there is readable by every script on the
+      origin, survives the browser session, and cannot be protected with HttpOnly/SameSite - so a single XSS anywhere on the
+      site steals a long-lived credential (CWE-522). Prefer an HttpOnly + Secure + SameSite cookie, or keep the access token
+      in memory only.
     severity: WARNING
-    languages: [javascript, typescript]
+    languages:
+    - javascript
+    - typescript
     metadata:
       cwe:
-        - "CWE-522: Insufficiently Protected Credentials"
-        - "CWE-1004: Sensitive Cookie Without 'HttpOnly' Flag"
+      - 'CWE-522: Insufficiently Protected Credentials'
+      - 'CWE-1004: Sensitive Cookie Without ''HttpOnly'' Flag'
       owasp:
-        - "A07:2021 - Identification and Authentication Failures"
+      - A07:2021 - Identification and Authentication Failures
       category: security
-      subcategory: [audit]
-      technology: [browser, jwt, javascript, typescript]
+      subcategory:
+      - audit
+      technology:
+      - browser
+      - jwt
+      - javascript
+      - typescript
       likelihood: MEDIUM
       impact: HIGH
       confidence: HIGH
       vulnerability_class:
-        - Insecure Storage
-    patterns:
-      - pattern-either:
-          - pattern: localStorage.setItem("$KEY", $V)
-          - pattern: window.localStorage.setItem("$KEY", $V)
-          - pattern: $S.localStorage.setItem("$KEY", $V)
-          - pattern: localStorage["$KEY"] = $V
-          - pattern: window.localStorage["$KEY"] = $V
-      - metavariable-regex:
-          metavariable: $KEY
-          regex: '(?i)^[a-z0-9_.-]*(jwt|access[_-]?token|id[_-]?token|refresh[_-]?token|bearer|auth[_-]?token|session[_-]?token|api[_-]?key)[a-z0-9_.-]*$'
+      - Insecure Storage
+      default_view: hidden
+      hidden_reason: A token in localStorage can only be stolen through a separate XSS; on its own this is a hardening note.
+        Informational, shown under show all.
     paths:
       exclude:
-        - "**/test/**"
-        - "**/tests/**"
-        - "**/__tests__/**"
-        - "**/*.test.js"
-        - "**/*.test.ts"
-        - "**/*.test.tsx"
-        - "**/*.spec.js"
-        - "**/*.spec.ts"
-        - "**/*.spec.tsx"
+      - '**/test/**'
+      - '**/tests/**'
+      - '**/__tests__/**'
+      - '**/*.test.js'
+      - '**/*.test.ts'
+      - '**/*.test.tsx'
+      - '**/*.spec.js'
+      - '**/*.spec.ts'
+      - '**/*.spec.tsx'
+    patterns:
+    - pattern-either:
+      - pattern: localStorage.setItem("$KEY", $V)
+      - pattern: window.localStorage.setItem("$KEY", $V)
+      - pattern: $S.localStorage.setItem("$KEY", $V)
+      - pattern: localStorage["$KEY"] = $V
+      - pattern: window.localStorage["$KEY"] = $V
+    - metavariable-regex:
+        metavariable: $KEY
+        regex: (?i)^[a-z0-9_.-]*(jwt|access[_-]?token|id[_-]?token|refresh[_-]?token|bearer|auth[_-]?token|session[_-]?token|api[_-]?key)[a-z0-9_.-]*$
 
   # Authorization decision on a client-side decoded (unverified) JWT claim; fires only when the claim drives a conditional and is authz-shaped.
   - id: narvy.javascript.jwt.unverified-claim-authorization.unverified-claim-authorization
@@ -3598,3 +3740,188 @@ rules:
       - metavariable-regex:
           metavariable: $RE
           regex: '^/.*[^\\]\.[a-zA-Z].*/[gimsuyd]*$'
+
+  - id: narvy.javascript.xss.dom-innerhtml-assign-untraced.dom-innerhtml-assign-untraced
+    message: Assignment to `.innerHTML` / `.outerHTML` with a non-literal value. The browser parses this value as HTML, so if
+      it contains attacker-controlled data this is DOM-based XSS (CWE-79). Use `.textContent` for plain text, or sanitize with
+      DOMPurify before assigning. No attacker-controlled source was traced to this assignment.
+    severity: WARNING
+    languages:
+    - javascript
+    - typescript
+    metadata:
+      default_view: hidden
+      hidden_reason: No attacker-controlled source was traced to this innerHTML assignment (the value may be a number, an escaped
+        string, server-rendered HTML or the user's own data). Review only if it can hold another user's markup. Shown under
+        show all.
+      cwe:
+      - 'CWE-79: Improper Neutralization of Input During Web Page Generation (''Cross-site Scripting'')'
+      owasp:
+      - A03:2021 - Injection
+      category: security
+      subcategory:
+      - vuln
+      technology:
+      - javascript
+      - typescript
+      - dom
+      likelihood: MEDIUM
+      impact: HIGH
+      confidence: MEDIUM
+      vulnerability_class:
+      - Cross-Site-Scripting (XSS)
+    patterns:
+    - pattern-either:
+      - pattern: $EL.innerHTML = $X
+      - pattern: $EL.outerHTML = $X
+    - pattern-not: $EL.innerHTML = "..."
+    - pattern-not: $EL.outerHTML = "..."
+    - pattern-not: $EL.innerHTML = `...`
+    - pattern-not: $EL.outerHTML = `...`
+    - pattern-not: $EL.innerHTML = ""
+    - pattern-not: $EL.innerHTML = $SANITIZER.sanitize(...)
+    - pattern-not: $EL.outerHTML = $SANITIZER.sanitize(...)
+    - pattern-not: $EL.innerHTML = $OTHER.innerHTML
+    - pattern-not: $EL.outerHTML = $OTHER.innerHTML
+    - pattern-not: $EL.innerHTML += "..."
+    - pattern-not: $EL.innerHTML = he.encode(...)
+    - pattern-not: $EL.innerHTML = he.escape(...)
+    - pattern-not: $EL.innerHTML = _.escape(...)
+    - pattern-not-inside: 'function $F(..., $X, ...) { ... }
+
+        '
+    - pattern-not-inside: 'function (..., $X, ...) { ... }
+
+        '
+    - pattern-not-inside: '(..., $X, ...) => { ... }
+
+        '
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $SAN(...)
+          - pattern: $EL.outerHTML = $SAN(...)
+          - pattern: $EL.innerHTML = await $SAN(...)
+          - pattern: $EL.outerHTML = await $SAN(...)
+        - metavariable-regex:
+            metavariable: $SAN
+            regex: (?i).*(saniti[sz]|purif|dompurify|xss[_-]?clean|clean[_-]?html|html[_-]?clean|escape[_-]?html|html[_-]?escape|encode[_-]?html|html[_-]?encode|safe[_-]?html|html[_-]?safe).*
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $O.$SAN(...)
+          - pattern: $EL.outerHTML = $O.$SAN(...)
+          - pattern: $EL.innerHTML = await $O.$SAN(...)
+          - pattern: $EL.outerHTML = await $O.$SAN(...)
+        - metavariable-regex:
+            metavariable: $SAN
+            regex: (?i).*(saniti[sz]|purif|xss[_-]?clean|clean[_-]?html|html[_-]?clean|escape[_-]?html|html[_-]?escape|encode[_-]?html|html[_-]?encode|safe[_-]?html|html[_-]?safe).*
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $CONST
+          - pattern: $EL.outerHTML = $CONST
+        - metavariable-regex:
+            metavariable: $CONST
+            regex: ^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $ICONS.$ICO
+          - pattern: $EL.outerHTML = $ICONS.$ICO
+        - metavariable-regex:
+            metavariable: $ICONS
+            regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $ICONS.$ICO + "..."
+          - pattern: $EL.innerHTML = "..." + $ICONS.$ICO
+          - pattern: $EL.outerHTML = $ICONS.$ICO + "..."
+          - pattern: $EL.outerHTML = "..." + $ICONS.$ICO
+        - metavariable-regex:
+            metavariable: $ICONS
+            regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: '$EL.innerHTML = $C ? $ICONS.$A : $ICONS.$B'
+          - pattern: '$EL.outerHTML = $C ? $ICONS.$A : $ICONS.$B'
+        - metavariable-regex:
+            metavariable: $ICONS
+            regex: ^(IC|ICO|ICON|ICONS|Icon|Icons|SVG|SVGS|Svg|Svgs|GLYPH|GLYPHS|Glyph|Glyphs)$
+    - pattern-not:
+        patterns:
+        - pattern-either:
+          - pattern: $EL.innerHTML = $O.$M(...)
+          - pattern: $EL.outerHTML = $O.$M(...)
+          - pattern: $EL.innerHTML = $M(...)
+          - pattern: $EL.outerHTML = $M(...)
+        - metavariable-regex:
+            metavariable: $M
+            regex: (?i).*(icon|svg|glyph|chevron|arrow|caret|spinner).*
+    - pattern-not:
+        pattern-either:
+        - pattern: $EL.$PROP = <... location.$A ...>
+        - pattern: $EL.$PROP = <... window.location ...>
+        - pattern: $EL.$PROP = <... document.URL ...>
+        - pattern: $EL.$PROP = <... document.documentURI ...>
+        - pattern: $EL.$PROP = <... document.referrer ...>
+        - pattern: $EL.$PROP = <... document.cookie ...>
+        - pattern: $EL.$PROP = <... window.name ...>
+        - pattern: $EL.$PROP = <... new URLSearchParams(...) ...>
+        - pattern: $EL.$PROP = <... decodeURIComponent(...) ...>
+        - pattern: $EL.$PROP = <... decodeURI(...) ...>
+        - patterns:
+          - pattern-either:
+            - pattern-inside: '$V = <... location.$A ...>
+
+                ...
+
+                '
+            - pattern-inside: '$V = <... new URLSearchParams(...) ...>
+
+                ...
+
+                '
+            - pattern-inside: '$V = <... document.referrer ...>
+
+                ...
+
+                '
+            - pattern-inside: '$V = <... decodeURIComponent(...) ...>
+
+                ...
+
+                '
+          - pattern: $EL.$PROP = <... $V ...>
+        - patterns:
+          - pattern-either:
+            - pattern-inside: '$W.addEventListener("message", function ($EV) { ... })
+
+                '
+            - pattern-inside: '$W.addEventListener("message", ($EV) => { ... })
+
+                '
+            - pattern-inside: '$W.onmessage = function ($EV) { ... }
+
+                '
+          - pattern: $EL.$PROP = <... $EV.data ...>
+        - patterns:
+          - pattern-either:
+            - pattern-inside: 'function $FN(..., $P, ...) { ... }
+
+                '
+            - pattern-inside: 'function (..., $P, ...) { ... }
+
+                '
+            - pattern-inside: '(..., $P, ...) => { ... }
+
+                '
+          - pattern-either:
+            - pattern: $EL.$PROP = <... $P[$K] ...>
+            - pattern: $EL.$PROP = <... $P.$F ...>
+          - pattern: $EL.$PROP = <... "$LIT" ...>
+          - metavariable-regex:
+              metavariable: $LIT
+              regex: <[a-zA-Z]

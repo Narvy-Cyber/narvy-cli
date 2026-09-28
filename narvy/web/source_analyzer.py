@@ -747,7 +747,7 @@ def _parse_semgrep_data(data: Dict[str, Any], source_dir: str,
             duplicates_dropped += 1
             continue
         seen_keys.add(key)
-        findings.append({
+        finding = {
             "rule_id": check_id,
             "file_path": rel_path,
             "name": extra.get("message", r.get("check_id", ""))[:120],
@@ -760,8 +760,39 @@ def _parse_semgrep_data(data: Dict[str, Any], source_dir: str,
                 "recommendation": extra.get("message", ""),
             },
             "engine": "semgrep",
-        })
+        }
+        _apply_view_hint(finding, meta, abs_path)
+        findings.append(finding)
     return findings, skipped_generated, duplicates_dropped
+
+
+def _apply_view_hint(finding: Dict[str, Any], meta: Dict[str, Any], abs_path: str) -> None:
+    """Honour a rule's informational hint: lower to LOW and say why.
+
+    `default_view: hidden` marks a rule whose hits are informational (a
+    wildcard CORS header without credentials, a server bound to 0.0.0.0).
+    `hidden_if_file_matches` lowers a hit when the same file shows the
+    mitigating context (a plaintext listener in a file that also sets up TLS).
+    """
+    if not isinstance(meta, dict):
+        return
+    if str(meta.get("default_view", "")).lower() == "hidden":
+        reason = meta.get("hidden_reason")
+    elif meta.get("hidden_if_file_matches") and abs_path:
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="ignore") as fh:
+                if not re.search(str(meta["hidden_if_file_matches"]), fh.read(2_000_000)):
+                    return
+        except (OSError, re.error):
+            return
+        reason = meta.get("hidden_if_file_reason")
+    else:
+        return
+    finding["severity"] = "LOW"
+    details = finding.setdefault("details", {})
+    note = f" [Narvy: informational - {reason or 'shown for completeness'}]"
+    if isinstance(details, dict):
+        details["description"] = (details.get("description") or "") + note
 
 
 # Cap on explicit test-path targets handed to the secret pass, to bound runtime.
@@ -801,7 +832,8 @@ def _run_test_path_secret_pass(source_dir: str, configs: List[str], timeout: int
     cmd += targets
     cmd += ["--json", "--quiet", "--no-git-ignore", "--timeout", "60", "--no-rewrite-rule-ids"]
     cmd += semgrep_engine.resource_args(
-        semgrep_engine.semgrep_jobs(single=any(_is_php_config(c) for c in configs)))
+        semgrep_engine.semgrep_jobs(single=any(
+            _is_php_config(c) or semgrep_engine.config_has_taint(c) for c in configs)))
     try:
         proc = run_tree(cmd, timeout=timeout, env=semgrep_engine.semgrep_env())
     except subprocess.TimeoutExpired:
@@ -928,16 +960,19 @@ def _plan_batches(source_dir: str, max_files: int) -> List[List[str]]:
 
 
 def _semgrep_groups(configs: List[str]) -> List[Tuple[List[str], int]]:
-    """Group rule packs into semgrep runs. PHP gets its own single-worker run."""
-    php = [c for c in configs if _is_php_config(c)]
-    other = [c for c in configs if not _is_php_config(c)]
+    """Group rule packs into semgrep runs.
+
+    semgrep with more than one worker drops taint results at random and says
+    nothing about it, so every pack holding a taint rule gets its own
+    single-worker run; the packs then run side by side instead. Pattern-only
+    packs share one multi-worker run.
+    """
+    taint = [c for c in configs if _is_php_config(c) or semgrep_engine.config_has_taint(c)]
+    other = [c for c in configs if c not in taint]
     jobs = semgrep_engine.semgrep_jobs()
-    groups: List[Tuple[List[str], int]] = []
-    if php:
-        groups.append((php, semgrep_engine.semgrep_jobs(single=True)))
-        jobs = max(1, jobs - 1)
+    groups: List[Tuple[List[str], int]] = [([c], 1) for c in taint]
     if other:
-        groups.append((other, jobs))
+        groups.append((other, max(1, jobs - len(taint)) if taint else jobs))
     return groups
 
 
@@ -967,7 +1002,8 @@ def _run_semgrep_groups(source_dir: str, configs: List[str], timeout: int,
     if len(groups) == 1:
         outcomes = [_one(groups[0])]
     else:
-        with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+        workers = max(1, min(len(groups), semgrep_engine.semgrep_jobs()))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             outcomes = list(pool.map(_one, groups))
 
     merged: Dict[str, Any] = {"results": [], "errors": []}
@@ -985,10 +1021,11 @@ def _run_semgrep_groups(source_dir: str, configs: List[str], timeout: int,
 
 def _run_web_semgrep(source_dir: str, configs: List[str],
                       timeout: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
-    global LAST_RUN_SKIPPED_GENERATED, LAST_RUN_DUPLICATES_DROPPED, LAST_RUN_MEMORY_SKIPPED, LAST_RUN_BATCHES
+    global LAST_RUN_SKIPPED_GENERATED, LAST_RUN_DUPLICATES_DROPPED, LAST_RUN_MEMORY_SKIPPED, LAST_RUN_TIMEOUT_SKIPPED, LAST_RUN_BATCHES
     LAST_RUN_SKIPPED_GENERATED = 0
     LAST_RUN_DUPLICATES_DROPPED = 0
     LAST_RUN_MEMORY_SKIPPED = 0
+    LAST_RUN_TIMEOUT_SKIPPED = 0
     if not configs:
         semgrep_engine._record_run("error", message="no rule packs resolved for detected stack(s)")
         return None
@@ -1031,6 +1068,7 @@ def _run_web_semgrep(source_dir: str, configs: List[str],
     if status != "ok" and not data["results"]:
         return []
     LAST_RUN_MEMORY_SKIPPED = _count_memory_skipped(data)
+    LAST_RUN_TIMEOUT_SKIPPED = _count_timeout_skipped(data)
 
     # Semgrep can emit one rule at one byte range several times (multiple binding sets);
     # a second key collapses the same rule delivered by two configs.
@@ -1052,6 +1090,7 @@ def _run_web_semgrep(source_dir: str, configs: List[str],
 
 
 LAST_RUN_MEMORY_SKIPPED = 0
+LAST_RUN_TIMEOUT_SKIPPED = 0
 LAST_RUN_BATCHES = 1
 
 
@@ -1059,6 +1098,22 @@ def _count_target_files(path: str) -> int:
     if not os.path.isdir(path):
         return 1
     return semgrep_engine.count_source_files(path)
+
+
+def _count_timeout_skipped(data: Dict[str, Any]) -> int:
+    """Files where at least one rule hit the per-file --timeout (semgrep keeps
+    rc 0 and drops that rule's findings for the file)."""
+    paths: Set[str] = set()
+    for err in data.get("errors", []) or []:
+        kind = err.get("type", "")
+        kind = str(kind[0] if isinstance(kind, list) and kind else kind).lower()
+        if "timeout" in kind:
+            p = err.get("path")
+            if not p:
+                m = re.search(r" on (\S+)\s*$", str(err.get("message", "")))
+                p = m.group(1) if m else None
+            paths.add(p or str(err.get("message", ""))[:80])
+    return len(paths)
 
 
 def _count_memory_skipped(data: Dict[str, Any]) -> int:
@@ -1152,6 +1207,12 @@ def analyze_source(source_dir: str) -> Dict[str, Any]:
                     f"pass because analyzing them needed more than the "
                     f"{semgrep_engine.semgrep_max_memory_mb()} MB memory ceiling. Raise "
                     "NARVY_SEMGREP_MAX_MEMORY_MB (0 = no ceiling) to cover them."
+                )
+            if LAST_RUN_TIMEOUT_SKIPPED:
+                notes.append(
+                    f"{LAST_RUN_TIMEOUT_SKIPPED} file(s) were not fully analysed: at "
+                    "least one rule hit the 60 s per-file timeout on them, so "
+                    "their findings are incomplete, not clean."
                 )
             sg_note = semgrep_engine.degraded_coverage_note()
             if sg_note:
