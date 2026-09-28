@@ -88,9 +88,32 @@ def launcher_path():
     return None
 
 
+def strip_launcher_dirs_from_path():
+    """Drop every PATH entry holding a `narvy` launcher, for this process and its children.
+
+    Hosted runners already put the user Scripts/bin dir on PATH (~/.local/bin on
+    Linux, %APPDATA%\\Python\\Python3xx\\Scripts on Windows); a new user's
+    shell does not. Removing it here makes every scan below run without it,
+    semgrep included, which sits in the same directory.
+    """
+    names = ("narvy.exe", "narvy") if os.name == "nt" else ("narvy",)
+    kept, dropped = [], []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        d = entry.strip().strip('"')
+        if d and any(os.path.isfile(os.path.join(d, n)) for n in names):
+            dropped.append(entry)
+        else:
+            kept.append(entry)
+    os.environ["PATH"] = os.pathsep.join(kept)
+    for entry in dropped:
+        print(f"harness: removed {entry} from PATH (a new user does not have it)", flush=True)
+    return dropped
+
+
 def main():
     work = tempfile.mkdtemp(prefix="narvy ci ")  # a space in every path below
     py = sys.executable
+    strip_launcher_dirs_from_path()
 
     rc, out, _ = run([py, "-m", "narvy", "--version"])
     check(rc == 0 and out.strip().startswith("narvy "), "python -m narvy --version")
@@ -100,8 +123,9 @@ def main():
     if exe:
         rc, out, _ = run([exe, "--version"])
         check(rc == 0, "narvy launcher by full path runs")
-    check(shutil.which("narvy") is None or os.environ.get("NARVY_CI_ON_PATH") == "1",
-          "user Scripts dir is off PATH (the new-user situation)")
+    # Harness precondition, not a product check: the scans below must run the
+    # way they do for a new user, with the launcher directory off PATH.
+    check(shutil.which("narvy") is None, "harness: user Scripts dir is off PATH (the new-user situation)")
 
     rc, out, err = run([py, "-m", "narvy", "doctor"])
     print(err[-3000:])
@@ -162,7 +186,16 @@ def main():
     apk_sarif = os.path.join(work, "out dir", "apk results.sarif")
     rc, out, err = run([py, "-m", "narvy", "scan", apk, "--max-mem", "3g", "--output", "sarif",
                         "--file", apk_sarif], env=home_env, timeout=3000)
+    if rc == 0:
+        # Printed on success too: the structural-pass status line is the first
+        # thing to read when a rule family goes missing on one platform.
+        print(out[-3000:])
+        print(err[-6000:])
     check(rc == 0, "APK scan exit 0")
+    flat = " ".join((out + err).split())
+    check("Deep analysis INCOMPLETE" not in flat and "(Semgrep) pass is time-bounded" not in flat
+          and "(Semgrep) pass runs to completion on the hosted engine" not in flat,
+          "APK: structural pass reported complete")
     apk_rules = set()
     n = 0
     if os.path.isfile(apk_sarif):

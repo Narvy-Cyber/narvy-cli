@@ -37,6 +37,7 @@ except Exception:
 from narvy import __version__
 from narvy.reporter import generate_sarif_report, sarif_level, sarif_security_severity
 from .decompiler import decompile_apk
+from . import decompiler as _decompiler
 from .rule_engine import load_rules_from_dir, run_rules_on_file
 from . import auth, own_reports, uploader, telemetry
 from .third_party_filter import get_own_package_roots, resolve_file_scope, check_android_override
@@ -866,6 +867,8 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
                 console.print(f"\n[bold red]{decompile_error}[/bold red]\n")
                 return None
             progress.update(task1, completed=1, description="[green]Decompilation Complete.")
+            if _decompiler.LAST_HEAP_NOTE:
+                console.print(f"[dim]{_decompiler.LAST_HEAP_NOTE}[/dim]")
 
             task2 = progress.add_task("[cyan]Analyzing files...", total=None)
             rules_path = os.path.join(os.path.dirname(__file__), 'rules', 'android')

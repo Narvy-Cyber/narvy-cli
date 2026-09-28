@@ -231,6 +231,50 @@ def load_rule_defs(rules_path: str = RULES_PATH) -> List[Dict[str, Any]]:
     return defs
 
 
+def _attempt(cmd: List[str], timeout: int):
+    """One semgrep run: (status, data, message). Raises TimeoutExpired."""
+    proc = run_tree(cmd, timeout=timeout, env=semgrep_env())
+    if not proc.stdout:
+        if proc.returncode not in (0, 1):
+            return 'error', None, _rc_message(proc)
+        return 'ok', {'results': []}, None
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return 'error', None, "semgrep output was not valid JSON"
+    if not isinstance(data, dict):
+        return 'error', None, "semgrep output was not valid JSON"
+    if proc.returncode not in (0, 1) and not data.get('results'):
+        # Exit 2+ with a JSON body is a fatal error (bad config, crash), not a clean pass.
+        errs = [e.get('message') or e.get('type') for e in data.get('errors') or []
+                if isinstance(e, dict)]
+        detail = next((str(e) for e in errs if e), None)
+        return 'error', None, _rc_message(proc, detail)
+    return 'ok', data, None
+
+
+def _rc_message(proc, detail: Optional[str] = None) -> str:
+    text = detail or (proc.stderr or '').strip()
+    text = ' '.join(str(text).split())[:200]
+    return f"semgrep exited rc={proc.returncode}" + (f": {text}" if text else "")
+
+
+def _scanned_nothing(data: Optional[Dict[str, Any]]) -> bool:
+    paths = (data or {}).get('paths')
+    return isinstance(paths, dict) and 'scanned' in paths and not paths['scanned']
+
+
+def _count_own_code_files(source_dir: str, own_roots) -> int:
+    from .third_party_filter import is_own_package_path
+    n = 0
+    for dirpath, _dirs, files in os.walk(source_dir):
+        for f in files:
+            if f.endswith(('.java', '.kt')) and is_own_package_path(
+                    os.path.relpath(os.path.join(dirpath, f), source_dir), own_roots):
+                n += 1
+    return n
+
+
 def run_semgrep(source_dir: str, timeout: Optional[int] = None,
                  own_roots: Optional[set] = None,
                  override_config: Optional[ScopeConfig] = None,
@@ -267,33 +311,37 @@ def run_semgrep(source_dir: str, timeout: Optional[int] = None,
         # suppresses a vendor entry nested inside an included own_root.
         scope_args += ['--exclude', f"**/{entry.replace('.', '/')}/**"]
 
-    cmd = (
-        [semgrep_bin() or 'semgrep', '--config', RULES_PATH, source_dir,
-         '--json', '--quiet', '--no-git-ignore',
-         '--timeout', '60']  # per-file timeout, not the whole run
-        + resource_args(semgrep_jobs())
-        + scope_args
-    )
+    def _cmd(jobs: int, scope: List[str]) -> List[str]:
+        return (
+            [semgrep_bin() or 'semgrep', '--config', RULES_PATH, source_dir,
+             '--json', '--quiet', '--no-git-ignore', '--no-rewrite-rule-ids',
+             '--timeout', '60']  # per-file timeout, not the whole run
+            + resource_args(jobs)
+            + scope
+        )
+
+    jobs = semgrep_jobs()
     try:
-        proc = run_tree(cmd, timeout=timeout, env=semgrep_env())
+        status, data, message = _attempt(_cmd(jobs, scope_args), timeout)
+        if status == 'error' and jobs > 1:
+            # A crashed multi-worker run is retried once with one worker before
+            # the pass is reported as incomplete.
+            status, data, message = _attempt(_cmd(1, scope_args), timeout)
     except subprocess.TimeoutExpired:
         # LAST_RUN stops the caller presenting the empty list as a clean pass.
         _record_run('timeout', timeout_s=timeout, file_count=file_count)
         return []
 
-    if not proc.stdout:
-        if proc.returncode not in (0, 1):
-            _record_run('error', timeout_s=timeout, file_count=file_count,
-                        message=f"semgrep exited rc={proc.returncode}")
-        else:
-            _record_run('ok', timeout_s=timeout, file_count=file_count)
-        return []
+    if status == 'ok' and own_roots and _scanned_nothing(data):
+        expected = _count_own_code_files(source_dir, own_roots)
+        if expected:
+            # The --include globs matched none of the app's own files: say so
+            # instead of reporting a clean pass over nothing.
+            status, message = 'error', (
+                f"the structural pass matched none of the {expected} app source files")
 
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        _record_run('error', timeout_s=timeout, file_count=file_count,
-                    message="semgrep output was not valid JSON")
+    if status != 'ok':
+        _record_run('error', timeout_s=timeout, file_count=file_count, message=message)
         return []
 
     _record_run('ok', timeout_s=timeout, file_count=file_count)

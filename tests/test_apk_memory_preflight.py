@@ -207,20 +207,89 @@ def test_aab_dex_layout_is_counted_and_asset_dex_is_not():
 def test_ram_too_small_is_reported_separately_from_heap_too_small():
     """Low RAM and low heap get different advice."""
     with tempfile.TemporaryDirectory() as d:
-        p = _fake_apk(os.path.join(d, "s.apk"), [("classes.dex", _fake_dex(50_000, 6_000))])
+        p = _fake_apk(os.path.join(d, "s.apk"), [("classes.dex", _fake_dex(280_000, 40_000))])
         v = check_memory_preflight(p, "16g", available_mb=4096)
         assert v.should_block and v.reason == "ram_too_small"
         assert "out-of-memory killer" in v.message
         # must NOT tell the user to raise --max-mem in this branch
         assert "--max-mem 17g" not in v.message
         # ...and must not bolt a nonsensical "may not be enough" caveat onto a
-        # suggestion that is already far above what this small app needs
+        # suggestion that is already above what this app needs
         assert "may still not be enough" not in v.message
 
         # the caveat DOES belong when the machine genuinely can't fit the app
         big = _fake_apk(os.path.join(d, "b.apk"), [("classes.dex", _fake_dex(900_000, 200_000))])
         v2 = check_memory_preflight(big, "16g", available_mb=4096)
         assert v2.should_block and "may still not be enough" in v2.message
+
+
+def _insecurebank_like(d):
+    # Header counts of the APK the platform CI scans (48,172 methods, 6,529 classes, 6 MB DEX).
+    return _fake_apk(os.path.join(d, "ib.apk"),
+                     [("classes.dex", _fake_dex(48_172, 6_529, body_bytes=6_125_692 - 112))])
+
+
+def test_max_mem_that_does_not_fit_is_lowered_not_refused():
+    """A small app runs with a smaller heap instead of being refused.
+
+    Regression: the 7 GB macOS CI runner (3.2 to 4.4 GB available) refused a
+    6,500-class app at --max-mem 3g, and an 8 GB laptop refused every app at
+    the default 4g.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        p = _insecurebank_like(d)
+        for mem, avail in (("3g", 3200), ("4g", 3200), ("4g", 4400), ("16g", 3200)):
+            v = check_memory_preflight(p, mem, available_mb=avail)
+            assert not v.should_block, f"--max-mem {mem} with {avail} MB free: {v.message}"
+            assert v.reason == "lowered" and v.lowered_max_mem
+            lowered = int(v.lowered_max_mem.rstrip("m"))
+            # the lowered heap fits in what is free and still covers the app with margin
+            assert lowered * 1.3 <= avail - 1024
+            assert lowered >= v.estimated_mb * 1.5
+            assert "instead of --max-mem " + mem in v.message
+        # --max-mem that fits is passed through untouched
+        v = check_memory_preflight(p, "2g", available_mb=64 * 1024)
+        assert not v.should_block and v.lowered_max_mem is None and v.reason == ""
+        # a machine that cannot hold even the lowered heap is still refused
+        v = check_memory_preflight(p, "4g", available_mb=1800)
+        assert v.should_block and v.reason == "ram_too_small"
+
+
+def test_decompile_uses_the_lowered_heap(monkeypatch):
+    """jadx gets the lowered -Xmx, and the note is left for the caller to print."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["opts"] = kwargs["env"].get("JADX_OPTS")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(decompiler.subprocess, "run", fake_run)
+    monkeypatch.setattr(decompiler, "resolve_jadx_binary", lambda: "/bin/true")
+    monkeypatch.setattr(decompiler, "resolve_java_home", lambda: None)
+    monkeypatch.setattr("narvy.apk_memory_preflight.available_ram_mb", lambda: 3200)
+    with tempfile.TemporaryDirectory() as d:
+        p = _insecurebank_like(d)
+        ok, _ = decompiler.decompile_apk(p, os.path.join(d, "out"), "4g")
+    assert ok
+    assert seen["opts"] == "-Xmx1536m"
+    assert decompiler.LAST_HEAP_NOTE and "1.5 GB Java heap" in decompiler.LAST_HEAP_NOTE
+
+
+def test_darwin_available_prefers_the_kernel_memorystatus_level():
+    from narvy.apk_memory_preflight import _darwin_available_mb, _vm_stat_available_mb
+    vm = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+          "Pages free:                               29399.\n"
+          "Pages active:                            370913.\n"
+          "Pages inactive:                          344932.\n"
+          "Pages speculative:                        25149.\n"
+          "Pages wired down:                        114741.\n"
+          "Pages purgeable:                           3285.\n")
+    pages_mb = (29399 + 344932 + 25149 + 3285) * 16384 // (1024 * 1024)
+    assert _vm_stat_available_mb(vm) == pages_mb
+    # 16 GB Mac at 75% free: the kernel figure wins over the lower page count
+    assert _darwin_available_mb(memsize=16 * 1024 ** 3, level=75, vm_stat_out=vm) == 12288
+    # no sysctl: page counts
+    assert _darwin_available_mb(memsize=None, level=None, vm_stat_out=vm) is not None
+    assert _vm_stat_available_mb("") is None
 
 
 def test_unreadable_dex_never_blocks():

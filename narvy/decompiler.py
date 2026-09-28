@@ -222,6 +222,10 @@ def _as_limit_preexec(max_mem_mb):
     return _set_limits
 
 
+# Set by decompile_apk when it ran jadx with a smaller heap than --max-mem; the caller prints it.
+LAST_HEAP_NOTE = None
+
+
 def decompile_apk(apk_path: str, output_dir: str, max_mem: str = "4g", force: bool = False,
                   extra_inputs=None):
     """Decompile an APK with jadx; returns (success, error_detail). jadx keeps the FIRST input's manifest, so apk_path stays first; `extra_inputs` merge into one tree."""
@@ -229,10 +233,16 @@ def decompile_apk(apk_path: str, output_dir: str, max_mem: str = "4g", force: bo
     if validation_error:
         return False, validation_error
 
+    global LAST_HEAP_NOTE
+    LAST_HEAP_NOTE = None
     if not force:
         verdict = check_memory_preflight(apk_path, max_mem)
         if verdict.should_block:
             return False, verdict.message
+        lowered = getattr(verdict, "lowered_max_mem", None)
+        if lowered:
+            max_mem = lowered
+            LAST_HEAP_NOTE = verdict.message
 
     try:
         jadx_bin = resolve_jadx_binary()

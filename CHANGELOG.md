@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3]
+
+### Fixed
+
+- APK scans were refused before decompiling on machines with less free
+  memory than `--max-mem` needs (about 1.3x the heap plus 1 GB), even for
+  small apps. On an 8 GB laptop at the default `--max-mem 4g` that was
+  nearly every app, and on macOS the free-memory reading was low by
+  several GB. `--max-mem` is a ceiling: when it does not fit but a smaller
+  heap still covers the app's estimated need by 1.5x, jadx now runs with
+  that smaller heap and the scan says so. A machine that cannot hold even
+  that is still refused, with the same advice as before.
+- macOS: available memory comes from the kernel's own figure
+  (`kern.memorystatus_level`, what `memory_pressure` reports), which counts
+  memory the compressor can reclaim. The `vm_stat` page count is the
+  fallback and now includes speculative pages.
+- APK scans: a structural (Semgrep) pass that failed was reported as
+  complete with 0 findings when semgrep exited with an error but still
+  printed JSON. It is now reported as incomplete with the error, after one
+  retry with a single worker. A run whose path filters matched none of the
+  app's own source files is reported the same way instead of as a clean
+  pass. Rule ids no longer depend on where the package is installed.
+
+### Changed
+
+- Platform CI: the check removes the user Scripts/bin directory from PATH
+  before running scans (hosted runners ship with it on PATH, a new user's
+  shell does not), and prints the APK scan output on success so the
+  structural-pass status is in the log.
+
 ## [1.1.2]
 
 ### Added

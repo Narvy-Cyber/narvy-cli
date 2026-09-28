@@ -24,6 +24,13 @@ JVM_RSS_OVERHEAD = 1.30
 
 RAM_SAFETY_RESERVE_MB = 1024
 
+# When --max-mem does not fit in free RAM but a smaller heap still leaves this
+# much headroom over the estimate, jadx runs with that smaller -Xmx instead of
+# the scan being refused. -Xmx bounds the JVM, so the smaller heap is what keeps
+# memory in check. Measured: four real apps (6.5k to 60k classes) decompiled
+# fully at 1.5x the estimate, peak RSS about 1.2x that heap.
+AUTO_LOWER_MARGIN = 1.5
+
 
 class DexStats(NamedTuple):
     methods: int
@@ -41,6 +48,8 @@ class PreflightVerdict(NamedTuple):
     max_mem_mb: int
     available_mb: Optional[int]
     stats: DexStats
+    # -Xmx value to run jadx with when it differs from --max-mem, else None.
+    lowered_max_mem: Optional[str] = None
 
 
 def parse_mem_arg(value: str) -> Optional[int]:
@@ -71,19 +80,7 @@ def available_ram_mb() -> Optional[int]:
                     if line.startswith("MemAvailable:"):
                         return int(line.split()[1]) // 1024
         elif system == "Darwin":
-            # vm_stat exposes reclaimable inactive+purgeable pools that SC_AVPHYS_PAGES omits.
-            import subprocess
-            out = subprocess.run(["vm_stat"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10).stdout
-            page = 4096
-            pm = re.search(r"page size of (\d+) bytes", out)
-            if pm:
-                page = int(pm.group(1))
-            counts = dict(re.findall(r"^(.+?):\s+(\d+)\.", out, re.M))
-            free = int(counts.get("Pages free", 0))
-            inactive = int(counts.get("Pages inactive", 0))
-            purgeable = int(counts.get("Pages purgeable", 0))
-            if free or inactive:
-                return ((free + inactive + purgeable) * page) // (1024 * 1024)
+            return _darwin_available_mb()
         elif system == "Windows":
             class _MemStatusEx(ctypes.Structure):
                 _fields_ = [
@@ -107,6 +104,58 @@ def available_ram_mb() -> Optional[int]:
     except Exception as e:  # noqa: BLE001
         logger.debug(f"available_ram_mb() failed on {system}: {e}")
     return None
+
+
+def _sysctl_int(name: str) -> Optional[int]:
+    import subprocess
+    try:
+        out = subprocess.run(["sysctl", "-n", name], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return int(out) if out.isdigit() else None
+
+
+def _vm_stat_available_mb(out: str) -> Optional[int]:
+    """free + inactive + speculative + purgeable pages from `vm_stat` output, in MB."""
+    page = 4096
+    pm = re.search(r"page size of (\d+) bytes", out)
+    if pm:
+        page = int(pm.group(1))
+    counts = dict(re.findall(r"^(.+?):\s+(\d+)\.", out, re.M))
+    pages = sum(int(counts.get(k, 0)) for k in
+                ("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable"))
+    if not pages:
+        return None
+    return (pages * page) // (1024 * 1024)
+
+
+def _darwin_available_mb(memsize: Optional[int] = None, level: Optional[int] = None,
+                         vm_stat_out: Optional[str] = None) -> Optional[int]:
+    """Available memory on macOS.
+
+    The kernel's own figure is kern.memorystatus_level (the "free percentage"
+    `memory_pressure` prints), which counts memory the compressor can reclaim.
+    Page counts from vm_stat miss that and read a few GB low on a machine that
+    is not under pressure at all, so they are only the fallback.
+    """
+    import subprocess
+    if memsize is None:
+        memsize = _sysctl_int("hw.memsize")
+    if level is None:
+        level = _sysctl_int("kern.memorystatus_level")
+    from_level = None
+    if memsize and level is not None and 0 < level <= 100:
+        from_level = (memsize * level // 100) // (1024 * 1024)
+    if vm_stat_out is None:
+        try:
+            vm_stat_out = subprocess.run(["vm_stat"], capture_output=True, text=True,
+                                         encoding="utf-8", errors="replace", timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            vm_stat_out = ""
+    from_pages = _vm_stat_available_mb(vm_stat_out or "")
+    known = [v for v in (from_level, from_pages) if v is not None]
+    return max(known) if known else None
 
 
 def _is_app_dex(name: str) -> bool:
@@ -225,8 +274,20 @@ def check_memory_preflight(apk_path: str, max_mem: str,
 
     if available_mb is not None:
         needed_rss = int(max_mem_mb * JVM_RSS_OVERHEAD)
-        if needed_rss > (available_mb - RAM_SAFETY_RESERVE_MB):
-            safe_gb = max(1, int((available_mb - RAM_SAFETY_RESERVE_MB) / JVM_RSS_OVERHEAD / 1024))
+        room_mb = available_mb - RAM_SAFETY_RESERVE_MB
+        if needed_rss > room_mb:
+            # -Xmx is a ceiling the JVM only grows to under pressure: when a smaller
+            # heap still fits this app with room to spare, use that instead of refusing.
+            fit_mb = (max(0, int(room_mb / JVM_RSS_OVERHEAD)) // 256) * 256
+            if fit_mb >= max(MIN_ESTIMATE_MB, need_mb * AUTO_LOWER_MARGIN):
+                note = (
+                    f"Only {_fmt_mb(available_mb)} of memory is available right now, so JADX runs "
+                    f"with a {_fmt_mb(fit_mb)} Java heap instead of --max-mem {max_mem} "
+                    f"(this app needs about {_fmt_mb(need_mb)})."
+                )
+                return PreflightVerdict(False, "lowered", note, need_mb, max_mem_mb,
+                                        available_mb, stats, f"{fit_mb}m")
+            safe_gb = max(1, int(room_mb / JVM_RSS_OVERHEAD / 1024))
             lower_line = f"  - lower to --max-mem {safe_gb}g, which fits in what's free"
             if safe_gb * 1024 < need_mb:
                 lower_line += (f" (though this app looks like it needs about {_fmt_mb(need_mb)}, "
@@ -234,7 +295,8 @@ def check_memory_preflight(apk_path: str, max_mem: str,
             msg = (
                 f"--max-mem {max_mem} asks JADX for {_fmt_mb(max_mem_mb)} of Java heap, which needs "
                 f"about {_fmt_mb(needed_rss)} of real memory once JVM overhead is counted. This "
-                f"machine only has {_fmt_mb(available_mb)} available right now.\n\n"
+                f"machine only has {_fmt_mb(available_mb)} available right now, not enough for "
+                f"this app ({scale}, about {_fmt_mb(need_mb)} of heap).\n\n"
                 f"Running this would push the machine into swap and most likely get JADX killed by "
                 f"the OS out-of-memory killer (and may take other apps down with it). Options:\n"
                 f"  - free up memory and try again\n"
