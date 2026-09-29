@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .osv_client import OSVClient, get_default_client
+from .osv_client import OSVClient, coverage_after, coverage_before, get_default_client
 from ..ios.third_party_filter import (
     get_vendored_pods_with_versions,
     IOS_THIRD_PARTY_FRAMEWORK_PREFIXES,
@@ -72,6 +72,15 @@ KNOWN_VULNERABLE_IOS_LIBS: Dict[str, List[Dict[str, Any]]] = {
 }
 
 _GH_API_URL = "https://api.github.com/advisories"
+# Off by default: every reviewed GitHub "swift" advisory is exported to OSV as
+# SwiftURL and served by the same vulnerability database the rest of the
+# dependency check uses. NARVY_GITHUB_ADVISORIES=1 adds the direct GitHub
+# lookup back (sends the bare library name to api.github.com).
+_GH_ENV_FLAG = "NARVY_GITHUB_ADVISORIES"
+
+
+def github_advisories_enabled() -> bool:
+    return os.environ.get(_GH_ENV_FLAG, "").strip().lower() in ("1", "true", "yes", "on")
 _GH_CACHE_DIR = Path.home() / ".narvy" / "github_advisory_cache"
 _GH_CACHE_TTL_SECONDS = 24 * 3600
 
@@ -150,10 +159,14 @@ def _query_github_advisories_swift(library_name: str, budget: _GitHubAdvisoryBud
     if not budget.can_query():
         return []
 
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     try:
         resp = requests.get(
             _GH_API_URL,
-            headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"},
+            headers=headers,
             params={"ecosystem": "swift", "affects": library_name, "per_page": 50},
             timeout=15,
         )
@@ -490,6 +503,7 @@ def _check_all_sources(
     osv_client: OSVClient,
     gh_budget: _GitHubAdvisoryBudget,
     use_github: bool,
+    osv_has_vuln: Optional[Dict[tuple, bool]] = None,
 ) -> List[Tuple[Dict[str, Any], str]]:
     """(cve_dict, source_label) pairs deduplicated by CVE id across all sources."""
     if not dep.version or dep.version.lower() == "unknown":
@@ -498,13 +512,17 @@ def _check_all_sources(
     seen_cves: set = set()
     results: List[Tuple[Dict[str, Any], str]] = []
 
-    # OSV first: no rate ceiling. Needs a SwiftURL repo path, not a library name.
-    if dep.osv_package_name:
-        for f in osv_client.query_dict(dep.osv_package_name, dep.version, ecosystem="SwiftURL"):
-            cve_id = f.get("cve") or f.get("osv_id")
-            if cve_id and cve_id not in seen_cves:
-                seen_cves.add(cve_id)
-                results.append((f, "OSV.dev"))
+    # SwiftURL is keyed by repo path (github.com/<owner>/<repo>). A few
+    # advisories are published under a bare package name instead (e.g.
+    # "CocoaMQTT"), so a dep with no repo mapping is still queried by name;
+    # a miss there proves nothing and the caller counts it unverified.
+    osv_name = dep.osv_package_name or dep.name
+    flagged = True if osv_has_vuln is None else osv_has_vuln.get((osv_name, dep.version), True)
+    for f in (osv_client.query_dict(osv_name, dep.version, ecosystem="SwiftURL") if flagged else []):
+        cve_id = f.get("cve") or f.get("osv_id")
+        if cve_id and cve_id not in seen_cves:
+            seen_cves.add(cve_id)
+            results.append((f, "OSV.dev"))
 
     for f in _check_local_curated_db(dep):
         cve_id = f.get("cve")
@@ -543,13 +561,28 @@ def _scan_deps(deps: List[_IOSDep], osv_client: Optional[OSVClient] = None) -> T
     vulnerable_names: set = set()
     gh_used_for = 0
 
-    unresolved_before = getattr(client, "query_failures_no_cache", 0)
+    cov_before = coverage_before(client)
+
+    gh_enabled = github_advisories_enabled()
+    unmapped = 0
+
+    # Id-only batch pre-filter; anything it could not answer stays True so the
+    # detail query runs and records the failure.
+    osv_has_vuln: Optional[Dict[tuple, bool]] = None
+    batch_fn = getattr(client, "has_any_vuln_batch", None)
+    if callable(batch_fn):
+        pairs = sorted({(d.osv_package_name or d.name, d.version) for d in unique_deps
+                        if d.version and d.version.lower() != "unknown"})
+        if pairs:
+            osv_has_vuln = batch_fn(pairs, ecosystem="SwiftURL")
 
     for dep in unique_deps:
-        use_github = gh_used_for < _GH_MAX_QUERIES_PER_SCAN
-        cve_hits = _check_all_sources(dep, client, gh_budget, use_github)
+        use_github = gh_enabled and gh_used_for < _GH_MAX_QUERIES_PER_SCAN
+        cve_hits = _check_all_sources(dep, client, gh_budget, use_github, osv_has_vuln)
         if use_github:
             gh_used_for += 1
+        if not dep.osv_package_name and dep.version and dep.version.lower() != "unknown":
+            unmapped += 1
         for cve_dict, source_label in cve_hits:
             finding = _finding_from_cve(dep, cve_dict, source_label)
             findings.append(finding)
@@ -563,10 +596,11 @@ def _scan_deps(deps: List[_IOSDep], osv_client: Optional[OSVClient] = None) -> T
         "vulnerable_dependencies": len(vulnerable_names),
         "github_queries_made": gh_budget.queries_made,
         "github_rate_limited": gh_budget.exhausted,
+        "github_advisories_enabled": gh_enabled,
+        # No repo URL known: only a bare-name lookup ran, so these are unverified.
+        "dependencies_unmapped": unmapped,
     }
-    unresolved = getattr(client, "query_failures_no_cache", 0) - unresolved_before
-    stats["osv_dependencies_unresolved"] = unresolved
-    stats["osv_unreachable"] = unresolved > 0
+    stats.update(coverage_after(client, cov_before))
     return findings, rule_defs, stats
 
 

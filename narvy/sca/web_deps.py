@@ -8,11 +8,12 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .osv_client import OSVClient, get_default_client
+from .osv_client import MAX_DEPENDENCIES_PER_SCAN, OSVClient, coverage_after, coverage_before, get_default_client
 
 logger = logging.getLogger(__name__)
 
-_MAX_DETAIL_QUERIES = 400
+# Per-scan cap on unique dependencies queried (reported as partial when reached).
+_MAX_DETAIL_QUERIES = MAX_DEPENDENCIES_PER_SCAN
 
 SUPPORTED_ECOSYSTEMS_LABEL = "npm/PyPI/Packagist/Go/RubyGems/crates.io/Maven/NuGet"
 
@@ -1193,8 +1194,7 @@ def scan(source_dir: str, osv_client: OSVClient = None) -> Tuple[List[Dict[str, 
     if len(deduped) > _MAX_DETAIL_QUERIES:
         logger.warning(
             f"[SCA] {len(deduped)} unique dependencies detected - capping OSV "
-            f"queries at {_MAX_DETAIL_QUERIES} to stay considerate of the free "
-            f"public API."
+            f"queries at {_MAX_DETAIL_QUERIES} per scan."
         )
         stats["dependencies_capped"] = True
         deduped = deduped[:_MAX_DETAIL_QUERIES]
@@ -1209,7 +1209,7 @@ def scan(source_dir: str, osv_client: OSVClient = None) -> Tuple[List[Dict[str, 
     rule_defs: List[Dict[str, Any]] = []
     vulnerable_coords: Set[str] = set()
 
-    unresolved_before = getattr(client, "query_failures_no_cache", 0)
+    cov_before = coverage_before(client)
 
     for ecosystem, eco_deps in by_ecosystem.items():
         pkg_version_pairs = [(d.name, d.version) for d in eco_deps]
@@ -1231,7 +1231,5 @@ def scan(source_dir: str, osv_client: OSVClient = None) -> Tuple[List[Dict[str, 
                 vulnerable_coords.add(f"{dep.ecosystem}:{dep.name}")
 
     stats["vulnerable_dependencies"] = len(vulnerable_coords)
-    unresolved = getattr(client, "query_failures_no_cache", 0) - unresolved_before
-    stats["osv_dependencies_unresolved"] = unresolved
-    stats["osv_unreachable"] = unresolved > 0
+    stats.update(coverage_after(client, cov_before))
     return findings, rule_defs, stats

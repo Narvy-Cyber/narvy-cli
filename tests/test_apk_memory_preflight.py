@@ -1,4 +1,4 @@
-"""jadx memory preflight: DEX header reads, heap estimate, --force. Corpus tests skip if absent."""
+"""jadx heap sizing: DEX header reads, estimate, free memory per OS, retry. Corpus tests skip if absent."""
 import os
 import struct
 import subprocess
@@ -11,12 +11,17 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from narvy.apk_memory_preflight import (  # noqa: E402
+    MIN_HEAP_MB,
+    OS_HEADROOM_MB,
     DexStats,
     _is_app_dex,
     available_ram_mb,
     check_memory_preflight,
     estimate_heap_mb,
+    heap_that_fits_mb,
+    jvm_resident_mb,
     parse_mem_arg,
+    plan_heap,
     read_dex_stats,
 )
 from narvy import decompiler  # noqa: E402
@@ -87,79 +92,6 @@ def test_reader_is_cheap_on_the_largest_real_apk():
     assert elapsed < 2.0, f"header read took {elapsed:.2f}s, expected microseconds of IO"
 
 
-@pytest.mark.parametrize("name", sorted(PROVEN))
-def test_predictor_matches_real_outcome_at_4g(name):
-    """Block/allow at 4g matches measured outcomes."""
-    _, _, decompiled_ok = PROVEN[name]
-    # Pin available RAM high so this asserts the heap judgement only and does
-    # not flake on whatever else is running on the test machine.
-    v = check_memory_preflight(_apk(name), "4g", available_mb=64 * 1024)
-    assert v.should_block is (not decompiled_ok), (
-        f"{name}: predicted block={v.should_block} (est {v.estimated_mb} MB) "
-        f"but it actually {'succeeded' if decompiled_ok else 'ran out of memory'} at 4g"
-    )
-
-
-def test_gate_sits_inside_the_measured_uncertainty_interval():
-    """The 4g gate sits between the largest success and the smallest OOM."""
-    with tempfile.TemporaryDirectory() as d:
-        def blocked(classes):
-            p = _fake_apk(os.path.join(d, f"c{classes}.apk"),
-                          [("classes.dex", _fake_dex(classes * 5, classes))])
-            return check_memory_preflight(p, "4g", available_mb=64 * 1024).should_block
-        assert not blocked(70_221), "now blocking app sizes proven to work"
-        assert blocked(93_503), "now allowing app sizes proven to OOM"
-
-
-def test_known_good_apps_are_not_blocked_at_any_sane_max_mem():
-    """Raising --max-mem must never start blocking an app that works at 4g."""
-    for name in ("com.example.app_ok_small.apk", "com.example.app_ok_large.apk"):
-        for mem in ("4g", "6g", "8g", "16g"):
-            v = check_memory_preflight(_apk(name), mem, available_mb=64 * 1024)
-            assert not v.should_block, f"{name} blocked at --max-mem {mem}: {v.message}"
-
-
-def test_raising_max_mem_unblocks_a_blocked_app():
-    """Raising --max-mem unblocks the app (gate arithmetic only)."""
-    p = _apk("com.example.app_unknown_e.apk")
-    assert check_memory_preflight(p, "4g", available_mb=64 * 1024).should_block
-    assert not check_memory_preflight(p, "5g", available_mb=64 * 1024).should_block
-
-
-def test_suggested_max_mem_actually_fixes_a_proven_oom():
-    """An app that OOMs at 4g is refused with a 6g suggestion, which works."""
-    v = check_memory_preflight(_apk("com.example.app_oom_a.apk"), "4g", available_mb=64 * 1024)
-    assert v.should_block and v.reason == "heap_too_small"
-    assert "--max-mem 6g" in v.message
-    assert not check_memory_preflight(_apk("com.example.app_oom_a.apk"), "6g",
-                                      available_mb=64 * 1024).should_block
-
-
-def test_suggested_max_mem_is_above_the_estimate_not_a_round_guess():
-    """The suggestion comes from the estimate plus headroom."""
-    for name in ("com.example.app_unknown_e.apk", "com.example.app_xl.apk"):
-        v = check_memory_preflight(_apk(name), "4g", available_mb=64 * 1024)
-        # anchored on "re-run with", so it reads the suggestion and not the
-        # "--max-mem 4g" that the head sentence quotes back at the user
-        m = __import__("re").search(r"re-run with --max-mem (\d+)g", v.message)
-        assert m, v.message
-        suggested_mb = int(m.group(1)) * 1024
-        assert suggested_mb > v.estimated_mb, (
-            f"{name}: suggested {suggested_mb} MB is not above the {v.estimated_mb} MB estimate")
-
-
-OSS_CORPUS = "/path/to/narvy/test_corpus/android_apk"
-
-
-def test_no_false_blocks_on_the_open_source_corpus():
-    """No open-source corpus APK is blocked at the default 4g."""
-    apks = sorted(__import__("glob").glob(os.path.join(OSS_CORPUS, "*.apk")))
-    if len(apks) < 10:
-        pytest.skip(f"open-source APK corpus not present on this machine ({OSS_CORPUS})")
-    blocked = [os.path.basename(p) for p in apks
-               if check_memory_preflight(p, "4g", available_mb=64 * 1024).should_block]
-    assert blocked == [], f"false blocks on normal-sized apps: {blocked}"
-
 
 def test_preflight_cost_is_negligible_against_a_real_scan():
     """The preflight stays in the millisecond range."""
@@ -173,16 +105,6 @@ def test_preflight_cost_is_negligible_against_a_real_scan():
 
 
 # The same logic on crafted headers: runs everywhere, no corpus needed.
-
-def test_crafted_headers_block_and_allow_around_the_boundary():
-    with tempfile.TemporaryDirectory() as d:
-        small = _fake_apk(os.path.join(d, "small.apk"), [("classes.dex", _fake_dex(50_000, 6_000))])
-        huge = _fake_apk(os.path.join(d, "huge.apk"), [("classes.dex", _fake_dex(900_000, 200_000))])
-        assert not check_memory_preflight(small, "4g", available_mb=64 * 1024).should_block
-        v = check_memory_preflight(huge, "4g", available_mb=64 * 1024)
-        assert v.should_block and v.reason == "heap_too_small"
-        # and the advice scales with the app, not a hardcoded "try 8g"
-        assert "--max-mem 11g" in v.message
 
 
 def test_multidex_counts_are_summed():
@@ -204,75 +126,6 @@ def test_aab_dex_layout_is_counted_and_asset_dex_is_not():
         assert (s.methods, s.classes, s.dex_files) == (20_000, 3_000, 1)
 
 
-def test_ram_too_small_is_reported_separately_from_heap_too_small():
-    """Low RAM and low heap get different advice."""
-    with tempfile.TemporaryDirectory() as d:
-        p = _fake_apk(os.path.join(d, "s.apk"), [("classes.dex", _fake_dex(280_000, 40_000))])
-        v = check_memory_preflight(p, "16g", available_mb=4096)
-        assert v.should_block and v.reason == "ram_too_small"
-        assert "out-of-memory killer" in v.message
-        # must NOT tell the user to raise --max-mem in this branch
-        assert "--max-mem 17g" not in v.message
-        # ...and must not bolt a nonsensical "may not be enough" caveat onto a
-        # suggestion that is already above what this app needs
-        assert "may still not be enough" not in v.message
-
-        # the caveat DOES belong when the machine genuinely can't fit the app
-        big = _fake_apk(os.path.join(d, "b.apk"), [("classes.dex", _fake_dex(900_000, 200_000))])
-        v2 = check_memory_preflight(big, "16g", available_mb=4096)
-        assert v2.should_block and "may still not be enough" in v2.message
-
-
-def _insecurebank_like(d):
-    # Header counts of the APK the platform CI scans (48,172 methods, 6,529 classes, 6 MB DEX).
-    return _fake_apk(os.path.join(d, "ib.apk"),
-                     [("classes.dex", _fake_dex(48_172, 6_529, body_bytes=6_125_692 - 112))])
-
-
-def test_max_mem_that_does_not_fit_is_lowered_not_refused():
-    """A small app runs with a smaller heap instead of being refused.
-
-    Regression: the 7 GB macOS CI runner (3.2 to 4.4 GB available) refused a
-    6,500-class app at --max-mem 3g, and an 8 GB laptop refused every app at
-    the default 4g.
-    """
-    with tempfile.TemporaryDirectory() as d:
-        p = _insecurebank_like(d)
-        for mem, avail in (("3g", 3200), ("4g", 3200), ("4g", 4400), ("16g", 3200)):
-            v = check_memory_preflight(p, mem, available_mb=avail)
-            assert not v.should_block, f"--max-mem {mem} with {avail} MB free: {v.message}"
-            assert v.reason == "lowered" and v.lowered_max_mem
-            lowered = int(v.lowered_max_mem.rstrip("m"))
-            # the lowered heap fits in what is free and still covers the app with margin
-            assert lowered * 1.3 <= avail - 1024
-            assert lowered >= v.estimated_mb * 1.5
-            assert "instead of --max-mem " + mem in v.message
-        # --max-mem that fits is passed through untouched
-        v = check_memory_preflight(p, "2g", available_mb=64 * 1024)
-        assert not v.should_block and v.lowered_max_mem is None and v.reason == ""
-        # a machine that cannot hold even the lowered heap is still refused
-        v = check_memory_preflight(p, "4g", available_mb=1800)
-        assert v.should_block and v.reason == "ram_too_small"
-
-
-def test_decompile_uses_the_lowered_heap(monkeypatch):
-    """jadx gets the lowered -Xmx, and the note is left for the caller to print."""
-    seen = {}
-
-    def fake_run(cmd, **kwargs):
-        seen["opts"] = kwargs["env"].get("JADX_OPTS")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-    monkeypatch.setattr(decompiler.subprocess, "run", fake_run)
-    monkeypatch.setattr(decompiler, "resolve_jadx_binary", lambda: "/bin/true")
-    monkeypatch.setattr(decompiler, "resolve_java_home", lambda: None)
-    monkeypatch.setattr("narvy.apk_memory_preflight.available_ram_mb", lambda: 3200)
-    with tempfile.TemporaryDirectory() as d:
-        p = _insecurebank_like(d)
-        ok, _ = decompiler.decompile_apk(p, os.path.join(d, "out"), "4g")
-    assert ok
-    assert seen["opts"] == "-Xmx1536m"
-    assert decompiler.LAST_HEAP_NOTE and "1.5 GB Java heap" in decompiler.LAST_HEAP_NOTE
-
 
 def test_darwin_available_prefers_the_kernel_memorystatus_level():
     from narvy.apk_memory_preflight import _darwin_available_mb, _vm_stat_available_mb
@@ -291,24 +144,6 @@ def test_darwin_available_prefers_the_kernel_memorystatus_level():
     assert _darwin_available_mb(memsize=None, level=None, vm_stat_out=vm) is not None
     assert _vm_stat_available_mb("") is None
 
-
-def test_unreadable_dex_never_blocks():
-    """Unreadable headers never block a scan."""
-    with tempfile.TemporaryDirectory() as d:
-        p = os.path.join(d, "weird.apk")
-        with zipfile.ZipFile(p, "w") as zf:
-            zf.writestr("AndroidManifest.xml", b"\x03\x00\x08\x00")
-            zf.writestr("classes.dex", b"NOTADEX" + b"\x00" * 200)
-        s = read_dex_stats(p)
-        assert not s.ok
-        assert not check_memory_preflight(p, "1m", available_mb=1).should_block
-
-
-def test_unparseable_max_mem_never_blocks():
-    with tempfile.TemporaryDirectory() as d:
-        p = _fake_apk(os.path.join(d, "h.apk"), [("classes.dex", _fake_dex(900_000, 200_000))])
-        assert not check_memory_preflight(p, "lots", available_mb=64 * 1024).should_block
-        assert not check_memory_preflight(p, "", available_mb=64 * 1024).should_block
 
 
 def test_corrupt_header_counts_are_skipped_not_trusted():
@@ -350,119 +185,445 @@ def _plain(s):
     return re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", s).replace("\n", " ")
 
 
-def test_cli_blocks_huge_apk_fast_and_exits_nonzero():
-    """A too-large app fails in about a second with the real numbers."""
-    p = _apk("com.example.app_xl.apk")
-    r = subprocess.run([sys.executable, "-c",
-                        "import sys; from narvy.main import cli; sys.argv=['narvy','scan',%r]; cli()" % p],
-                       capture_output=True, text=True, timeout=60, env=_cli_env())
-    out = _plain(r.stdout + r.stderr)
-    assert r.returncode != 0
-    assert "This app is very large" in out
-    assert "2,246,022 methods" in out and "411,514 classes" in out
-    assert "--force" in out
+
+# --- heap sizing: never a refusal ---------------------------------------
+#
+# Measured on jadx 1.5.0 / OpenJDK 21 / 8 CPUs (peak RSS from wait4, 2026-09):
+#   app (classes, est.)        -Xmx   result             peak RSS
+#   InsecureBankv2 (6.5k, 512) 256m   OOM                   -
+#                              384m   ok                  626 MB
+#                              512m   ok                  713 MB
+#                              1g     ok                  985 MB
+#                              4g     ok                 1558 MB   (same output)
+#   K-9 Mail (20.7k, 1034)     1g     OOM                1307 MB
+#                              1536m  ok, 78 jadx errors 1824 MB
+#                              2g     ok, 34 jadx errors 2325 MB
+#   Telegram (37.7k, 1887)     2g     OOM                2427 MB
+#                              3g     ok                 3469 MB
+#                              4g     ok                 4431 MB
+MEASURED = {
+    # name: (methods, classes, dex_bytes, smallest heap that decompiled cleanly)
+    "InsecureBankv2": (48_172, 6_529, 6_125_692, 384),
+    "k9": (127_492, 20_684, 16 * 1024 * 1024, 2048),
+    "telegram": (231_677, 37_742, 34 * 1024 * 1024, 3072),
+}
 
 
-def test_cli_force_bypasses_the_preflight():
-    """--force skips the gate and jadx starts."""
-    p = _apk("com.example.app_xl.apk")
-    cmd = [sys.executable, "-c",
-           "import sys; from narvy.main import cli; "
-           "sys.argv=['narvy','scan',%r,'--force']; cli()" % p]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=45, env=_cli_env())
-    except subprocess.TimeoutExpired as e:
-        def _dec(b):
-            return b.decode(errors="replace") if isinstance(b, bytes) else (b or "")
-        out = _plain(_dec(e.stdout) + _dec(e.stderr))
-        assert "This app is very large" not in out, "--force did not bypass the pre-flight"
-        return
-    out = _plain(r.stdout + r.stderr)
-    assert "Decompiling it typically needs around" not in out, "--force did not bypass the pre-flight"
+def _stats(methods, classes, dex_bytes, dex_files=1):
+    return DexStats(methods, classes, dex_files, dex_bytes, ok=True)
 
 
-def test_force_flag_is_threaded_into_decompile_apk():
-    """--force reaches decompile_apk."""
-    import inspect
-    assert "force" in inspect.signature(decompiler.decompile_apk).parameters
-    from narvy import main as cli_main
-    assert "force" in inspect.signature(cli_main._run_local_scan).parameters
+def _friend_report_stats():
+    # The app from the Windows report: ~33,340 methods / ~6,282 classes, 1 DEX, 5 MB.
+    return _stats(33_340, 6_282, 5 * 1024 * 1024)
 
 
-# Post-mortem messages: a JVM OOM and a bare SIGKILL are not the same thing.
+def test_the_reported_windows_case_runs_instead_of_being_refused():
+    """1.1 GB free, a 6.3k-class app: 1.1.3-1.1.5 refused it; it needs ~0.4 GB of heap."""
+    plan = plan_heap("unused.apk", "4g", available_mb=1126, stats=_friend_report_stats())
+    assert plan.xmx_mb >= 384, plan          # the measured working heap of its size twin
+    assert jvm_resident_mb(plan.xmx_mb) + OS_HEADROOM_MB <= 1126
+    assert plan.fits and plan.warning == ""
+    # auto (the new default) picks the same heap
+    auto = plan_heap("unused.apk", None, available_mb=1126, stats=_friend_report_stats())
+    assert auto.xmx_mb == plan.xmx_mb
 
-def _failed_decompile_message(monkeypatch, returncode, output, apk):
-    """Run decompile_apk's failure branch with subprocess.run stubbed."""
+
+@pytest.mark.parametrize("avail", [300, 600, 900, 1126, 2048, 4096, 8192, 65536, None])
+@pytest.mark.parametrize("max_mem", ["auto", None, "1g", "4g", "16g", "512m"])
+def test_plan_never_refuses_and_stays_in_bounds(avail, max_mem):
+    for methods, classes, dex_bytes, _ in MEASURED.values():
+        plan = plan_heap("unused.apk", max_mem, available_mb=avail,
+                         stats=_stats(methods, classes, dex_bytes))
+        assert plan.xmx_mb >= MIN_HEAP_MB
+        req = parse_mem_arg(max_mem) if max_mem not in (None, "auto") else None
+        if req:
+            assert plan.xmx_mb <= req, "an explicit --max-mem is an upper limit"
+        if avail is not None and heap_that_fits_mb(avail) >= MIN_HEAP_MB:
+            assert plan.xmx_mb <= heap_that_fits_mb(avail), "heap must fit in free memory"
+        assert not hasattr(plan, "should_block")
+
+
+def test_plenty_of_memory_gives_a_margin_over_the_measured_need():
+    """With RAM to spare the heap covers what each measured app really needed."""
+    for name, (methods, classes, dex_bytes, needed) in MEASURED.items():
+        plan = plan_heap("unused.apk", None, available_mb=64 * 1024,
+                         stats=_stats(methods, classes, dex_bytes))
+        assert plan.xmx_mb >= needed, f"{name}: {plan.xmx_mb} MB < measured need {needed} MB"
+        assert plan.xmx_mb <= max(1024, plan.estimated_mb * 2), "no heap far beyond the need"
+
+
+def test_heap_is_not_inflated_to_max_mem_when_the_app_is_small():
+    """-Xmx4g on a 6.5k-class app peaked at 1.56 GB RSS vs 0.99 GB at 1g for the same output."""
+    plan = plan_heap("unused.apk", "4g", available_mb=64 * 1024, stats=_friend_report_stats())
+    assert plan.xmx_mb == 1024
+    assert "upper limit" in plan.note
+
+
+def test_estimate_above_free_memory_warns_and_uses_the_largest_heap_that_fits():
+    methods, classes, dex_bytes, _ = MEASURED["telegram"]
+    plan = plan_heap("unused.apk", None, available_mb=1500, stats=_stats(methods, classes, dex_bytes))
+    assert not plan.fits
+    assert plan.xmx_mb == (heap_that_fits_mb(1500) // 64) * 64
+    assert "Trying with that" in plan.warning and "1.5 GB" in plan.warning
+    assert "--force" not in plan.warning and "refus" not in plan.warning.lower()
+
+
+def test_explicit_max_mem_below_the_estimate_warns_but_runs_at_that_value():
+    methods, classes, dex_bytes, _ = MEASURED["telegram"]
+    plan = plan_heap("unused.apk", "1g", available_mb=64 * 1024, stats=_stats(methods, classes, dex_bytes))
+    assert plan.xmx_mb == 1024 and not plan.fits
+    assert "--max-mem 1g is below" in plan.warning
+
+
+def test_unknown_free_memory_caps_the_auto_heap():
+    plan = plan_heap("unused.apk", None, available_mb=None, stats=_stats(*MEASURED["telegram"][:3]))
+    assert plan.xmx_mb == 3774 // 64 * 64  # 2x estimate, under the 4 GB unknown-RAM cap
+    big = plan_heap("unused.apk", None, available_mb=None, stats=_stats(900_000, 200_000, 100 << 20))
+    assert big.xmx_mb == 4096
+
+
+def test_unreadable_dex_and_unparseable_max_mem_still_run():
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "weird.apk")
+        with zipfile.ZipFile(p, "w") as zf:
+            zf.writestr("AndroidManifest.xml", b"\x03\x00\x08\x00")
+            zf.writestr("classes.dex", b"NOTADEX" + b"\x00" * 200)
+        assert not read_dex_stats(p).ok
+        plan = plan_heap(p, "1m", available_mb=1)
+        assert plan.xmx_mb >= 1 and plan.warning == ""
+        plan = plan_heap(p, "lots", available_mb=64 * 1024)
+        assert plan.xmx_mb >= MIN_HEAP_MB
+
+
+def test_split_bundle_feature_modules_are_counted():
+    """jadx decompiles base + feature APKs together, so the estimate must too."""
+    with tempfile.TemporaryDirectory() as d:
+        base = _fake_apk(os.path.join(d, "base.apk"), [("classes.dex", _fake_dex(200_000, 30_000))])
+        feat = _fake_apk(os.path.join(d, "feature.apk"), [("classes.dex", _fake_dex(200_000, 30_000))])
+        alone = plan_heap([base], None, available_mb=64 * 1024)
+        both = plan_heap([base, feat], None, available_mb=64 * 1024)
+        assert both.stats.classes == 60_000
+        assert both.estimated_mb >= 2 * alone.estimated_mb - 1
+
+
+# --- free memory per platform ------------------------------------------
+
+def test_windows_uses_avail_phys_bounded_by_available_commit():
+    from narvy.apk_memory_preflight import _MemStatusEx, _windows_available_mb
+    st = _MemStatusEx()
+    st.ullAvailPhys = 1126 * 1024 * 1024
+    st.ullAvailPageFile = 6 * 1024 * 1024 * 1024
+    assert _windows_available_mb(st) == 1126
+    st.ullAvailPageFile = 700 * 1024 * 1024  # commit charge nearly full
+    assert _windows_available_mb(st) == 700
+    st.ullAvailPhys = 0
+    assert _windows_available_mb(st) is None
+
+
+def test_available_ram_dispatches_to_windows(monkeypatch):
+    from narvy import apk_memory_preflight as m
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(m, "_windows_available_mb", lambda: 1126)
+    assert m.available_ram_mb() == 1126
+
+
+def test_linux_takes_the_tighter_of_meminfo_and_the_cgroup_limit(monkeypatch):
+    from narvy import apk_memory_preflight as m
+    monkeypatch.setattr(m.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(m, "_linux_meminfo_available_mb", lambda: 60_000)
+    monkeypatch.setattr(m, "_cgroup_available_mb", lambda: 1800)
+    assert m.available_ram_mb() == 1800
+    monkeypatch.setattr(m, "_cgroup_available_mb", lambda: None)
+    assert m.available_ram_mb() == 60_000
+
+
+def test_meminfo_parse():
+    from narvy.apk_memory_preflight import _linux_meminfo_available_mb
+    txt = "MemTotal:       32083908 kB\nMemFree:  100 kB\nMemAvailable:   22363448 kB\n"
+    assert _linux_meminfo_available_mb(txt) == 22363448 // 1024
+    assert _linux_meminfo_available_mb("MemTotal: 1 kB\n") is None
+
+
+def _write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def test_cgroup_v2_limit_with_reclaimable_cache_and_ancestors(tmp_path):
+    from narvy.apk_memory_preflight import _cgroup_available_mb
+    root = str(tmp_path)
+    mib = 1024 * 1024
+    # the scan's own scope: 2 GiB limit, 1.5 GiB used of which 512 MiB is cache
+    _write(os.path.join(root, "a", "b", "memory.max"), str(2048 * mib))
+    _write(os.path.join(root, "a", "b", "memory.current"), str(1536 * mib))
+    _write(os.path.join(root, "a", "b", "memory.stat"), f"anon 1\ninactive_file {512 * mib}\n")
+    _write(os.path.join(root, "a", "memory.max"), "max")
+    assert _cgroup_available_mb(root, "0::/a/b\n") == 1024
+    # a tighter ancestor wins
+    _write(os.path.join(root, "a", "memory.max"), str(1024 * mib))
+    _write(os.path.join(root, "a", "memory.current"), str(900 * mib))
+    assert _cgroup_available_mb(root, "0::/a/b\n") == 124
+    # no limit anywhere: None (use MemAvailable)
+    assert _cgroup_available_mb(str(tmp_path / "empty"), "0::/\n") is None
+
+
+def test_cgroup_v2_container_root(tmp_path):
+    from narvy.apk_memory_preflight import _cgroup_available_mb
+    mib = 1024 * 1024
+    _write(str(tmp_path / "memory.max"), str(2048 * mib))
+    _write(str(tmp_path / "memory.current"), str(300 * mib))
+    assert _cgroup_available_mb(str(tmp_path), "0::/\n") == 1748
+
+
+def test_cgroup_v1_limit(tmp_path):
+    from narvy.apk_memory_preflight import _cgroup_available_mb
+    mib = 1024 * 1024
+    d = tmp_path / "memory" / "docker" / "abc"
+    _write(str(d / "memory.limit_in_bytes"), str(1024 * mib))
+    _write(str(d / "memory.usage_in_bytes"), str(800 * mib))
+    _write(str(d / "memory.stat"), f"total_inactive_file {100 * mib}\n")
+    assert _cgroup_available_mb(str(tmp_path), "4:memory:/docker/abc\n") == 324
+    _write(str(d / "memory.limit_in_bytes"), str(9223372036854771712))
+    assert _cgroup_available_mb(str(tmp_path), "4:memory:/docker/abc\n") is None
+
+
+# --- decompile: sizing, retry, honest failure ----------------------------
+
+class _Proc:
+    def __init__(self, rc=0, out="", err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+def _run_decompile(monkeypatch, outcomes, max_mem=None, force=False, avail=1126,
+                   stats=None, write_sources=True):
+    """Drive decompile_apk with a scripted sequence of jadx outcomes."""
+    calls = []
+    notes = []
+    seq = list(outcomes)
+
     def fake_run(cmd, **kwargs):
-        raise subprocess.CalledProcessError(returncode, cmd, output=output, stderr="")
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(decompiler.subprocess, "run", fake_run, raising=False)
-    monkeypatch.setattr(decompiler, "resolve_jadx_binary", lambda: "/bin/true")
+        calls.append({"cmd": cmd, "opts": kwargs["env"].get("JADX_OPTS"), "kw": kwargs})
+        rc, out = seq.pop(0)
+        outdir = cmd[cmd.index("--output-dir") + 1]
+        if write_sources and rc == 0:
+            os.makedirs(os.path.join(outdir, "sources", "a"), exist_ok=True)
+            with open(os.path.join(outdir, "sources", "a", "A.java"), "w") as f:
+                f.write("class A {}")
+        return _Proc(rc, out, "")
+    monkeypatch.setattr(decompiler.subprocess, "run", fake_run)
+    monkeypatch.setattr(decompiler, "resolve_jadx_binary", lambda: "/fake/jadx")
     monkeypatch.setattr(decompiler, "resolve_java_home", lambda: None)
-    with tempfile.TemporaryDirectory() as out:
-        ok, detail = decompiler.decompile_apk(apk, os.path.join(out, "d"), "4g", force=True)
+    monkeypatch.setattr("narvy.apk_memory_preflight.available_ram_mb", lambda: avail)
+    monkeypatch.setattr(decompiler, "available_ram_mb", lambda: avail)
+    with tempfile.TemporaryDirectory() as d:
+        s = stats or _friend_report_stats()
+        p = _fake_apk(os.path.join(d, "app.apk"), [("classes.dex", _fake_dex(s.methods, s.classes))])
+        ok, detail = decompiler.decompile_apk(p, os.path.join(d, "out"), max_mem, force=force,
+                                              notify=lambda lvl, t: notes.append((lvl, t)))
+    return ok, detail, calls, notes
+
+
+def test_reported_case_decompiles_with_a_heap_that_fits(monkeypatch):
+    ok, detail, calls, notes = _run_decompile(monkeypatch, [(0, "INFO - done")], max_mem="4g")
+    assert ok, detail
+    assert len(calls) == 1
+    assert "-Xmx704m" in calls[0]["opts"] and "-Xms256m" in calls[0]["opts"]
+    assert "-XX:+ExitOnOutOfMemoryError" in calls[0]["opts"]
+    assert not [n for n in notes if n[0] == "warning"]
+    assert "JADX heap 704 MB" in decompiler.LAST_HEAP_NOTE
+
+
+def test_no_address_space_limit_is_put_on_the_jvm(monkeypatch):
+    """RLIMIT_AS 2x heap + 3 GB made a 384m JVM fail to start its threads and exit 0 with no output."""
+    ok, _, calls, _ = _run_decompile(monkeypatch, [(0, "")])
+    assert ok and "preexec_fn" not in calls[0]["kw"]
+    assert not hasattr(decompiler, "_as_limit_preexec")
+
+
+def test_heap_oom_retries_once_bigger_when_memory_allows(monkeypatch):
+    st = _stats(*MEASURED["k9"][:3])
+    ok, detail, calls, notes = _run_decompile(
+        monkeypatch,
+        [(3, "Terminating due to java.lang.OutOfMemoryError: Java heap space"), (0, "INFO - done")],
+        avail=64 * 1024, stats=st, max_mem="8g")
+    assert ok, detail
+    assert len(calls) == 2
+    first = int(calls[0]["opts"].split("-Xmx")[1].split("m")[0])
+    second = int(calls[1]["opts"].split("-Xmx")[1].split("m")[0])
+    assert second >= first * 1.25 and second <= 8192
+    assert any("retrying once" in t for _, t in notes)
+    assert "succeeded on retry" in decompiler.LAST_HEAP_NOTE
+
+
+def test_heap_oom_with_no_room_for_a_bigger_heap_fails_clearly_without_a_futile_retry(monkeypatch):
+    oom = (3, "Terminating due to java.lang.OutOfMemoryError: Java heap space")
+    ok, detail, calls, _ = _run_decompile(monkeypatch, [oom], avail=1126)
+    assert not ok and len(calls) == 1
+    assert "ran out of Java heap" in detail and "Tried: 704 MB heap." in detail
+    assert "--force" not in detail and "--upload`" not in detail
+    assert "close other apps" in detail
+
+
+def test_os_refusing_memory_retries_smaller(monkeypatch):
+    native = (1, "There is insufficient memory for the Java Runtime Environment to continue.\n"
+                 "Native memory allocation (mmap) failed to map 268435456 bytes")
+    ok, detail, calls, _ = _run_decompile(monkeypatch, [native, (0, "")], avail=4096,
+                                          stats=_stats(*MEASURED["k9"][:3]))
+    assert ok, detail
+    first = int(calls[0]["opts"].split("-Xmx")[1].split("m")[0])
+    second = int(calls[1]["opts"].split("-Xmx")[1].split("m")[0])
+    assert second < first and second >= MIN_HEAP_MB
+
+
+def test_sigkill_is_not_stated_as_a_java_heap_error(monkeypatch):
+    ok, detail, calls, _ = _run_decompile(monkeypatch, [(-9, "INFO - progress: 5 of 9"),
+                                                        (-9, "INFO - progress: 5 of 9")], avail=4096)
+    assert not ok and len(calls) == 2
+    assert calls[1]["cmd"][calls[1]["cmd"].index("-j") + 1] == "1"
+    assert "SIGKILL" in detail and "cgroup" in detail
+    assert "ran out of Java heap" not in detail
+
+
+def test_force_runs_exactly_max_mem_without_retry(monkeypatch):
+    oom = (3, "java.lang.OutOfMemoryError: Java heap space")
+    ok, detail, calls, notes = _run_decompile(monkeypatch, [oom], max_mem="3g", force=True, avail=1126)
+    assert not ok and len(calls) == 1
+    assert "-Xmx3072m" in calls[0]["opts"]
+    assert not notes
+
+
+def test_exit_zero_without_sources_is_a_failure_not_a_clean_scan(monkeypatch):
+    """jadx exited 0 with 0 files when its threads could not start (seen under RLIMIT_AS)."""
+    ok, detail, calls, _ = _run_decompile(
+        monkeypatch, [(0, "Exception in thread \"pool-1-thread-1\" java.lang.OutOfMemoryError: "
+                          "unable to create native thread")] * 2, write_sources=False)
     assert not ok
-    return detail
+    ok, detail, calls, _ = _run_decompile(monkeypatch, [(0, "INFO - done")], write_sources=False)
+    assert not ok and "wrote no Java sources" in detail
 
 
-def test_jvm_oom_message_names_a_concrete_max_mem(monkeypatch):
-    detail = _failed_decompile_message(
-        monkeypatch, 1, "java.lang.OutOfMemoryError: Java heap space",
-        _apk("com.example.app_oom_a.apk"))
-    assert "ran out of memory" in detail
-    assert "479,318 methods" in detail
-    assert "--max-mem" in detail
-    assert "SIGKILL" not in detail
+def test_oom_text_on_exit_zero_is_not_trusted(monkeypatch):
+    ok, detail, calls, _ = _run_decompile(
+        monkeypatch, [(0, "java.lang.OutOfMemoryError: Java heap space"), (0, "INFO - done")],
+        avail=64 * 1024)
+    assert ok and len(calls) == 2
 
 
-def test_sigkill_message_does_not_claim_it_was_memory(monkeypatch):
-    """A SIGKILL message lists likely causes instead of blaming memory."""
-    detail = _failed_decompile_message(
-        monkeypatch, -9, "INFO - progress: 53529 of 65767 (81%)",
-        _apk("com.example.app_unknown_e.apk"))
-    assert "SIGKILL" in detail
-    assert "container" in detail and "cgroup" in detail
-    assert "If it was memory" in detail
-    # must not state memory as fact
-    assert "JADX ran out of memory decompiling this app" not in detail
+def test_jadx_method_errors_are_reported_not_hidden(monkeypatch):
+    ok, _, _, _ = _run_decompile(monkeypatch, [(0, "ERROR - finished with errors, count: 78")])
+    assert ok
+    assert "could not fully decompile 78 method(s)" in decompiler.LAST_HEAP_NOTE
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX-only backstop")
-def test_as_limit_preexec_is_generous_enough_for_a_jvm_to_start():
-    """The address-space limit for 4g is high enough for the JVM to start."""
-    import resource
-    fn = decompiler._as_limit_preexec(4096)
-    assert fn is not None
-    pid = os.fork()
-    if pid == 0:  # child: apply and report back through the exit code
-        try:
-            fn()
-            soft, _ = resource.getrlimit(resource.RLIMIT_AS)
-            os._exit(0 if soft >= 7168 * 1024 * 1024 else 1)
-        except Exception:
-            os._exit(2)
-    _, status = os.waitpid(pid, 0)
-    assert os.WEXITSTATUS(status) == 0
+def test_failure_message_escapes_nothing_it_should_not(monkeypatch):
+    """Raw jadx output reaches the console through rich_escape (main), never as markup."""
+    import inspect
+    from narvy import main as cli_main
+    src = inspect.getsource(cli_main._run_local_scan)
+    assert "rich_escape(decompile_error)" in src
 
 
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX-only backstop")
-def test_as_limit_never_raises_an_existing_tighter_limit():
-    """Never raise an existing, tighter RLIMIT_AS."""
-    import resource
-    fn = decompiler._as_limit_preexec(4096)
-    tight = 2 * 1024 * 1024 * 1024
-    pid = os.fork()
-    if pid == 0:
-        try:
-            resource.setrlimit(resource.RLIMIT_AS, (tight, tight))
-            fn()
-            soft, _ = resource.getrlimit(resource.RLIMIT_AS)
-            os._exit(0 if soft <= tight else 1)
-        except Exception:
-            os._exit(2)
-    _, status = os.waitpid(pid, 0)
-    assert os.WEXITSTATUS(status) == 0
+def test_windows_bat_command_line_keeps_the_thread_flag(monkeypatch):
+    monkeypatch.setattr(decompiler, "_IS_WINDOWS", True)
+    cmd = decompiler._jadx_cmd(r"C:\Users\Jean Dupont\.narvy\tools\jadx-1.5.0\bin\jadx.bat",
+                               ["--output-dir", r"C:\Temp\x y", "--show-bad-code", "-j", "1",
+                                r"D:\Apps\été\my app.apk"])
+    assert isinstance(cmd, str) and cmd.startswith('cmd /d /s /c "')
+    assert ' -j 1 ' in cmd and '"D:\\Apps\\été\\my app.apk"' in cmd
 
 
-def test_no_preexec_on_windows_path():
-    assert decompiler._as_limit_preexec(None) is None
+def test_cli_accepts_auto_and_rejects_garbage():
+    from narvy import main as cli_main
+    assert cli_main.is_auto_mem("auto") and cli_main.is_auto_mem(None)
+    assert not cli_main.is_auto_mem("4g")
+    r = subprocess.run([sys.executable, "-m", "narvy", "scan", "--help"], capture_output=True,
+                       text=True, env=_cli_env(), timeout=60)
+    assert "Default 'auto'" in _plain(r.stdout)
+
+
+def test_doctor_memory_line_uses_the_same_model():
+    from narvy import doctor
+    from narvy import apk_memory_preflight as m
+    orig = m.available_ram_mb
+    try:
+        m.available_ram_mb = lambda: 1126
+        ok, detail, hint = doctor._check_memory()
+    finally:
+        m.available_ram_mb = orig
+    assert ok and "1.1 GB available" in detail and "--upload`" not in (hint or "")
+
+
+MEASURED_OOM_HEAPS = {"InsecureBankv2": 256, "k9": 1024, "telegram": 2048}
+
+
+def test_every_measured_oom_heap_would_have_been_warned_about():
+    """A heap jadx really ran out of memory at is always below the warning threshold."""
+    from narvy.apk_memory_preflight import needed_heap_mb
+    for name, oom_heap in MEASURED_OOM_HEAPS.items():
+        methods, classes, dex_bytes, _ = MEASURED[name]
+        assert needed_heap_mb(_stats(methods, classes, dex_bytes)) > oom_heap, name
+        # and a machine whose free memory only fits that heap gets the warning
+        avail = jvm_resident_mb(oom_heap) + OS_HEADROOM_MB
+        plan = plan_heap("unused.apk", None, available_mb=avail, stats=_stats(methods, classes, dex_bytes))
+        assert plan.warning and not plan.fits, name
+
+
+def test_ci_hook_pretends_free_memory(monkeypatch):
+    from narvy import apk_memory_preflight as m
+    monkeypatch.setenv("NARVY_ASSUME_AVAILABLE_MB", "1126")
+    assert m.available_ram_mb() == 1126
+    monkeypatch.setenv("NARVY_ASSUME_AVAILABLE_MB", "nonsense")
+    assert m.available_ram_mb() != "nonsense"
+
+
+def test_sca_line_does_not_say_zero_cves_when_the_lookup_failed():
+    from narvy import main as cli_main
+    ok = cli_main._sca_result_line({"unique_dependencies_checked": 5, "cves_found": 0,
+                                    "vulnerable_dependencies": 0})
+    assert "found 0 known CVE(s)" in ok
+    bad = cli_main._sca_result_line({"unique_dependencies_checked": 5, "cves_found": 0,
+                                     "vulnerable_dependencies": 0, "osv_unreachable": True},
+                                    "embedded framework(s)")
+    assert "0 known CVE" not in bad and "UNKNOWN" in bad and "5 unique embedded framework(s)" in bad
+
+
+def test_reported_113_windows_case_end_to_end_through_the_windows_memory_reading(monkeypatch):
+    """The reported case, on 1.1.3: Windows, 1.1 GB available, estimate 512 MB, default --max-mem 4g.
+
+    1.1.3 read the memory correctly (GlobalMemoryStatusEx.ullAvailPhys is Task
+    Manager's "Available", standby cache included, not "Free"), then refused:
+    room = 1126 - 1024 (fixed reserve) = 102 MB, / 1.3 overhead -> 0 MB of
+    heap < 1.5 x 512 required. Here the same reading must yield a run.
+    """
+    from narvy import apk_memory_preflight as m
+    st = m._MemStatusEx()
+    st.ullAvailPhys = 1126 * 1024 * 1024        # what 1.1.3 showed as "1.1 GB available"
+    st.ullAvailPageFile = 5 * 1024 * 1024 * 1024
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    real = m._windows_available_mb
+    # GlobalMemoryStatusEx itself only exists on Windows: feed the real parser the struct.
+    monkeypatch.setattr(m, "_windows_available_mb", lambda: real(st))
+    monkeypatch.delenv("NARVY_ASSUME_AVAILABLE_MB", raising=False)
+    assert m._windows_available_mb() == 1126
+    stats = _friend_report_stats()
+    assert estimate_heap_mb(stats) == 512           # "about 512 MB of heap" in the report
+    # the 1.1.3 arithmetic, kept here to show why it refused
+    old_room = 1126 - 1024
+    old_fit = (max(0, int(old_room / 1.30)) // 256) * 256
+    assert old_fit < max(512, 512 * 1.5)
+    # the new design, default --max-mem as 1.1.3 had it ("4g") and as it is now ("auto")
+    for max_mem in ("4g", "auto"):
+        plan = plan_heap("unused.apk", max_mem, stats=stats)   # measures through available_ram_mb()
+        assert plan.available_mb == 1126
+        assert plan.xmx_mb >= 384 and jvm_resident_mb(plan.xmx_mb) <= 1126 - OS_HEADROOM_MB
+        assert plan.fits and not plan.warning
+
+
+def test_windows_reading_is_available_not_free():
+    """ullAvailPhys is the right field; there is no 'free-only' field in MEMORYSTATUSEX to confuse it with."""
+    from narvy.apk_memory_preflight import _MemStatusEx
+    names = [f[0] for f in _MemStatusEx._fields_]
+    assert names == ["dwLength", "dwMemoryLoad", "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile",
+                     "ullAvailPageFile", "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual"]

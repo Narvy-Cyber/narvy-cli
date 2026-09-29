@@ -22,6 +22,7 @@ try:
 except ImportError:
     ICDUMP_AVAILABLE = False
 
+from .. import secret_value_grade
 from .third_party_filter import (
     classify_ios_framework,
     check_ios_override,
@@ -600,11 +601,15 @@ def _check_sensitive_strings(strings_list: List[str], file_path: str,
                 seen_cred = True
                 kw_match = _CRED_KEYWORD_RE.search(line)
                 kw = kw_match.group(1) if kw_match else "credential"
-                findings.append(_finding(
+                graded = secret_value_grade.apply(_finding(
                     "IOS-BIN-SENSITIVE-001", file_path,
                     description=f"Hardcoded credential-like assignment found in binary "
                                 f"strings: {line.strip()[:120]!r}.",
-                    location_symbol=f"string constant (matched keyword: {kw})"))
+                    location_symbol=f"string constant (matched keyword: {kw})"), val)
+                if graded is None:
+                    seen_cred = False
+                else:
+                    findings.append(graded)
         if not seen_sql and _sql_built_by_string_formatting(line):
             seen_sql = True
             findings.append(_finding(

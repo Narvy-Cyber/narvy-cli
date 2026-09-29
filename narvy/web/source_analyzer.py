@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import yaml
 
 from narvy import own_reports, semgrep_engine
+from narvy.pathnorm import canonical_path
 from narvy.proc import run_tree
 
 _HERE = os.path.dirname(__file__)
@@ -1150,8 +1151,10 @@ def analyze_source(source_dir: str) -> Dict[str, Any]:
             "findings": [], "rule_defs": [], "notes": [], **empty_stats,
         }
 
+    source_dir = canonical_path(source_dir)
     notes: List[str] = []
     all_findings: List[Dict[str, Any]] = []
+    rules_run: Dict[str, int] = {}
 
     ported_stacks, unported_stacks = detect_web_stacks(source_dir)
 
@@ -1185,6 +1188,8 @@ def analyze_source(source_dir: str) -> Dict[str, Any]:
 
         if semgrep_engine.is_available():
             findings = _run_web_semgrep(source_dir, configs)
+            if semgrep_engine.LAST_RUN.get("status") == "ok":
+                rules_run["structural"] = len(rule_defs)
             if findings:
                 all_findings.extend(findings)
                 known_rule_ids = {d["id"] for d in rule_defs}
@@ -1230,6 +1235,7 @@ def analyze_source(source_dir: str) -> Dict[str, Any]:
         "error": None,
         "findings": all_findings,
         "rule_defs": rule_defs,
+        "rules_run": rules_run,
         "stacks_detected": sorted(ported_stacks),
         "stacks_unsupported": sorted(unported_stacks),
         "files_scanned": files_scanned,

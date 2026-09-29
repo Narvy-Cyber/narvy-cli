@@ -85,10 +85,11 @@ def test_prefkey_echo_and_typename_dropped_real_secret_kept():
         # Function-call RHS (no string literal) must not read as a hardcoded key.
         assert not _by_file(findings, "PirateWeatherService.kt")
 
-        # The real embedded secret still fires at CRITICAL.
+        # The real embedded secret is kept. Only its name marks it as a secret
+        # (the value is no provider format / key material), so it is MEDIUM.
         real = _by_file(findings, "Retrofit.kt")
         assert real, "protected true positive HARDCODED_PASSWORD was lost"
-        assert any(f["severity"] == "CRITICAL" for f in real)
+        assert all(f["severity"] == "MEDIUM" for f in real)
 
         # Genuine provider secrets still fire at CRITICAL.
         secrets = _by_file(findings, "Secrets.kt")

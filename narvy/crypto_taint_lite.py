@@ -40,6 +40,8 @@ _RULE_INFO = {
     },
 }
 
+RULE_IDS = tuple(sorted(info["rule_id"] for info in _RULE_INFO.values()))
+
 
 def check_file(content: str) -> List[Dict[str, Any]]:
     literal_vars = set()

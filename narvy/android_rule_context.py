@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Optional
 
+from . import secret_value_grade
+
 # PendingIntent flags; jadx emits these as decimals (67108864 / 33554432).
 _FLAG_IMMUTABLE = 0x04000000
 _FLAG_MUTABLE = 0x02000000
@@ -176,11 +178,28 @@ def _google_api_key_gate(content: str, match: "re.Match",
     return out
 
 
+_UNQUOTED_VALUE_RE = re.compile(r"[:=][\s\"']*([^\s\"',;<>)]+)")
+
+
+def _name_only_secret_gate(content: str, match: "re.Match",
+                           finding: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Name-matched secret rules: grade the assigned value (see secret_value_grade)."""
+    line_end = content.find("\n", match.start())
+    text = content[match.start():line_end if line_end != -1 else len(content)]
+    value = secret_value_grade.literal_from_text(text)
+    if value is None:
+        m = _UNQUOTED_VALUE_RE.search(match.group(0))
+        value = m.group(1) if m else None
+    return secret_value_grade.apply(dict(finding), value)
+
+
 RULE_GATES = {
     "AND-CONF-009": _pending_intent_gate,
     "AND-CONF-004": _exported_component_gate,
     "AND-S-005": _google_api_key_gate,
 }
+for _rid in ("AND-S-001", "AND-S-002", "AND-S-010", "IOS-OBJC-S-001", "IOS-OBJC-S-002"):
+    RULE_GATES[_rid] = _name_only_secret_gate
 
 
 def apply_gate(rule_id: str, content: str, match: "re.Match",

@@ -1,14 +1,30 @@
-"""Estimate the jadx heap from DEX header counts and warn before an OOM. `--force` skips it."""
+"""Size the jadx Java heap from the app's DEX header counts and the memory free right now.
+
+A scan is never refused on memory grounds. The heap is
+
+    min(--max-mem if given, what fits in free memory, a generous margin over the estimate)
+
+and when even the estimate does not fit, jadx still runs with the largest heap
+that does, with a warning. decompiler.decompile_apk retries once when jadx
+really runs out of memory, then fails with the numbers.
+
+Calibration (jadx 1.5.0, OpenJDK 17/21, G1, 8 CPUs; peak RSS from wait4):
+  - the JVM's resident memory above -Xmx is ~250 MB plus ~5% of the heap
+    (metaspace, code cache, GC tables, thread stacks), not a 30% multiplier;
+  - -Xmx is a ceiling G1 grows into: a 6.5k-class app peaks at 0.7 GB RSS
+    with -Xmx512m and at 1.5 GB with -Xmx4g, for the same output. Capping
+    the heap near the need is what keeps a laptop out of swap;
+  - see tests/test_apk_memory_preflight.py for the measured table.
+"""
 
 import ctypes
 import logging
-import math
 import os
 import platform
 import re
 import struct
 import zipfile
-from typing import NamedTuple, Optional
+from typing import Iterable, NamedTuple, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 
@@ -19,17 +35,22 @@ HEAP_MB_PER_DEX_MB = 45.0
 
 MIN_ESTIMATE_MB = 512
 
-# JVM resident set = heap plus metaspace, stacks, GC, JIT cache, mapped DEX.
-JVM_RSS_OVERHEAD = 1.30
+# Resident memory the JVM uses on top of the heap at peak: a fixed part plus a
+# small share of the heap (GC tables). Measured +200..+400 MB from -Xmx384m to -Xmx4g.
+JVM_NONHEAP_FIXED_MB = 256
+JVM_NONHEAP_PER_HEAP = 0.05
+# Left free for the OS and whatever else is open. "Available" already counts
+# reclaimable cache (Linux MemAvailable, Windows standby list, macOS compressor).
+OS_HEADROOM_MB = 128
 
-RAM_SAFETY_RESERVE_MB = 1024
-
-# When --max-mem does not fit in free RAM but a smaller heap still leaves this
-# much headroom over the estimate, jadx runs with that smaller -Xmx instead of
-# the scan being refused. -Xmx bounds the JVM, so the smaller heap is what keeps
-# memory in check. Measured: four real apps (6.5k to 60k classes) decompiled
-# fully at 1.5x the estimate, peak RSS about 1.2x that heap.
-AUTO_LOWER_MARGIN = 1.5
+# Smallest heap worth starting jadx with (its launcher's own -Xms is 256M).
+MIN_HEAP_MB = 256
+# With free memory to spare, the heap is this multiple of the estimate (at least
+# DEFAULT_MIN_HEAP_MB). More than that buys nothing but a bigger resident set.
+HEAP_MARGIN = 2.0
+DEFAULT_MIN_HEAP_MB = 1024
+# Heap used when the free memory cannot be read and no --max-mem was given.
+UNKNOWN_RAM_CAP_MB = 4096
 
 
 class DexStats(NamedTuple):
@@ -40,16 +61,20 @@ class DexStats(NamedTuple):
     ok: bool  # False => header read failed, callers must not gate on this
 
 
-class PreflightVerdict(NamedTuple):
-    should_block: bool
-    reason: str          # "" | "heap_too_small" | "ram_too_small"
-    message: str
-    estimated_mb: int
-    max_mem_mb: int
-    available_mb: Optional[int]
+class HeapPlan(NamedTuple):
+    xmx_mb: int                  # -Xmx for the first jadx run
+    estimated_mb: int            # estimate_heap_mb(): the app's size in heap terms (0 = unknown)
+    available_mb: Optional[int]  # free memory right now (None = unknown)
+    requested_mb: Optional[int]  # --max-mem as a cap, None when sized automatically
+    fit_mb: Optional[int]        # largest heap that fits in free memory (None = unknown)
     stats: DexStats
-    # -Xmx value to run jadx with when it differs from --max-mem, else None.
-    lowered_max_mem: Optional[str] = None
+    fits: bool                   # False when the estimate is above the heap used
+    note: str                    # informational line ("" when nothing to say)
+    warning: str                 # shown before jadx starts when the estimate does not fit
+
+    @property
+    def xmx(self) -> str:
+        return f"{self.xmx_mb}m"
 
 
 def parse_mem_arg(value: str) -> Optional[int]:
@@ -70,34 +95,135 @@ def parse_mem_arg(value: str) -> Optional[int]:
     return max(1, n // (1024 * 1024))  # bare number = bytes, per java -Xmx
 
 
+def is_auto(value) -> bool:
+    return value is None or str(value).strip().lower() in ("", "auto")
+
+
+# --- free memory ----------------------------------------------------------
+
+def _linux_meminfo_available_mb(text: Optional[str] = None) -> Optional[int]:
+    if text is None:
+        try:
+            with open("/proc/meminfo", "r") as f:
+                text = f.read()
+        except OSError:
+            return None
+    m = re.search(r"^MemAvailable:\s+(\d+)\s*kB", text, re.M)
+    return int(m.group(1)) // 1024 if m else None
+
+
+def _read(path: str) -> Optional[str]:
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _cgroup_available_mb(root: str = "/sys/fs/cgroup",
+                         proc_cgroup: Optional[str] = None) -> Optional[int]:
+    """Memory left under this process's cgroup limit (Docker --memory, CI caps,
+    systemd MemoryMax), or None when there is no limit.
+
+    /proc/meminfo shows the whole host inside a container, so a 2 GB container
+    on a 64 GB host would otherwise size the heap for 60 GB and be OOM-killed.
+    Reclaimable page cache (inactive_file) is counted as free, like MemAvailable.
+    """
+    if proc_cgroup is None:
+        proc_cgroup = _read("/proc/self/cgroup") or ""
+    best = None
+    # cgroup v2: "0::/path". Every ancestor's limit applies too.
+    m = re.search(r"^0::(\S*)", proc_cgroup, re.M)
+    if m:
+        rel = m.group(1).strip("/")
+        parts = rel.split("/") if rel else []
+        for depth in range(len(parts), -1, -1):
+            d = os.path.join(root, *parts[:depth]) if depth else root
+            limit = _read(os.path.join(d, "memory.max"))
+            if not limit or limit == "max" or not limit.isdigit():
+                continue
+            current = _read(os.path.join(d, "memory.current"))
+            if not current or not current.isdigit():
+                continue
+            stat = _read(os.path.join(d, "memory.stat")) or ""
+            im = re.search(r"^inactive_file (\d+)", stat, re.M)
+            reclaimable = int(im.group(1)) if im else 0
+            free = int(limit) - int(current) + reclaimable
+            free_mb = max(0, min(free, int(limit)) // (1024 * 1024))
+            best = free_mb if best is None else min(best, free_mb)
+        return best
+    # cgroup v1 memory controller.
+    for line in proc_cgroup.splitlines():
+        fields = line.split(":", 2)
+        if len(fields) == 3 and "memory" in fields[1].split(","):
+            rel = fields[2].strip("/")
+            for d in (os.path.join(root, "memory", rel), os.path.join(root, "memory")):
+                limit = _read(os.path.join(d, "memory.limit_in_bytes"))
+                usage = _read(os.path.join(d, "memory.usage_in_bytes"))
+                if not (limit and usage and limit.isdigit() and usage.isdigit()):
+                    continue
+                if int(limit) >= (1 << 60):  # "unlimited" is a huge page-aligned number
+                    return None
+                stat = _read(os.path.join(d, "memory.stat")) or ""
+                im = re.search(r"^total_inactive_file (\d+)", stat, re.M)
+                reclaimable = int(im.group(1)) if im else 0
+                return max(0, int(limit) - int(usage) + reclaimable) // (1024 * 1024)
+    return None
+
+
+class _MemStatusEx(ctypes.Structure):
+    _fields_ = [
+        ("dwLength", ctypes.c_ulong),
+        ("dwMemoryLoad", ctypes.c_ulong),
+        ("ullTotalPhys", ctypes.c_ulonglong),
+        ("ullAvailPhys", ctypes.c_ulonglong),
+        ("ullTotalPageFile", ctypes.c_ulonglong),
+        ("ullAvailPageFile", ctypes.c_ulonglong),
+        ("ullTotalVirtual", ctypes.c_ulonglong),
+        ("ullAvailVirtual", ctypes.c_ulonglong),
+        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+    ]
+
+
+def _windows_available_mb(stat: Optional[_MemStatusEx] = None) -> Optional[int]:
+    """Windows: ullAvailPhys, the "Available" figure of Task Manager.
+
+    It already includes the standby list (file cache Windows hands back on
+    demand), so it is not the pessimistic "Free" number. Bounded by the commit
+    still available (ullAvailPageFile): the JVM commits its heap as it grows,
+    and a full commit charge fails the allocation even with RAM free.
+    """
+    if stat is None:
+        stat = _MemStatusEx()
+        stat.dwLength = ctypes.sizeof(_MemStatusEx)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return None
+    phys = int(stat.ullAvailPhys) // (1024 * 1024)
+    commit = int(stat.ullAvailPageFile) // (1024 * 1024)
+    if phys <= 0:
+        return None
+    return min(phys, commit) if commit > 0 else phys
+
+
 def available_ram_mb() -> Optional[int]:
-    """Best-effort free memory in MB for this machine, or None if unknown."""
+    """Best-effort memory a new process can use right now, in MB, or None if unknown."""
+    # Test hook (platform CI): pretend this much is free, to run the low-memory
+    # path end to end on a runner that has plenty.
+    forced = os.environ.get("NARVY_ASSUME_AVAILABLE_MB", "").strip()
+    if forced.isdigit():
+        return int(forced)
     system = platform.system()
     try:
         if system == "Linux":
-            with open("/proc/meminfo", "r") as f:
-                for line in f:
-                    if line.startswith("MemAvailable:"):
-                        return int(line.split()[1]) // 1024
+            host = _linux_meminfo_available_mb()
+            cg = _cgroup_available_mb()
+            known = [v for v in (host, cg) if v is not None]
+            if known:
+                return min(known)
         elif system == "Darwin":
             return _darwin_available_mb()
         elif system == "Windows":
-            class _MemStatusEx(ctypes.Structure):
-                _fields_ = [
-                    ("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                ]
-            stat = _MemStatusEx()
-            stat.dwLength = ctypes.sizeof(_MemStatusEx)
-            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
-                return int(stat.ullAvailPhys) // (1024 * 1024)
+            return _windows_available_mb()
         # Generic POSIX fallback, also covers Linux if /proc is unreadable.
         if hasattr(os, "sysconf") and "SC_AVPHYS_PAGES" in os.sysconf_names:
             return (os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")) // (1024 * 1024)
@@ -158,6 +284,8 @@ def _darwin_available_mb(memsize: Optional[int] = None, level: Optional[int] = N
     return max(known) if known else None
 
 
+# --- app size -------------------------------------------------------------
+
 def _is_app_dex(name: str) -> bool:
     """True for app-code DEX (APK `classes*.dex` or App Bundle `<module>/dex/classes*.dex`), not asset .dex."""
     base = name.rsplit("/", 1)[-1]
@@ -200,19 +328,47 @@ def read_dex_stats(apk_path: str) -> DexStats:
     return DexStats(methods, classes, count, dex_bytes, ok=count > 0)
 
 
+def read_dex_stats_all(paths: Iterable[str]) -> DexStats:
+    """Summed DEX stats over every input jadx gets (base APK plus split feature modules)."""
+    total = DexStats(0, 0, 0, 0, ok=False)
+    for p in paths:
+        s = read_dex_stats(p)
+        if s.ok:
+            total = DexStats(total.methods + s.methods, total.classes + s.classes,
+                             total.dex_files + s.dex_files, total.dex_bytes + s.dex_bytes, ok=True)
+    return total
+
+
+def _raw_estimate_mb(stats: DexStats) -> int:
+    if not stats.ok:
+        return 0
+    return int(max(
+        stats.classes * HEAP_MB_PER_CLASS,
+        stats.methods * HEAP_MB_PER_METHOD,
+        (stats.dex_bytes / (1024 * 1024)) * HEAP_MB_PER_DEX_MB,
+    ))
+
+
 def estimate_heap_mb(stats: DexStats) -> int:
     """Estimated -Xmx (MB) jadx needs to decompile an app of this size."""
     if not stats.ok:
         return 0
-    estimates = (
-        stats.classes * HEAP_MB_PER_CLASS,
-        stats.methods * HEAP_MB_PER_METHOD,
-        (stats.dex_bytes / (1024 * 1024)) * HEAP_MB_PER_DEX_MB,
-    )
-    return max(MIN_ESTIMATE_MB, int(max(estimates)))
+    return max(MIN_ESTIMATE_MB, _raw_estimate_mb(stats))
 
 
-def _fmt_mb(mb: Optional[int]) -> str:
+# Smallest heap that decompiled cleanly, over the raw estimate: 1.1x (6.5k
+# classes), 1.5-2.0x (20.7k), 1.6x (37.7k). Below NEED_FACTOR x raw the scan
+# still runs, with a warning.
+NEED_FACTOR = 1.5
+
+
+def needed_heap_mb(stats: DexStats) -> int:
+    """Heap below which jadx is likely to run out of memory on this app (0 = unknown)."""
+    raw = _raw_estimate_mb(stats)
+    return max(MIN_HEAP_MB, int(raw * NEED_FACTOR)) if raw else 0
+
+
+def fmt_mb(mb: Optional[int]) -> str:
     if mb is None:
         return "unknown"
     if mb >= 1024:
@@ -220,90 +376,86 @@ def _fmt_mb(mb: Optional[int]) -> str:
     return f"{mb} MB"
 
 
-def _round_up_gb(mb: int) -> int:
-    return max(1, math.ceil(mb / 1024))
+_fmt_mb = fmt_mb
 
 
-def check_memory_preflight(apk_path: str, max_mem: str,
-                           available_mb: Optional[int] = None) -> PreflightVerdict:
-    """Decide before spending jadx time whether this scan can work; never blocks on a low-confidence estimate."""
-    stats = read_dex_stats(apk_path)
-    max_mem_mb = parse_mem_arg(max_mem)
+def jvm_resident_mb(xmx_mb: int) -> int:
+    """Expected peak resident memory of a jadx JVM running with -Xmx{xmx_mb}m."""
+    return int(xmx_mb * (1 + JVM_NONHEAP_PER_HEAP) + JVM_NONHEAP_FIXED_MB)
+
+
+def heap_that_fits_mb(available_mb: Optional[int]) -> Optional[int]:
+    """Largest -Xmx whose JVM (heap + non-heap) fits in `available_mb`, keeping OS headroom."""
     if available_mb is None:
+        return None
+    room = available_mb - OS_HEADROOM_MB - JVM_NONHEAP_FIXED_MB
+    return max(0, int(room / (1 + JVM_NONHEAP_PER_HEAP)))
+
+
+def _round_down(mb: int, step: int = 64) -> int:
+    return max(step, (mb // step) * step)
+
+
+def app_scale(stats: DexStats) -> str:
+    return (f"~{stats.methods:,} methods / ~{stats.classes:,} classes across "
+            f"{stats.dex_files} DEX file(s), {stats.dex_bytes / (1024 * 1024):.0f} MB of bytecode")
+
+
+_MEASURE = object()
+
+
+def plan_heap(apk_paths: Union[str, Sequence[str]], max_mem: Optional[str] = None,
+              available_mb=_MEASURE, stats: Optional[DexStats] = None) -> HeapPlan:
+    """Pick the jadx heap. Never refuses: the worst case is a warning plus the largest heap that fits."""
+    if isinstance(apk_paths, str):
+        apk_paths = [apk_paths]
+    if stats is None:
+        stats = read_dex_stats_all(apk_paths)
+    requested = None if is_auto(max_mem) else parse_mem_arg(max_mem)
+    if available_mb is _MEASURE:
         available_mb = available_ram_mb()
+    est = estimate_heap_mb(stats)
+    fit = heap_that_fits_mb(available_mb)
 
-    no_block = PreflightVerdict(False, "", "", estimate_heap_mb(stats),
-                                max_mem_mb or 0, available_mb, stats)
-    if not stats.ok or not max_mem_mb:
-        return no_block
+    target = max(DEFAULT_MIN_HEAP_MB, int(est * HEAP_MARGIN)) if est else UNKNOWN_RAM_CAP_MB
+    caps = [target]
+    if requested:
+        caps.append(requested)
+    if fit is not None:
+        caps.append(fit)
+    elif not requested:
+        caps.append(UNKNOWN_RAM_CAP_MB)
+    xmx = min(caps)
+    # Never below the floor, and never above an explicit --max-mem.
+    xmx = max(MIN_HEAP_MB, _round_down(xmx))
+    if requested and requested < MIN_HEAP_MB:
+        xmx = requested
 
-    need_mb = estimate_heap_mb(stats)
-    scale = (
-        f"~{stats.methods:,} methods / ~{stats.classes:,} classes across "
-        f"{stats.dex_files} DEX file(s), {stats.dex_bytes / (1024 * 1024):.0f} MB of bytecode"
-    )
-
-    if need_mb > max_mem_mb:
-        suggest_gb = _round_up_gb(int(need_mb * 1.1))
-        need_rss_mb = int(suggest_gb * 1024 * JVM_RSS_OVERHEAD)
-        head = (
-            f"This app is very large: {scale}. Decompiling it typically needs around "
-            f"{_fmt_mb(need_mb)} of Java heap, but this scan is limited to "
-            f"{_fmt_mb(max_mem_mb)} (--max-mem {max_mem}). JADX will most likely run out "
-            f"of memory partway through, after several minutes of work."
-        )
-        if available_mb is not None and need_rss_mb > (available_mb - RAM_SAFETY_RESERVE_MB):
-            body = (
-                f"\n\nRaising --max-mem on its own will not be enough: {suggest_gb}g of heap needs "
-                f"roughly {_fmt_mb(need_rss_mb)} of real memory, and this machine only has "
-                f"{_fmt_mb(available_mb)} available right now. Options:\n"
-                f"  - use the hosted scan (`--upload`): the platform decompiles any app size with no local memory ceiling\n"
-                f"  - or free up that much memory (close other apps) and re-run with --max-mem {suggest_gb}g\n"
-                f"  - or run it anyway with --force if your setup can take it"
+    need = needed_heap_mb(stats)
+    fits = not need or xmx >= need
+    note = ""
+    warning = ""
+    if need and not fits:
+        if requested and requested == xmx and (fit is None or fit >= need):
+            warning = (
+                f"--max-mem {max_mem} is below the ~{fmt_mb(need)} of Java heap this app is "
+                f"estimated to need ({app_scale(stats)}). Trying anyway; if JADX runs out of "
+                f"memory, re-run without --max-mem so Narvy sizes the heap itself."
             )
         else:
-            avail_note = (f" (this machine has {_fmt_mb(available_mb)} available)"
-                          if available_mb is not None else "")
-            body = (
-                f"\n\nOptions:\n"
-                f"  - re-run with --max-mem {suggest_gb}g{avail_note}\n"
-                f"  - run it anyway at {max_mem} with --force"
+            warning = (
+                f"This app is estimated to need ~{fmt_mb(need)} of Java heap ({app_scale(stats)}), "
+                f"but only {fmt_mb(available_mb)} of memory is free right now, which leaves room "
+                f"for a {fmt_mb(xmx)} heap. Trying with that; closing other apps (browsers, IDEs) "
+                f"before the scan gives it more room."
             )
-        return PreflightVerdict(True, "heap_too_small", head + body,
-                                need_mb, max_mem_mb, available_mb, stats)
+    elif requested and xmx < requested:
+        why = ("free memory" if fit is not None and fit <= target else "the app's size")
+        note = (f"JADX heap: {fmt_mb(xmx)} (sized to {why}; this app needs about {fmt_mb(need or est)}, "
+                f"--max-mem {max_mem} is the upper limit).")
+    return HeapPlan(xmx, est, available_mb, requested, fit, stats, fits, note, warning)
 
-    if available_mb is not None:
-        needed_rss = int(max_mem_mb * JVM_RSS_OVERHEAD)
-        room_mb = available_mb - RAM_SAFETY_RESERVE_MB
-        if needed_rss > room_mb:
-            # -Xmx is a ceiling the JVM only grows to under pressure: when a smaller
-            # heap still fits this app with room to spare, use that instead of refusing.
-            fit_mb = (max(0, int(room_mb / JVM_RSS_OVERHEAD)) // 256) * 256
-            if fit_mb >= max(MIN_ESTIMATE_MB, need_mb * AUTO_LOWER_MARGIN):
-                note = (
-                    f"Only {_fmt_mb(available_mb)} of memory is available right now, so JADX runs "
-                    f"with a {_fmt_mb(fit_mb)} Java heap instead of --max-mem {max_mem} "
-                    f"(this app needs about {_fmt_mb(need_mb)})."
-                )
-                return PreflightVerdict(False, "lowered", note, need_mb, max_mem_mb,
-                                        available_mb, stats, f"{fit_mb}m")
-            safe_gb = max(1, int(room_mb / JVM_RSS_OVERHEAD / 1024))
-            lower_line = f"  - lower to --max-mem {safe_gb}g, which fits in what's free"
-            if safe_gb * 1024 < need_mb:
-                lower_line += (f" (though this app looks like it needs about {_fmt_mb(need_mb)}, "
-                               f"so it may still not be enough)")
-            msg = (
-                f"--max-mem {max_mem} asks JADX for {_fmt_mb(max_mem_mb)} of Java heap, which needs "
-                f"about {_fmt_mb(needed_rss)} of real memory once JVM overhead is counted. This "
-                f"machine only has {_fmt_mb(available_mb)} available right now, not enough for "
-                f"this app ({scale}, about {_fmt_mb(need_mb)} of heap).\n\n"
-                f"Running this would push the machine into swap and most likely get JADX killed by "
-                f"the OS out-of-memory killer (and may take other apps down with it). Options:\n"
-                f"  - free up memory and try again\n"
-                f"{lower_line}\n"
-                f"  - run it anyway with --force"
-            )
-            return PreflightVerdict(True, "ram_too_small", msg,
-                                    need_mb, max_mem_mb, available_mb, stats)
 
-    return no_block
+def check_memory_preflight(apk_path, max_mem=None, available_mb=_MEASURE) -> HeapPlan:
+    """Backward-compatible name for plan_heap()."""
+    return plan_heap(apk_path, max_mem, available_mb=available_mb)

@@ -5,6 +5,144 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.5]
+
+### Changed
+
+- The dependency check (SCA) now queries Narvy's EU-hosted vulnerability
+  database, a mirror of OSV.dev, instead of api.osv.dev and api.github.com.
+  It sends package names, ecosystems and versions only, never code, file
+  paths or findings, and says so when it starts. `OSV_API_URL` points it
+  at another OSV-compatible server; it accepts a base URL or, as before,
+  the full `/query` URL. The batch URL now follows `OSV_API_URL` (it used
+  to stay on api.osv.dev unless `OSV_BATCH_API_URL` was also set).
+- iOS: the direct GitHub Advisory lookup is off by default. All 63 reviewed
+  GitHub `swift` advisories are in OSV as `SwiftURL`, so the database above
+  carries them. `NARVY_GITHUB_ADVISORIES=1` turns the direct lookup back on,
+  and it now uses `GITHUB_TOKEN` when set (the rate-limit message already
+  told users to set it, but it was not read).
+- Batch pre-filter requests carry up to 1000 dependencies and stay under
+  1 MB. A batch the server refuses as too large (HTTP 413) is split in
+  halves and retried, down to a single dependency; one that is still
+  refused is looked up on its own and counted unresolved if that fails.
+- A scan now checks up to 20,000 unique dependencies (was 400, which left
+  projects such as a Django app with a JavaScript front end reported as
+  partial). Past that cap the check is still reported partial, with the
+  number not queried. Requests to Narvy's database are paced to stay under
+  its per-IP limits, so a very large project waits instead of being cut
+  off by a rate limit; small scans are not slowed.
+
+### Fixed
+
+- A dependency check that got no usable answer is reported INCOMPLETE,
+  never clean, in every case: server unreachable, 503 (database data older
+  than 48 hours, or unavailable), 429 after one retry that honours
+  `Retry-After` (at most 10 s), 400, 404 or an unreadable response. After
+  the first such failure the rest of the run stops querying and counts the
+  remaining dependencies as unresolved, with one log line for the outage
+  instead of one per dependency. The end-of-scan message names the server
+  and the reason.
+- iOS libraries with no known source repository URL (most CocoaPods pods
+  and embedded frameworks) were reported with 0 CVEs as if checked. They
+  are now looked up by bare name (a few advisories are published that way)
+  and counted as unverified in the SCA coverage note.
+- Ecosystems the database does not carry are no longer sent (the server
+  would reject the whole batch); those dependencies are counted as
+  unverified.
+- Results served from an expired local cache while the database was
+  unavailable are now flagged in the coverage note.
+- JSON output: `summary.sca_coverage` gains `dependencies_unverified`,
+  `dependencies_from_stale_cache` and `vulnerability_db` (server host,
+  database snapshot time and age when the server reports them, last error).
+- Android: an APK scan is no longer refused for lack of memory. 1.1.2 to
+  1.1.4 refused a 6,300-class app on a laptop with 1.1 GB free ("--max-mem
+  4g asks JADX for 4.0 GB of Java heap ... run it anyway with --force"),
+  and the `--max-mem 1g` it suggested was refused the same way. The jadx
+  heap is now sized for each app: the smallest of `--max-mem` (new default
+  `auto`), what fits in the memory free right now, and twice the app's
+  estimate. The JVM's own memory is counted as about 250 MB plus 5% of the
+  heap (measured on real apps), not a fixed 1 GB reserve plus 30%. When the
+  app's estimate does not fit, the scan runs with the largest heap that
+  does and says so before jadx starts. If jadx runs out of Java heap it is
+  retried once with a bigger heap when memory allows; when the operating
+  system refuses memory (commit limit, OOM killer) it is retried once with
+  a smaller heap and one thread; then the scan fails with the numbers and
+  what to do. `--force` now means: exactly `--max-mem`, no sizing, no retry.
+- A generous `--max-mem` no longer inflates memory use: `-Xmx4g` on a
+  6.5k-class app peaked at 1.56 GB of RAM against 0.99 GB with the 1 GB
+  heap now chosen, for the same decompiled output.
+- Linux and macOS: jadx no longer runs under an address-space limit
+  (RLIMIT_AS). With a small heap it stopped the JVM from starting its
+  threads, and jadx then exited 0 without writing any source, which would
+  have been scanned as an empty app. A jadx run that exits 0 without
+  writing sources, or that printed an OutOfMemoryError, is now a failure,
+  never a clean scan.
+- Linux: free memory honours a container or cgroup memory limit (Docker
+  `--memory`, CI runners, systemd `MemoryMax`); `/proc/meminfo` shows the
+  whole host there, so a 2 GB container used to size jadx for the host.
+- Windows: free memory is `ullAvailPhys` (Task Manager's "Available",
+  standby cache included), now also bounded by the commit charge left.
+- Split bundles (.apkm/.xapk/.apks): the heap estimate counts the feature
+  modules jadx decompiles together with the base APK.
+- The line printed after decompiling gives the heap used and how many
+  methods jadx could not fully decompile (kept as low-level code, so
+  findings inside them can be missed); a tight heap raises that number.
+- JSON and SARIF output say whether the structural (Semgrep) pass
+  completed: `summary.structural_coverage` and
+  `runs[0].properties.structuralCoverage` (`complete`, `incomplete` with
+  the reason, or `not_run`). A timed-out pass was only visible on the
+  console.
+- Messages no longer send users to `--upload` for something it cannot do:
+  it sends findings only, so it neither decompiles a large app nor finishes
+  a timed-out structural pass. The memory messages point to an upload from
+  the Narvy dashboard, the structural-pass note to `--upload-binary`.
+- The SCA result line no longer reads "checked N ..., found 0 known
+  CVE(s)" when the lookups failed; it says their CVE status is unknown.
+- A jadx failure message is printed as text: brackets in jadx output were
+  read as console markup.
+
+## [1.1.4]
+
+### Fixed
+
+- APK scans: the structural (Semgrep) pass could match none of the app's
+  own files and report "Deep analysis INCOMPLETE" (seen on Windows with
+  Python 3.10). Two ways to get there were reproduced: a scan folder
+  reached through a symlink (a Windows 8.3 short name such as `RUNNER~1`
+  or a junction gives the folder a second spelling in the same way), and a
+  `.git`/`.hg`/`.svn` folder in any parent of the scan folder, which moves
+  semgrep's project root above it so the `sources/...` path filter no
+  longer matched. The scan folder is now resolved to one long-name,
+  physical path for every tool and every relative path, the path filters
+  match at any depth, and if they still match nothing the app's own
+  package folders are scanned as explicit roots.
+- Secret findings that fired only on a variable NAME (key, secret,
+  password, token, credential) were CRITICAL whatever the value was.
+  The value is now checked: a known provider credential format (AWS,
+  Google, Stripe, GitHub, Slack, ...) or key material of a real key length
+  keeps the rule's severity; a plain non-secret (URL, path, dotted or
+  snake_case identifier, UPPER_CASE constant, label repeating the word
+  "password", format string, regex, sentence, placeholder) is dropped;
+  anything else is capped at MEDIUM with LOW confidence and says why.
+  Applies to Android (APK and source), iOS Objective-C and Swift source,
+  and iOS binary strings. Provider-format rules are unchanged. JSON output
+  carries `original_severity` and `value_evidence` for re-graded findings.
+
+### Changed
+
+- End-of-scan message: "Scanned ... with N local rules" counted only the
+  pattern rules (APK) or mixed in one entry per dependency advisory found
+  (source). It now gives the number of rules actually executed, by engine
+  (pattern, taint, structural, native-library, config), and separately how
+  many of them produced findings and how many dependency advisories
+  matched. A structural pass that did not complete is not counted. JSON
+  output: `summary.rules_executed`, `rules_executed_by_engine`,
+  `rules_matched`, `sca_advisories_matched`.
+- Console summary table: hits of the same rule in the same file are one
+  row with a hit count and the lines involved. `--no-group` restores one
+  row per hit. SARIF and JSON output still list every hit.
+- Platform CI harness prints `narvy doctor` output.
+
 ## [1.1.3]
 
 ### Fixed

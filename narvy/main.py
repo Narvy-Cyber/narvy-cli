@@ -38,11 +38,13 @@ from narvy import __version__
 from narvy.reporter import generate_sarif_report, sarif_level, sarif_security_severity
 from .decompiler import decompile_apk
 from . import decompiler as _decompiler
+from .apk_memory_preflight import is_auto as is_auto_mem
 from .rule_engine import load_rules_from_dir, run_rules_on_file
 from . import auth, own_reports, uploader, telemetry
 from .third_party_filter import get_own_package_roots, resolve_file_scope, check_android_override
 from .scope_config import load_scope_config
 from . import semgrep_engine
+from .pathnorm import canonical_path
 from . import crypto_taint_lite
 from . import native_hardening
 from .doctor import run_doctor
@@ -55,6 +57,7 @@ from .web import source_analyzer as web_source_analyzer
 from .sca import android_deps as sca_android_deps
 from .sca import ios_deps as sca_ios_deps
 from .sca import web_deps as sca_web_deps
+from .sca import osv_client as sca_osv
 from .web.scanner import NucleiScanner
 from .web.scan_blocklist import check_blocklist, ScanBlocked, REFUSAL_MESSAGE
 from .web.ssrf_guard import validate_url as web_validate_url, SSRFBlocked
@@ -858,22 +861,32 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
     with scan_progress() as progress:
         task1 = progress.add_task("[green]Decompiling APK...", total=1)
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            # Long, resolved spelling (no 8.3 RUNNER~1, no symlink) for jadx, our
+            # relpaths and semgrep's path filters alike.
+            temp_dir = canonical_path(temp_dir)
+            def _heap_notify(level, text):
+                style = "yellow" if level == "warning" else "dim"
+                console.print(f"[{style}]{rich_escape(text)}[/{style}]")
+
             ok, decompile_error = decompile_apk(apk_path, temp_dir, max_mem, force=force,
-                                                extra_inputs=extra_dex_inputs)
+                                                extra_inputs=extra_dex_inputs,
+                                                notify=_heap_notify)
             if not ok:
                 progress.update(task1, completed=1, description="[red]Decompilation Failed.")
                 progress.stop()
                 # Progress owns the cursor: printing before stop() mangles this.
-                console.print(f"\n[bold red]{decompile_error}[/bold red]\n")
+                # Escaped: the message carries raw jadx output, which can hold [brackets].
+                console.print(f"\n[bold red]{rich_escape(decompile_error)}[/bold red]\n")
                 return None
             progress.update(task1, completed=1, description="[green]Decompilation Complete.")
             if _decompiler.LAST_HEAP_NOTE:
-                console.print(f"[dim]{_decompiler.LAST_HEAP_NOTE}[/dim]")
+                console.print(f"[dim]{rich_escape(_decompiler.LAST_HEAP_NOTE)}[/dim]")
 
             task2 = progress.add_task("[cyan]Analyzing files...", total=None)
             rules_path = os.path.join(os.path.dirname(__file__), 'rules', 'android')
             rules = load_rules_from_dir(rules_path)
-            progress.update(task2, description=f"[cyan]Analyzing with {len(rules)} rules...")
+            progress.update(task2, description=f"[cyan]Analyzing with {len(rules)} pattern rules...")
+            rules_run = {"pattern": len(rules), "taint": len(crypto_taint_lite.RULE_IDS)}
 
             all_findings = []
             all_source_files = [os.path.join(root, file) for root, _, files in os.walk(temp_dir) for file in files if file.endswith(('.java', '.kt', '.xml'))]
@@ -928,6 +941,8 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
                 semgrep_findings = semgrep_engine.run_semgrep(temp_dir, own_roots=own_roots, override_config=override_config)
                 if semgrep_findings:
                     all_findings.extend(semgrep_findings)
+                if semgrep_engine.LAST_RUN.get('status') == 'ok':
+                    rules_run["structural"] = len(semgrep_engine.load_rule_defs())
                 _sg_note = semgrep_engine.degraded_coverage_note()
                 if _sg_note:
                     progress.update(task3, completed=1, description="[yellow]Deep analysis INCOMPLETE (partial coverage).")
@@ -938,26 +953,22 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
                 console.print("[dim]semgrep not found - install with `pip install semgrep` for deeper structural detection. Continuing with regex rules only.[/dim]")
 
             # Runs against the raw zip at apk_path, not the decompiled temp_dir.
-            console.print("[dim]Checking third-party dependencies against OSV.dev (SCA)...[/dim]")
+            _print_sca_egress()
             try:
                 sca_findings, sca_rule_defs, sca_stats = sca_android_deps.scan(apk_path)
                 all_findings.extend(sca_findings)
                 rules.extend(sca_rule_defs)
                 sca_cov = _sca_coverage(sca_stats)
                 if not _sca_not_applicable(sca_stats, "apk"):
-                    console.print(
-                        f"[dim]SCA: checked {sca_stats['unique_dependencies_checked']} unique "
-                        f"dependencies against OSV.dev, found {sca_stats['cves_found']} known "
-                        f"CVE(s) across {sca_stats['vulnerable_dependencies']} dependency(ies).[/dim]"
-                    )
+                    console.print(_sca_result_line(sca_stats, "dependencies"))
                 if sca_stats.get("dependencies_capped"):
                     _detected = sca_stats["unique_dependencies_detected"]
                     _checked = sca_stats["unique_dependencies_checked"]
                     console.print(
                         f"[bold yellow]SCA is INCOMPLETE: {_detected} unique "
                         f"dependencies were found but only {_checked} were queried "
-                        f"({_detected - _checked} not checked) - the free OSV.dev API "
-                        f"is rate-considerate-capped. Treat 0 CVEs on the remainder "
+                        f"({_detected - _checked} not checked) - the per-scan dependency "
+                        f"query cap was reached. Treat 0 CVEs on the remainder "
                         f"as UNKNOWN, not as clean.[/bold yellow]"
                     )
             except Exception as e:
@@ -969,6 +980,7 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
                 all_findings.extend(nh_findings)
                 rules.extend(nh_rule_defs)
                 if nh_stats["arch_analyzed"]:
+                    rules_run["native"] = native_hardening.RULE_COUNT
                     console.print(
                         f"[dim]Native hardening: checked {nh_stats['libs_analyzed']} native "
                         f"librar{'y' if nh_stats['libs_analyzed'] == 1 else 'ies'} "
@@ -981,7 +993,7 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
                     console.print("[dim]Native hardening check skipped (lief not installed).[/dim]")
             except Exception as e:
                 console.print(f"[dim]Native hardening check failed (continuing without it): {e}[/dim]")
-    return all_findings, rules, {"sca_coverage": sca_cov}
+    return all_findings, rules, {"sca_coverage": sca_cov, "rules_run": rules_run}
 
 
 _SCA_NOT_APPLICABLE = {
@@ -1010,6 +1022,37 @@ def _sca_not_applicable(stats, kind):
     return True
 
 
+_STRUCTURAL_MODES = ("android", "android-bundle", "android-source", "ios-source", "web-source")
+
+
+def _structural_coverage(scan_mode):
+    """Machine-readable state of the deep structural (Semgrep) pass, for JSON/SARIF.
+
+    Without it a JSON consumer saw complete-looking results after a timed-out
+    or skipped structural pass (the console said INCOMPLETE, the file did not).
+    """
+    if scan_mode not in _STRUCTURAL_MODES:
+        return None
+    if not semgrep_engine.is_available():
+        return {"status": "not_run", "note": "semgrep is not installed"}
+    note = semgrep_engine.degraded_coverage_note()
+    if note:
+        return {"status": "incomplete", "note": note}
+    return {"status": "complete"}
+
+
+def _sca_result_line(stats, noun="dependencies"):
+    """The one-line SCA result. When lookups failed it must not read "found 0 known CVE(s)"."""
+    checked = stats.get("unique_dependencies_checked", 0)
+    if stats.get("osv_unreachable"):
+        return (f"[dim]SCA: {checked} unique {noun} found; the vulnerability lookup failed "
+                f"for some or all of them, so their CVE status is UNKNOWN (see the SCA note "
+                f"at the end).[/dim]")
+    return (f"[dim]SCA: checked {checked} unique {noun}, found {stats.get('cves_found', 0)} "
+            f"known CVE(s) across {stats.get('vulnerable_dependencies', 0)} "
+            f"{'framework(s)' if noun.startswith('embedded') else 'dependency(ies)'}.[/dim]")
+
+
 def _sca_coverage(stats):
     """SCA coverage flag for machine output: 'complete', or 'partial' when a rate limit truncated the dependency queries."""
     detected = stats.get("unique_dependencies_detected")
@@ -1032,6 +1075,15 @@ def _sca_coverage(stats):
     unreachable = bool(stats.get("osv_unreachable"))
     if unreachable:
         reasons.append("osv_unreachable")
+    # Deps in an ecosystem the vulnerability database does not carry were never sent.
+    if stats.get("osv_unsupported_ecosystem"):
+        reasons.append("ecosystem_not_covered")
+    # iOS deps with no known repo URL: only a bare-name lookup ran.
+    if stats.get("dependencies_unmapped"):
+        reasons.append("no_swifturl_mapping")
+    # Answers served from an expired local cache while the database was unavailable.
+    if stats.get("osv_stale_cache_served"):
+        reasons.append("osv_stale_cache")
     # Zero resolved deps is never 'complete': it usually means a manifest
     # format we don't parse yet.
     if not detected and not unreachable and not reasons:
@@ -1053,7 +1105,45 @@ def _sca_coverage(stats):
         cov["unparsed_manifests"] = unparsed
     if stats.get("osv_dependencies_unresolved"):
         cov["dependencies_unresolved"] = stats["osv_dependencies_unresolved"]
+    unverified = (stats.get("osv_unsupported_ecosystem") or 0) + (stats.get("dependencies_unmapped") or 0)
+    if unverified:
+        cov["dependencies_unverified"] = unverified
+    if stats.get("osv_stale_cache_served"):
+        cov["dependencies_from_stale_cache"] = stats["osv_stale_cache_served"]
+    if stats.get("vulnerability_db"):
+        cov["vulnerability_db"] = stats["vulnerability_db"]
     return cov
+
+
+def _print_sca_egress():
+    """Say where the dependency check sends data, and that it is names + versions only."""
+    try:
+        url = sca_osv.get_default_client().api_url
+    except Exception:
+        url = None
+    console.print(f"[dim]{rich_escape(sca_osv.egress_notice(url))}[/dim]")
+
+
+_SCA_DB_ERROR_TEXT = {
+    "mirror_stale": "its data is older than 48 hours (stale mirror), so it refused to answer",
+    "mirror_unavailable": "its data was not available",
+    "unavailable": "it was unavailable (HTTP 503)",
+    "rate_limited": "it rate-limited this machine (HTTP 429)",
+    "unreachable": "it could not be reached (network error)",
+    "bad_request": "it rejected the request (HTTP 400)",
+    "invalid_response": "it returned an unreadable answer",
+    "too_large": "it refused the request as too large (HTTP 413)",
+    "http_404": "no OSV API was found at that address (HTTP 404; check OSV_API_URL)",
+}
+
+
+def _sca_db_problem(sca_cov):
+    """(host, human reason) for the vulnerability database behind an incomplete SCA."""
+    db = (sca_cov or {}).get("vulnerability_db") or {}
+    host = db.get("endpoint_host") or "the vulnerability database"
+    err = db.get("last_error") or ""
+    reason = _SCA_DB_ERROR_TEXT.get(err) or (f"it failed ({err})" if err else "it could not be reached (network error / cold cache)")
+    return host, reason
 
 
 def _warn_github_advisory_truncated(stats):
@@ -1062,7 +1152,7 @@ def _warn_github_advisory_truncated(stats):
     console.print(
         f"[bold yellow]SCA is INCOMPLETE: the GitHub Advisory database was "
         f"rate-limited after {stats.get('github_queries_made', 0)} query(ies), so "
-        f"the remaining dependencies were checked only against OSV.dev + the local "
+        f"the remaining dependencies were checked only against the OSV data + the local "
         f"CVE DB. Set a GITHUB_TOKEN environment variable to raise the limit. Treat "
         f"0 CVEs on the un-queried remainder as UNKNOWN, not as clean.[/bold yellow]"
     )
@@ -1088,6 +1178,7 @@ def _run_ios_source_scan(source_dir):
     )
 
     console.print("[dim]Checking Podfile.lock / Package.resolved dependencies for known CVEs (SCA)...[/dim]")
+    _print_sca_egress()
     sca_cov = None
     try:
         sca_findings, sca_rule_defs, sca_stats = sca_ios_deps.scan_source(source_dir)
@@ -1095,16 +1186,13 @@ def _run_ios_source_scan(source_dir):
         result["rule_defs"].extend(sca_rule_defs)
         sca_cov = _sca_coverage(sca_stats)
         if not _sca_not_applicable(sca_stats, "source"):
-            console.print(
-                f"[dim]SCA: checked {sca_stats['unique_dependencies_checked']} unique "
-                f"dependencies, found {sca_stats['cves_found']} known CVE(s) across "
-                f"{sca_stats['vulnerable_dependencies']} dependency(ies).[/dim]"
-            )
+            console.print(_sca_result_line(sca_stats, "dependencies"))
         _warn_github_advisory_truncated(sca_stats)
     except Exception as e:
         console.print(f"[dim]SCA dependency check failed (continuing without it): {e}[/dim]")
 
-    return result["findings"], result["rule_defs"], {"sca_coverage": sca_cov}
+    return result["findings"], result["rule_defs"], {"sca_coverage": sca_cov,
+                                                     "rules_run": result.get("rules_run") or {}}
 
 
 def _run_android_source_scan(source_dir, override_config=None):
@@ -1136,6 +1224,7 @@ def _run_android_source_scan(source_dir, override_config=None):
         f"[dim]Checking {sca_web_deps.SUPPORTED_ECOSYSTEMS_LABEL} dependencies "
         f"(build.gradle/build.gradle.kts/Gemfile.lock/etc.) for known CVEs (SCA)...[/dim]"
     )
+    _print_sca_egress()
     sca_cov = None
     try:
         sca_findings, sca_rule_defs, sca_stats = sca_web_deps.scan(source_dir)
@@ -1143,25 +1232,22 @@ def _run_android_source_scan(source_dir, override_config=None):
         result["rule_defs"].extend(sca_rule_defs)
         sca_cov = _sca_coverage(sca_stats)
         if not _sca_not_applicable(sca_stats, "source"):
-            console.print(
-                f"[dim]SCA: checked {sca_stats['unique_dependencies_checked']} unique "
-                f"dependencies against OSV.dev, found {sca_stats['cves_found']} known "
-                f"CVE(s) across {sca_stats['vulnerable_dependencies']} dependency(ies).[/dim]"
-            )
+            console.print(_sca_result_line(sca_stats, "dependencies"))
         if sca_stats.get("dependencies_capped"):
             skipped = sca_stats["unique_dependencies_detected"] - sca_stats["unique_dependencies_checked"]
             console.print(
                 f"[bold yellow]SCA is INCOMPLETE: {sca_stats['unique_dependencies_detected']} "
                 f"unique dependencies were found but only "
                 f"{sca_stats['unique_dependencies_checked']} were queried "
-                f"({skipped} not checked) - the free OSV.dev API is rate-"
-                f"considerate-capped. Treat 0 CVEs on the remainder as "
+                f"({skipped} not checked) - the per-scan dependency query "
+                f"cap was reached. Treat 0 CVEs on the remainder as "
                 f"UNKNOWN, not as clean.[/bold yellow]"
             )
     except Exception as e:
         console.print(f"[dim]SCA dependency check failed (continuing without it): {e}[/dim]")
 
-    return result["findings"], result["rule_defs"], {"sca_coverage": sca_cov}
+    return result["findings"], result["rule_defs"], {"sca_coverage": sca_cov,
+                                                     "rules_run": result.get("rules_run") or {}}
 
 
 def _run_web_source_scan(source_dir):
@@ -1191,6 +1277,7 @@ def _run_web_source_scan(source_dir):
         f"[dim]Checking {sca_web_deps.SUPPORTED_ECOSYSTEMS_LABEL} dependencies "
         f"for known CVEs (SCA)...[/dim]"
     )
+    _print_sca_egress()
     sca_cov = None
     try:
         sca_findings, sca_rule_defs, sca_stats = sca_web_deps.scan(source_dir)
@@ -1198,25 +1285,22 @@ def _run_web_source_scan(source_dir):
         result["rule_defs"].extend(sca_rule_defs)
         sca_cov = _sca_coverage(sca_stats)
         if not _sca_not_applicable(sca_stats, "source"):
-            console.print(
-                f"[dim]SCA: checked {sca_stats['unique_dependencies_checked']} unique "
-                f"dependencies against OSV.dev, found {sca_stats['cves_found']} known "
-                f"CVE(s) across {sca_stats['vulnerable_dependencies']} dependency(ies).[/dim]"
-            )
+            console.print(_sca_result_line(sca_stats, "dependencies"))
         if sca_stats.get("dependencies_capped"):
             skipped = sca_stats["unique_dependencies_detected"] - sca_stats["unique_dependencies_checked"]
             console.print(
                 f"[yellow]SCA is INCOMPLETE: {sca_stats['unique_dependencies_detected']} "
                 f"unique dependencies were found but only "
                 f"{sca_stats['unique_dependencies_checked']} were queried "
-                f"({skipped} not checked) - the free OSV.dev API is rate-"
-                f"considerate-capped. Treat 0 CVEs on the remainder as "
+                f"({skipped} not checked) - the per-scan dependency query "
+                f"cap was reached. Treat 0 CVEs on the remainder as "
                 f"UNKNOWN, not as clean.[/yellow]"
             )
     except Exception as e:
         console.print(f"[dim]SCA dependency check failed (continuing without it): {e}[/dim]")
 
-    return result["findings"], result["rule_defs"], {"sca_coverage": sca_cov}
+    return result["findings"], result["rule_defs"], {"sca_coverage": sca_cov,
+                                                     "rules_run": result.get("rules_run") or {}}
 
 
 def _run_ios_binary_scan(ipa_path, override_config=None):
@@ -1237,6 +1321,7 @@ def _run_ios_binary_scan(ipa_path, override_config=None):
 
     # Embedded-framework SCA works even on a FairPlay-encrypted IPA.
     console.print("[dim]Checking embedded frameworks for known CVEs (SCA)...[/dim]")
+    _print_sca_egress()
     sca_cov = None
     try:
         sca_findings, sca_rule_defs, sca_stats = sca_ios_deps.scan_binary(ipa_path)
@@ -1244,16 +1329,13 @@ def _run_ios_binary_scan(ipa_path, override_config=None):
         result["rule_defs"].extend(sca_rule_defs)
         sca_cov = _sca_coverage(sca_stats)
         if not _sca_not_applicable(sca_stats, "ipa"):
-            console.print(
-                f"[dim]SCA: checked {sca_stats['unique_dependencies_checked']} unique "
-                f"embedded framework(s), found {sca_stats['cves_found']} known CVE(s) across "
-                f"{sca_stats['vulnerable_dependencies']} framework(s).[/dim]"
-            )
+            console.print(_sca_result_line(sca_stats, "embedded framework(s)"))
         _warn_github_advisory_truncated(sca_stats)
     except Exception as e:
         console.print(f"[dim]SCA dependency check failed (continuing without it): {e}[/dim]")
 
-    return result["findings"], result["rule_defs"], {"encrypted": bool(result.get("encrypted")), "sca_coverage": sca_cov}
+    return result["findings"], result["rule_defs"], {"encrypted": bool(result.get("encrypted")), "sca_coverage": sca_cov,
+                                                     "rules_run": {"binary": len(ios_binary_analyzer.all_rule_defs())}}
 
 
 def _run_split_bundle_scan(bundle_path, max_mem, override_config=None, force=False):
@@ -1473,6 +1555,62 @@ def _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta=N
         _submit_results_ingest(findings, "ios-source", os.path.join(target_path, root))
 
 
+_ENGINE_LABELS = {
+    "pattern": "pattern", "structural": "structural", "taint": "taint", "native": "native-library",
+    "config": "config/plist", "binary": "binary",
+}
+
+
+def _is_sca_finding(f):
+    return str(f.get("rule_id") or "").startswith("SCA-") or f.get("engine") == "sca"
+
+
+def _rule_stats(all_findings, scan_meta):
+    """Rules actually executed (per engine) vs distinct rules that produced a finding."""
+    run = dict((scan_meta or {}).get("rules_run") or {})
+    executed = sum(run.values()) if run else None
+    matched = len({f.get("rule_id") for f in all_findings if not _is_sca_finding(f)})
+    sca = len({f.get("rule_id") for f in all_findings if _is_sca_finding(f)})
+    return {"executed": executed, "by_engine": run, "matched": matched, "sca_matched": sca}
+
+
+def _rules_sentence(scope, all_findings, scan_meta):
+    st = _rule_stats(all_findings, scan_meta)
+    sca = (f" The dependency check (SCA) matched {st['sca_matched']} known advisory(ies)."
+           if st["sca_matched"] else "")
+    if st["executed"] is None:
+        return f"Scanned {scope}: {st['matched']} rule(s) produced findings.{sca}"
+    parts = ", ".join(
+        f"{n} {_ENGINE_LABELS.get(k.replace('ios-', ''), k)}{' (nested iOS)' if k.startswith('ios-') else ''}"
+        for k, n in st["by_engine"].items() if n)
+    return (f"Scanned {scope} with {st['executed']} local rules"
+            f"{f' ({parts})' if parts else ''}; {st['matched']} of them produced findings.{sca}")
+
+
+def _group_findings(findings):
+    """One row per (severity, rule, file): hit count and the lines involved."""
+    groups: Dict[tuple, Dict[str, Any]] = {}
+    for f in findings:
+        key = (f.get("severity"), f.get("rule_id"), f.get("name"), f.get("file_path"))
+        g = groups.get(key)
+        if g is None:
+            groups[key] = g = {"finding": f, "count": 0, "lines": []}
+        g["count"] += 1
+        if not f.get("location_symbol") and f.get("line") is not None:
+            g["lines"].append(f.get("line"))
+    out = list(groups.values())
+    out.sort(key=lambda g: (_SEV_ORDER.get(g["finding"].get("severity"), 5), -g["count"]))
+    return out
+
+
+def _lines_cell(lines, limit=4):
+    uniq = sorted({l for l in lines if isinstance(l, int)})
+    if not uniq:
+        return "-"
+    shown = ", ".join(str(l) for l in uniq[:limit])
+    return shown + (f" (+{len(uniq) - limit})" if len(uniq) > limit else "")
+
+
 def _scan_to_json(all_findings, rules, scan_mode, target_path, encrypted, scan_meta=None):
     """Flat machine-readable JSON for `narvy scan --output json`."""
     by_sev: Dict[str, int] = {}
@@ -1495,10 +1633,20 @@ def _scan_to_json(all_findings, rules, scan_mode, target_path, encrypted, scan_m
             "cwe": details.get("cwe"),
             "masvs": details.get("masvs"),
         })
+        if f.get("original_severity"):
+            out_findings[-1]["original_severity"] = f["original_severity"]
+        if f.get("value_evidence"):
+            out_findings[-1]["value_evidence"] = f["value_evidence"]
     summary = {
         "total_findings": len(all_findings),
         "by_severity": by_sev,
     }
+    rule_stats = _rule_stats(all_findings, scan_meta)
+    if rule_stats["executed"] is not None:
+        summary["rules_executed"] = rule_stats["executed"]
+        summary["rules_executed_by_engine"] = rule_stats["by_engine"]
+    summary["rules_matched"] = rule_stats["matched"]
+    summary["sca_advisories_matched"] = rule_stats["sca_matched"]
     sca_cov = (scan_meta or {}).get("sca_coverage")
     if sca_cov is not None:
         summary["sca_coverage"] = sca_cov
@@ -1514,6 +1662,9 @@ def _scan_to_json(all_findings, rules, scan_mode, target_path, encrypted, scan_m
     unreadable = (scan_meta or {}).get("unreadable_paths")
     if unreadable:
         summary["unreadable_paths"] = unreadable
+    structural = (scan_meta or {}).get("structural_coverage")
+    if structural:
+        summary["structural_coverage"] = structural
     return {
         "tool": "Narvy CLI",
         "version": __version__,
@@ -1556,6 +1707,10 @@ def _scan_nested_ios_surfaces(target_path, ios_roots, all_findings, rules, scan_
         all_findings.extend(ios_findings)
         known = {r.get("id") for r in rules if isinstance(r, dict)}
         rules.extend(r for r in ios_rules if not (isinstance(r, dict) and r.get("id") in known))
+        merged_run = dict(scan_meta.get("rules_run") or {})
+        for k, v in ((ios_meta or {}).get("rules_run") or {}).items():
+            merged_run["ios-" + k] = merged_run.get("ios-" + k, 0) + v
+        scan_meta["rules_run"] = merged_run
         surfaces.append({"mode": "ios-source", "path": rel_root,
                          "findings": len(ios_findings),
                          "sca_coverage": (ios_meta or {}).get("sca_coverage")})
@@ -1618,11 +1773,11 @@ def cmd_scan(args):
 
     # --max-mem goes straight to JADX as -Xmx; validate before a bad value leaks a raw JVM error.
     if scan_mode in ("android", "android-bundle"):
-        if not _MAX_MEM_RE.match(str(args.max_mem or "")):
+        if not is_auto_mem(args.max_mem) and not _MAX_MEM_RE.match(str(args.max_mem or "")):
             console.print(
                 f"[bold red]Invalid --max-mem value '{args.max_mem}'.[/bold red] "
-                "Expected a JADX heap size like '4g', '2048m' or '512k' "
-                "(digits optionally followed by k/m/g)."
+                "Expected 'auto' (the default) or a JADX heap size like '4g', '2048m' "
+                "or '512k' (digits optionally followed by k/m/g)."
             )
             raise SystemExit(EXIT_BAD_TARGET)
 
@@ -1714,6 +1869,11 @@ def cmd_scan(args):
         scan_meta = dict(scan_meta)
         scan_meta["unreadable_paths"] = unreadable
 
+    structural_cov = _structural_coverage(scan_mode)
+    if structural_cov:
+        scan_meta = dict(scan_meta)
+        scan_meta["structural_coverage"] = structural_cov
+
     if args.output in ('sarif', 'json'):
         # Written to a file, never stdout: progress notes would interleave.
         if args.output == 'sarif':
@@ -1722,6 +1882,11 @@ def cmd_scan(args):
                 encrypted=encrypted_scan,
                 encrypted_artifact_uri=os.path.basename(target_path) if encrypted_scan else None,
             )
+            if structural_cov:
+                try:
+                    report["runs"][0].setdefault("properties", {})["structuralCoverage"] = structural_cov
+                except (KeyError, IndexError, TypeError, AttributeError):
+                    pass
             out_file = args.file or "narvy-results.sarif"
             label = "SARIF report"
         else:
@@ -1755,25 +1920,41 @@ def cmd_scan(args):
                 console.print("[bold green]No issues found based on the current rule set.[/bold green]")
         else:
             console.print(f"[bold red]Found {len(all_findings)} potential issues:[/bold red]")
+            group_rows = not getattr(args, "no_group", False)
             table = Table(title="Vulnerability Summary")
             table.add_column("Severity", justify="center", style="bold")
             table.add_column("Rule Name", style="cyan")
             table.add_column("File", style="magenta")
-            table.add_column("Line", justify="right", style="dim")
+            table.add_column("Lines" if group_rows else "Line", justify="right", style="dim")
+            if group_rows:
+                table.add_column("Hits", justify="right")
             table.add_column("Confidence", justify="center", style="dim")
-            for finding in sorted(all_findings, key=lambda x: _SEV_ORDER.get(x['severity'], 5)):
+            if group_rows:
+                rows = [(g["finding"], g["count"], _lines_cell(g["lines"]))
+                        for g in _group_findings(all_findings)]
+            else:
+                # A compiled binary has no line-number table, so `line` there is
+                # a placeholder kept only for SARIF.
+                rows = [(f, 1, "-" if f.get('location_symbol') else str(f.get('line', '?')))
+                        for f in sorted(all_findings, key=lambda x: _SEV_ORDER.get(x['severity'], 5))]
+            for finding, count, line_cell in rows:
                 sev_style = _SEV_STYLE.get(finding['severity'], "white")
                 confidence = finding.get('confidence', 'MEDIUM')
                 conf_style = _CONF_STYLE.get(confidence, "white")
-                # A compiled binary has no line-number table, so `line` there is
-                # a placeholder kept only for SARIF.
-                line_cell = "-" if finding.get('location_symbol') else str(finding.get('line', '?'))
-                table.add_row(
+                cells = [
                     f"[{sev_style}]{finding['severity']}[/{sev_style}]",
                     rich_escape(str(finding['name'])), rich_escape(str(finding['file_path'])), line_cell,
-                    f"[{conf_style}]{confidence}[/{conf_style}]",
-                )
+                ]
+                if group_rows:
+                    cells.append(str(count))
+                cells.append(f"[{conf_style}]{confidence}[/{conf_style}]")
+                table.add_row(*cells)
             out_console.print(table)
+            if group_rows and len(rows) < len(all_findings):
+                console.print(
+                    f"[dim]{len(rows)} rows for {len(all_findings)} hits: the same rule in the "
+                    "same file is one row (Hits = how many times). --no-group shows one row "
+                    "per hit. JSON/SARIF output always lists every hit.[/dim]")
             console.print()
             console.rule("[bold]Finding Detail[/bold]")
             _print_findings_detail(console, all_findings)
@@ -1917,19 +2098,45 @@ def cmd_scan(args):
         console.print("\n[bold yellow]Local scan only, not linked to your account.[/bold yellow]")
         scope = {"android": "the decompiled app", "ios-binary": "the compiled binary only"}.get(
             scan_mode, "the source checkout")
-        console.print(f"Scanned {scope} with {len(rules)} local rules. One row per rule hit, no de-duplication.")
+        console.print(_rules_sentence(scope, all_findings, scan_meta))
+        if args.output not in ('sarif', 'json') and all_findings:
+            if getattr(args, "no_group", False):
+                console.print("One row per rule hit, no de-duplication.")
+            else:
+                console.print("Same rule in the same file is grouped into one row; no cross-file "
+                              "de-duplication or false-positive filtering was applied.")
         console.print("To keep results in your Narvy dashboard (de-duplication, false-positive filtering, "
                       "history), run `narvy login` and add [bold]--upload[/bold].")
 
-    # SCA that could not reach OSV.dev (outage / cold cache) reports 0 CVEs as UNKNOWN, not clean.
+    # SCA whose vulnerability database gave no usable answer reports 0 CVEs as UNKNOWN, not clean.
     sca_cov = scan_meta.get("sca_coverage")
     if isinstance(sca_cov, dict) and sca_cov.get("status") == "degraded":
         _unres = sca_cov.get("dependencies_unresolved", 0)
+        _host, _why = _sca_db_problem(sca_cov)
         console.print(
-            f"[bold yellow]SCA is INCOMPLETE: the OSV.dev vulnerability database was "
-            f"unreachable (network error / cold cache), so {_unres} dependency(ies) "
-            f"could not be checked. Treat 0 CVEs on those as UNKNOWN, not as clean - "
-            f"re-run with network access to OSV.dev.[/bold yellow]"
+            f"[bold yellow]SCA is INCOMPLETE: the vulnerability database at "
+            f"{rich_escape(_host)} gave no usable answer ({_why}), so {_unres} "
+            f"dependency(ies) could not be checked. Treat 0 CVEs on those as UNKNOWN, "
+            f"not as clean - re-run later.[/bold yellow]"
+        )
+    if isinstance(sca_cov, dict) and sca_cov.get("dependencies_unverified"):
+        _reasons = sca_cov.get("degraded_reasons") or []
+        _why = []
+        if "no_swifturl_mapping" in _reasons:
+            _why.append("iOS libraries with no known source repository URL "
+                        "(the advisory data is keyed by repository)")
+        if "ecosystem_not_covered" in _reasons:
+            _why.append("an ecosystem the vulnerability database does not carry")
+        console.print(
+            f"[yellow]SCA coverage note: {sca_cov['dependencies_unverified']} "
+            f"dependency(ies) could not be fully verified ({'; '.join(_why) or 'no lookup key'}). "
+            f"0 CVEs on those is UNKNOWN, not clean.[/yellow]"
+        )
+    if isinstance(sca_cov, dict) and sca_cov.get("dependencies_from_stale_cache"):
+        console.print(
+            f"[yellow]SCA coverage note: {sca_cov['dependencies_from_stale_cache']} "
+            f"dependency result(s) came from an expired local cache because the "
+            f"vulnerability database was unavailable; newer advisories may be missing.[/yellow]"
         )
 
     # Must stay last so failing the build never swallows the report/upload.
@@ -1937,11 +2144,12 @@ def cmd_scan(args):
     coverage_gaps = []
     if getattr(args, "fail_on", None):
         if isinstance(sca_cov, dict) and sca_cov.get("status") == "degraded":
+            _host, _why = _sca_db_problem(sca_cov)
             coverage_gaps.append(
-                "The SCA dependency pass could not reach the OSV.dev vulnerability "
-                f"database for {sca_cov.get('dependencies_unresolved', 0)} dependency(ies) "
-                "(network error / cold cache), so their CVE status is UNKNOWN. Re-run "
-                "with network access to OSV.dev."
+                f"The SCA dependency pass got no usable answer from the vulnerability "
+                f"database at {_host} ({_why}) for "
+                f"{sca_cov.get('dependencies_unresolved', 0)} dependency(ies), so their "
+                "CVE status is UNKNOWN. Re-run later."
             )
         if encrypted_scan:
             coverage_gaps.append(
@@ -2742,9 +2950,9 @@ def cli(prog=None):
     )
     p_scan.add_argument("apk_path", help=(f"What to scan: an .apk/.aab, an .apkm/.xapk/.apks bundle, an .ipa (unencrypted), or a source directory (Android Gradle, Xcode/Swift, or web/backend: "
         f"{web_source_analyzer.SUPPORTED_LANGUAGES_LABEL})."))
-    p_scan.add_argument("--max-mem", default="4g", help="Max memory for jadx, e.g. '2g' or '4096m' (default: 4g). Android only.")
+    p_scan.add_argument("--max-mem", default="auto", help="Upper limit for the jadx Java heap, e.g. '2g' or '4096m'. Default 'auto': sized from the app and the memory free right now. Android only.")
     p_scan.add_argument("--force", action="store_true",
-                        help="Decompile anyway when the memory estimate says jadx will likely run out of memory.")
+                        help="Run jadx with exactly --max-mem, without automatic heap sizing or the out-of-memory retry.")
     p_scan.add_argument("--output", "-o", "--format", dest="output", default="console", choices=["console", "sarif", "json"],
                         type=str.lower, help="Output format: console (default), sarif or json. sarif and json are written to --file.")
     p_scan.add_argument("-v", "--verbose", action="store_true",
@@ -2754,6 +2962,8 @@ def cli(prog=None):
     p_scan.add_argument("--upload-binary", action="store_true", help="Upload the binary itself (.apk/.aab/.ipa) for a server-side scan instead of the results. Implies --upload.")
     p_scan.add_argument("--confirm-upload", action="store_true",
                         help="Don't prompt when the server flags the file as suspicious (warn only, never a hard refuse). For CI.")
+    p_scan.add_argument("--no-group", action="store_true",
+                        help="Console table: one row per rule hit instead of grouping the same rule in the same file.")
     p_scan.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "any"],
                         help=FAIL_ON_HELP + " Evaluated after --upload, so the results are still sent.")
     p_scan.set_defaults(func=cmd_scan)
@@ -2791,9 +3001,9 @@ def cli(prog=None):
     p_upload_all.add_argument("directory", help="Directory to search for scan targets")
     p_upload_all.add_argument("--no-recursive", action="store_true",
                               help="Only look in the top-level directory, don't walk subdirectories")
-    p_upload_all.add_argument("--max-mem", default="4g", help="Max memory for jadx on each Android target, e.g. '2g' or '4096m' (default: 4g).")
+    p_upload_all.add_argument("--max-mem", default="auto", help="Upper limit for the jadx Java heap on each Android target, e.g. '2g' or '4096m' (default: auto, sized per app and free memory).")
     p_upload_all.add_argument("--force", action="store_true",
-                              help="Decompile anyway when the memory estimate says jadx will likely run out of memory.")
+                              help="Run jadx with exactly --max-mem, without automatic heap sizing or the out-of-memory retry.")
     p_upload_all.add_argument("--confirm-upload", action="store_true",
                               help="Don't prompt when the server flags a file as suspicious (warn only, never a hard refuse). For CI.")
     p_upload_all.set_defaults(func=cmd_upload_all)

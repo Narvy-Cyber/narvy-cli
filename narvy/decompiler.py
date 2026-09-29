@@ -11,9 +11,16 @@ import logging
 import requests
 
 from .apk_memory_preflight import (
-    JVM_RSS_OVERHEAD,
+    MIN_HEAP_MB,
+    app_scale,
+    available_ram_mb,
     check_memory_preflight,
+    fmt_mb,
+    heap_that_fits_mb,
+    is_auto,
+    needed_heap_mb,
     parse_mem_arg,
+    plan_heap,
 )
 
 logger = logging.getLogger(__name__)
@@ -194,55 +201,214 @@ def _validate_apk_zip(apk_path: str):
     return None
 
 
-def _as_limit_preexec(max_mem_mb):
-    """Return a preexec_fn capping the jadx child's address space, or None. POSIX only."""
-    # Cap is 2x heap + 3 GB: a JVM reserves far more address space than its heap.
-    if _IS_WINDOWS or not max_mem_mb:
-        return None
-    try:
-        import resource
-    except ImportError:
-        return None
-
-    limit_bytes = int((max_mem_mb * 2 + 3072) * 1024 * 1024)
-
-    def _set_limits():
-        try:
-            soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-            # Never raise an existing limit: a CI runner may have set a tighter one.
-            target = limit_bytes
-            if hard != resource.RLIM_INFINITY:
-                target = min(target, hard)
-            if soft != resource.RLIM_INFINITY:
-                target = min(target, soft)
-            resource.setrlimit(resource.RLIMIT_AS, (target, hard))
-        except Exception:
-            pass
-
-    return _set_limits
-
-
-# Set by decompile_apk when it ran jadx with a smaller heap than --max-mem; the caller prints it.
+# Set by decompile_apk: the heap line(s) the caller prints after decompilation.
 LAST_HEAP_NOTE = None
+# What the last decompile_apk did, for tests and the JSON report: list of attempts.
+LAST_ATTEMPTS = []
+
+_HEAP_OOM_MARKERS = (
+    "java.lang.OutOfMemoryError: Java heap space",
+    "java.lang.OutOfMemoryError: GC overhead limit exceeded",
+    "Terminating due to java.lang.OutOfMemoryError",
+    "OutOfMemoryError: Java heap space",
+)
+# The OS would not give the JVM memory (commit charge full on Windows, a
+# container limit, the OOM killer): a smaller heap is what can still work.
+_NATIVE_OOM_MARKERS = (
+    "There is insufficient memory for the Java Runtime Environment",
+    "Native memory allocation (mmap) failed",
+    "Native memory allocation (malloc) failed",
+    "Could not reserve enough space for",
+    "unable to create native thread",
+    "Cannot allocate memory",
+    "Error occurred during initialization of VM",
+)
 
 
-def decompile_apk(apk_path: str, output_dir: str, max_mem: str = "4g", force: bool = False,
-                  extra_inputs=None):
-    """Decompile an APK with jadx; returns (success, error_detail). jadx keeps the FIRST input's manifest, so apk_path stays first; `extra_inputs` merge into one tree."""
+def _count_sources(output_dir):
+    n = 0
+    for _root, _dirs, files in os.walk(output_dir):
+        n += sum(1 for f in files if f.endswith((".java", ".kt")))
+    return n
+
+
+def _classify_failure(returncode, output):
+    """'heap' (Java heap too small), 'native' (the OS refused memory), or 'other'."""
+    if any(m in output for m in _NATIVE_OOM_MARKERS):
+        return "native"
+    if any(m in output for m in _HEAP_OOM_MARKERS) or "OutOfMemoryError" in output:
+        return "heap"
+    # SIGKILL: POSIX -9, or 137 when a shell in between reports it.
+    if returncode in (-9, 137):
+        return "native"
+    return "other"
+
+
+def _jadx_env(xmx_mb, jre_bin_dir):
+    env = os.environ.copy()
+    # -Xms: the launcher's own -Xms256M would stop a smaller -Xmx from starting.
+    # ExitOnOutOfMemoryError: stop at the first heap exhaustion instead of
+    # grinding on for minutes, so the retry starts sooner.
+    env['JADX_OPTS'] = (f'-Xms{min(256, xmx_mb)}m -Xmx{xmx_mb}m '
+                        f'-XX:+ExitOnOutOfMemoryError')
+    if jre_bin_dir:
+        # jadx.bat reads JAVA_HOME, the Unix launcher just calls `java`.
+        env['JAVA_HOME'] = os.path.dirname(jre_bin_dir)
+        env['PATH'] = jre_bin_dir + os.pathsep + env.get('PATH', '')
+    else:
+        # jadx.bat prefers JAVA_HOME over PATH; drop a stale one for this subprocess only.
+        java_home = env.get('JAVA_HOME')
+        if java_home:
+            candidate = os.path.join(java_home, 'bin', 'java.exe' if _IS_WINDOWS else 'java')
+            if not os.path.isfile(candidate) or (_java_major_version(candidate) or 0) < 11:
+                logger.warning(f"JAVA_HOME ({java_home}) is broken or too old - ignoring it for this scan only, falling back to PATH java")
+                del env['JAVA_HOME']
+    return env
+
+
+def _run_jadx_once(jadx_bin, jre_bin_dir, apk_path, output_dir, extra_inputs, xmx_mb, threads):
+    """One jadx run. Returns dict(ok, kind, returncode, output, cmd, sources, timed_out)."""
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir, ignore_errors=True)
+    os.makedirs(output_dir, exist_ok=True)
+    args = ['--output-dir', output_dir, '--show-bad-code']
+    if threads:
+        args += ['-j', str(threads)]
+    cmd = _jadx_cmd(jadx_bin, args + [apk_path] + list(extra_inputs or []))
+    rec = {"xmx_mb": xmx_mb, "threads": threads, "cmd": cmd, "timed_out": False}
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=900, env=_jadx_env(xmx_mb, jre_bin_dir),
+        )
+    except subprocess.TimeoutExpired:
+        rec.update(ok=False, kind="timeout", returncode=None, output="", sources=0, timed_out=True)
+        return rec
+    rc = getattr(proc, "returncode", 0) or 0
+    output = (getattr(proc, "stdout", "") or "") + (getattr(proc, "stderr", "") or "")
+    rec.update(returncode=rc, output=output, stdout=getattr(proc, "stdout", "") or "",
+               stderr=getattr(proc, "stderr", "") or "")
+    rec["sources"] = _count_sources(output_dir)
+    kind = _classify_failure(rc, output) if rc != 0 or "OutOfMemoryError" in output else None
+    if kind is None and "unable to create native thread" in output:
+        kind = "native"
+    rec["kind"] = kind
+    rec["ok"] = rc == 0 and kind is None
+    return rec
+
+
+def _retry_heap(first, plan, requested_mb):
+    """(xmx_mb, threads) for the single retry, or None when no retry can help."""
+    xmx = first["xmx_mb"]
+    if first["kind"] == "heap":
+        fit_now = heap_that_fits_mb(available_ram_mb())
+        caps = [c for c in (requested_mb, fit_now) if c]
+        bigger = min(caps) if caps else None
+        if bigger and (bigger // 64) * 64 >= int(xmx * 1.25):
+            return (bigger // 64) * 64, None
+        # No room for a bigger heap. The same heap with fewer worker threads was
+        # measured and does not rescue it (K-9 Mail at 1g: OOM with 4, 2 and 1
+        # threads), so no retry: minutes saved, and the message says why.
+        return None
+    if first["kind"] == "native":
+        smaller = max(MIN_HEAP_MB, ((int(xmx * 0.6)) // 64) * 64)
+        if smaller < xmx:
+            return smaller, 1
+        return xmx, 1
+    return None
+
+
+def _failure_message(apk_path, attempts, plan):
+    last = attempts[-1]
+    cmd = last["cmd"]
+    if last.get("timed_out"):
+        return (
+            f"JADX timed out after 900s decompiling {apk_path}. Large/obfuscated "
+            "APKs can take longer - this is a hard ceiling, not currently configurable."
+        )
+    tried = ", then ".join(
+        f"{fmt_mb(a['xmx_mb'])} heap" + (f" with {a['threads']} thread" if a.get("threads") else "")
+        for a in attempts)
+    if last["kind"] in ("heap", "native"):
+        st = plan.stats
+        size = f" ({app_scale(st)})" if st.ok else ""
+        avail = available_ram_mb()
+        if last["kind"] == "heap":
+            head = f"JADX ran out of Java heap decompiling this app{size}. Tried: {tried}."
+        else:
+            head = (f"The operating system could not give JADX the memory it asked for{size}. "
+                    f"Tried: {tried}.")
+            if last["returncode"] in (-9, 137):
+                head += (" (The process was killed with SIGKILL: the OS out-of-memory killer, a "
+                         "container/cgroup memory limit or a CI runner's cap. Check "
+                         "`dmesg -T | grep -i oom` and your container/CI limits.)")
+        lines = [head]
+        need = needed_heap_mb(plan.stats)
+        if need:
+            lines.append(f"This app is estimated to need about {fmt_mb(need)} of Java heap; "
+                         f"{fmt_mb(avail)} of memory is free right now.")
+        lines.append("Options:")
+        lines.append("  - close other apps (browsers, IDEs, emulators) and re-run: the heap is sized "
+                     "from the memory free at the start of the scan")
+        if plan.requested_mb:
+            lines.append(f"  - drop --max-mem {fmt_mb(plan.requested_mb)} (or raise it) so the heap "
+                         f"can grow to what is free")
+        lines.append("  - scan on a machine with more free memory, or upload the app from your "
+                     "Narvy dashboard for a hosted scan")
+        lines.append(f"Command run: {_cmd_text(cmd)}")
+        return "\n".join(lines)
+    parts = [f"JADX failed (exit code {last['returncode']})", f"Command run: {_cmd_text(cmd)}"]
+    if last.get("stdout"):
+        parts.append(f"JADX stdout:\n{last['stdout'][-4000:]}")
+    if last.get("stderr"):
+        parts.append(f"JADX stderr:\n{last['stderr'][-4000:]}")
+    if not last.get("stdout") and not last.get("stderr"):
+        parts.append(
+            "No output captured on either stdout or stderr. Run "
+            "`narvy doctor` to check your Java/jadx setup, or try "
+            f"running this exact command yourself to see the raw error: {_cmd_text(cmd)}"
+        )
+    if last["returncode"] == 0 and last.get("sources", 0) == 0:
+        parts.insert(0, "JADX exited without error but wrote no Java sources, so there is "
+                        "nothing to analyse (reported as a failure, not as a clean scan).")
+    return "\n".join(parts)
+
+
+def decompile_apk(apk_path: str, output_dir: str, max_mem: str = None, force: bool = False,
+                  extra_inputs=None, notify=None):
+    """Decompile an APK with jadx; returns (success, error_detail).
+
+    The Java heap is sized by apk_memory_preflight.plan_heap (never a refusal).
+    If jadx runs out of Java heap it is retried once with a bigger heap when free
+    memory allows; when the OS refused memory outright (commit limit, OOM killer,
+    no native thread) it is retried once with a smaller heap and one thread. `--force` runs exactly --max-mem, no sizing and
+    no retry. jadx keeps the FIRST input's manifest, so apk_path stays first;
+    `extra_inputs` merge into one tree. `notify(level, text)` receives the heap
+    warning before jadx starts (level "warning") and progress notes ("note").
+    """
     validation_error = _validate_apk_zip(apk_path)
     if validation_error:
         return False, validation_error
 
-    global LAST_HEAP_NOTE
+    global LAST_HEAP_NOTE, LAST_ATTEMPTS
     LAST_HEAP_NOTE = None
-    if not force:
-        verdict = check_memory_preflight(apk_path, max_mem)
-        if verdict.should_block:
-            return False, verdict.message
-        lowered = getattr(verdict, "lowered_max_mem", None)
-        if lowered:
-            max_mem = lowered
-            LAST_HEAP_NOTE = verdict.message
+    LAST_ATTEMPTS = []
+
+    def _say(level, text):
+        if notify and text:
+            try:
+                notify(level, text)
+            except Exception:  # noqa: BLE001 - a display hiccup must not fail the scan
+                logger.debug("notify failed", exc_info=True)
+
+    inputs = [apk_path] + list(extra_inputs or [])
+    plan = plan_heap(inputs, max_mem)
+    requested_mb = plan.requested_mb
+    if force and requested_mb:
+        xmx = requested_mb
+    else:
+        xmx = plan.xmx_mb
+        _say("warning", plan.warning)
 
     try:
         jadx_bin = resolve_jadx_binary()
@@ -259,112 +425,48 @@ def decompile_apk(apk_path: str, output_dir: str, max_mem: str = "4g", force: bo
             "and put it on PATH. Run `narvy doctor` to check your setup."
         )
 
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-    os.makedirs(output_dir, exist_ok=True)
-
-    jadx_env = os.environ.copy()
-    jadx_env['JADX_OPTS'] = f'-Xmx{max_mem}'
-
-    if jre_bin_dir:
-        # jadx.bat reads JAVA_HOME, the Unix launcher just calls `java`.
-        jadx_env['JAVA_HOME'] = os.path.dirname(jre_bin_dir)
-        jadx_env['PATH'] = jre_bin_dir + os.pathsep + jadx_env.get('PATH', '')
-    else:
-        # jadx.bat prefers JAVA_HOME over PATH; drop a stale one for this subprocess only.
-        java_home = jadx_env.get('JAVA_HOME')
-        if java_home:
-            candidate = os.path.join(java_home, 'bin', 'java.exe' if _IS_WINDOWS else 'java')
-            if not os.path.isfile(candidate) or (_java_major_version(candidate) or 0) < 11:
-                logger.warning(f"JAVA_HOME ({java_home}) is broken or too old - ignoring it for this scan only, falling back to PATH java")
-                del jadx_env['JAVA_HOME']
-
-    cmd = _jadx_cmd(
-        jadx_bin,
-        ['--output-dir', output_dir, '--show-bad-code', apk_path] + list(extra_inputs or []),
-    )
-
-    run_kwargs = {}
-    preexec = _as_limit_preexec(parse_mem_arg(max_mem))
-    if preexec is not None:
-        run_kwargs["preexec_fn"] = preexec
-
     try:
-        process = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            check=True,
-            timeout=900,
-            env=jadx_env,
-            **run_kwargs
-        )
-        return True, ""
-    except subprocess.CalledProcessError as e:
-        # jadx/cmd.exe don't consistently use stderr; report both streams.
-        parts = [f"JADX failed (exit code {e.returncode})", f"Command run: {_cmd_text(cmd)}"]
-        if e.stdout:
-            parts.append(f"JADX stdout:\n{e.stdout}")
-        if e.stderr:
-            parts.append(f"JADX stderr:\n{e.stderr}")
-        if not e.stdout and not e.stderr:
-            parts.append(
-                "No output captured on either stdout or stderr. Run "
-                "`narvy doctor` to check your Java/jadx setup, or try "
-                f"running this exact command yourself to see the raw error: "
-                f"{_cmd_text(cmd)}"
-            )
-        # OOM is unambiguous; a bare -9 (SIGKILL) is ambiguous, so they differ.
-        _combined_output = (e.stdout or "") + (e.stderr or "")
-        _jvm_oom = "OutOfMemoryError" in _combined_output
-        if _jvm_oom or e.returncode == -9:
-            if _jvm_oom:
-                hint = "\nJADX ran out of memory decompiling this app."
-            else:
-                hint = (
-                    "\nJADX was killed by SIGKILL (exit -9) - killed from outside, with no "
-                    "error of its own. There is no way to tell from the exit code alone which "
-                    "of these it was: the OS out-of-memory killer, a container/cgroup memory "
-                    "limit (Docker `--memory`, a CI runner's cap), a job timeout, or another "
-                    "process on this machine. Check `dmesg -T | grep -i oom` and your "
-                    "container/CI memory limits."
-                )
-            try:
-                v = check_memory_preflight(apk_path, max_mem)
-                suggest_gb = max(1, -(-int(v.estimated_mb * 1.25) // 1024))
-                lead = ("Based on" if _jvm_oom else
-                        "\n\nIf it was memory: based on")
-                hint += (
-                    f" {lead} its size (~{v.stats.methods:,} methods / "
-                    f"~{v.stats.classes:,} classes), it needs noticeably more than the "
-                    f"{max_mem} it was given"
-                )
-                if v.available_mb is not None:
-                    fits = int(suggest_gb * 1024 * JVM_RSS_OVERHEAD) <= v.available_mb
-                    hint += (
-                        f". Try `--max-mem {suggest_gb}g`"
-                        + ("." if fits else
-                           f", but note this machine only has ~{v.available_mb // 1024} GB free "
-                           f"right now - you would need to free memory first, or run this scan "
-                           f"elsewhere (e.g. `--upload` for the hosted scan).")
-                    )
-                else:
-                    hint += f". Try `--max-mem {suggest_gb}g`."
-            except Exception:
-                hint += (
-                    f" Try again with more headroom, e.g. `narvy scan {apk_path} "
-                    f"--max-mem 8g`."
-                )
-            parts.append(hint)
-        return False, "\n".join(parts)
-    except subprocess.TimeoutExpired:
-        return False, (
-            f"JADX timed out after 900s decompiling {apk_path}. Large/obfuscated "
-            "APKs can take longer - this is a hard ceiling, not currently configurable."
-        )
+        first = _run_jadx_once(jadx_bin, jre_bin_dir, apk_path, output_dir, extra_inputs, xmx, None)
     except FileNotFoundError as e:
         return False, (
             f"Could not launch jadx ({jadx_bin}): {e}. Run `narvy doctor` "
             "to check your setup, or delete ~/.narvy/tools and re-run "
             "to force a clean re-download."
         )
+    attempts = [first]
+    if not first["ok"] and not force:
+        retry = _retry_heap(first, plan, requested_mb)
+        if retry:
+            r_xmx, r_threads = retry
+            what = "ran out of Java heap" if first["kind"] == "heap" else "was refused memory by the OS"
+            _say("warning", f"JADX {what} at a {fmt_mb(xmx)} heap; retrying once with "
+                            f"{fmt_mb(r_xmx)}" + (f" and {r_threads} worker thread" if r_threads else "")
+                            + ".")
+            attempts.append(_run_jadx_once(jadx_bin, jre_bin_dir, apk_path, output_dir,
+                                           extra_inputs, r_xmx, r_threads))
+    LAST_ATTEMPTS = [{k: a.get(k) for k in ("xmx_mb", "threads", "returncode", "kind", "sources", "ok")}
+                     for a in attempts]
+    final = attempts[-1]
+    if final["ok"] and plan.stats.ok and plan.stats.classes > 0 and final.get("sources", 0) == 0:
+        final["ok"] = False
+        final["kind"] = "other"
+    if not final["ok"]:
+        return False, _failure_message(apk_path, attempts, plan)
+
+    used = final["xmx_mb"]
+    bits = [f"JADX heap {fmt_mb(used)}"]
+    if needed_heap_mb(plan.stats):
+        bits.append(f"app needs ~{fmt_mb(needed_heap_mb(plan.stats))}")
+    if plan.available_mb is not None:
+        bits.append(f"{fmt_mb(plan.available_mb)} free at start")
+    if requested_mb and used < requested_mb:
+        bits.append(f"--max-mem {fmt_mb(requested_mb)} is the upper limit")
+    if len(attempts) > 1:
+        bits.append(f"succeeded on retry after the {fmt_mb(attempts[0]['xmx_mb'])} run failed")
+    note = "; ".join(bits) + "."
+    m = re.search(r"finished with errors, count: (\d+)", final.get("output") or "")
+    if m and int(m.group(1)):
+        note += (f" JADX could not fully decompile {int(m.group(1))} method(s); they are kept "
+                 f"as low-level code, so findings inside them may be missed.")
+    LAST_HEAP_NOTE = note
+    return True, ""

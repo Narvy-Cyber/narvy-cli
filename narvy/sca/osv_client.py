@@ -1,4 +1,19 @@
-"""OSV.dev client with a local SQLite cache and an offline fallback."""
+"""OSV client with a local SQLite cache and an offline fallback.
+
+By default the dependency check talks to Narvy's EU-hosted OSV mirror (a copy
+of the OSV.dev database). Only package names, ecosystems and versions are
+sent: never code, file paths or findings.
+
+Endpoint configuration (environment):
+
+- ``OSV_API_URL``: either a base URL (``https://host/path``; ``/query`` and
+  ``/querybatch`` are appended) or, as in earlier releases, the full single
+  query URL ending in ``/query`` (used as-is; the batch URL is derived from
+  the same base). Example: ``OSV_API_URL=https://api.osv.dev/v1``.
+- ``OSV_BATCH_API_URL``: optional explicit batch URL (full URL ending in
+  ``/querybatch``, or a base that gets ``/querybatch`` appended). When unset
+  the batch URL follows ``OSV_API_URL``.
+"""
 
 from __future__ import annotations
 
@@ -9,17 +24,108 @@ import re
 import sqlite3
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 
+from .. import __version__
+
 logger = logging.getLogger(__name__)
 
-# Overridable for airgapped or mirrored deployments.
-OSV_API_URL = os.environ.get("OSV_API_URL", "https://api.osv.dev/v1/query")
-OSV_BATCH_URL = os.environ.get("OSV_BATCH_API_URL", "https://api.osv.dev/v1/querybatch")
+DEFAULT_OSV_BASE_URL = "https://narvy.io/api/v1/osv"
+
+# The mirror answers at most this many queries per /querybatch call.
+MAX_BATCH_QUERIES = 1000
+# Stay under the mirror's ~1 MB request body cap.
+MAX_BATCH_BODY_BYTES = 900_000
+
+# Most unique dependencies one scan sends to the database (same cap as the
+# Narvy platform). The batch pre-filter carries them in MAX_BATCH_QUERIES
+# chunks; anything over the cap is reported as a partial check, never dropped
+# silently.
+MAX_DEPENDENCIES_PER_SCAN = 20_000
+
+# Client-side pacing under the Narvy endpoint's per-IP limits (600 /query and
+# 30 /querybatch per minute, 20 requests/s at the front proxy), so a large
+# scan slows down instead of tripping its own 429. Other servers are not paced.
+_PACE_WINDOW_SECONDS = 60.0
+_PACE_PER_WINDOW = {"query": 500, "batch": 25}
+_PACE_MIN_INTERVAL_SECONDS = 0.06
+
+# One bounded retry on 429, honouring Retry-After up to this many seconds.
+_RETRY_AFTER_CAP_SECONDS = 10.0
+# Reason carried by OSVUnavailable when no request was sent because the circuit is open.
+_CIRCUIT_OPEN = "circuit_open"
+_MAX_RETRIES_PER_CLIENT = 5
+
+
+def _strip_suffix(url: str, suffix: str) -> Optional[str]:
+    u = url.rstrip("/")
+    if u.endswith(suffix):
+        return u[: -len(suffix)]
+    return None
+
+
+def resolve_osv_endpoints(
+    api_env: Optional[str] = None,
+    batch_env: Optional[str] = None,
+) -> Tuple[str, str]:
+    """(query_url, batch_url) from OSV_API_URL / OSV_BATCH_API_URL values (None = unset)."""
+    api_env = (api_env or "").strip()
+    batch_env = (batch_env or "").strip()
+    if not api_env:
+        base = DEFAULT_OSV_BASE_URL
+        query_url = base + "/query"
+    else:
+        stripped = _strip_suffix(api_env, "/query")
+        if stripped is not None:
+            base = stripped
+            query_url = api_env.rstrip("/")
+        else:
+            base = api_env.rstrip("/")
+            query_url = base + "/query"
+    if batch_env:
+        if _strip_suffix(batch_env, "/querybatch") is not None:
+            batch_url = batch_env.rstrip("/")
+        else:
+            batch_url = batch_env.rstrip("/") + "/querybatch"
+    else:
+        batch_url = base + "/querybatch"
+    return query_url, batch_url
+
+
+def endpoints_from_env() -> Tuple[str, str]:
+    return resolve_osv_endpoints(os.environ.get("OSV_API_URL"), os.environ.get("OSV_BATCH_API_URL"))
+
+
+def is_narvy_endpoint(url: str) -> bool:
+    """True when `url` is the default Narvy EU mirror."""
+    return url.rstrip("/").startswith(DEFAULT_OSV_BASE_URL + "/") or url.rstrip("/") == DEFAULT_OSV_BASE_URL
+
+
+def endpoint_host(url: str) -> str:
+    try:
+        return urlparse(url).netloc or url
+    except ValueError:
+        return url
+
+
+def egress_notice(url: Optional[str] = None) -> str:
+    """The line printed when the dependency check starts, naming where it sends data."""
+    url = url or endpoints_from_env()[0]
+    if is_narvy_endpoint(url):
+        return ("Checking dependencies against Narvy's EU vulnerability database "
+                "(sends package names and versions only, never code)...")
+    return (f"Checking dependencies against the OSV-compatible server at {endpoint_host(url)} "
+            f"(OSV_API_URL; sends package names and versions only, never code)...")
+
+
+# Module-level values kept for callers that read them; resolved at import.
+OSV_API_URL, OSV_BATCH_URL = endpoints_from_env()
 
 _DEFAULT_CACHE_PATH = Path.home() / ".narvy" / "osv_cache.db"
 
@@ -28,8 +134,11 @@ DEFAULT_TTL_SECONDS = 7 * 24 * 3600
 # CVE ids older than modern mobile package managers are noise.
 MIN_CVE_YEAR = 2010
 
-# OSV has no "CocoaPods" ecosystem (rejected as invalid); Swift packages live
-# under "SwiftURL", keyed by the bare `github.com/<owner>/<repo>` path.
+# Ecosystems the Narvy mirror carries. OSV has no "CocoaPods" ecosystem
+# (rejected as invalid); Swift packages live under "SwiftURL", keyed by the
+# bare `github.com/<owner>/<repo>` path. A query for any other ecosystem is
+# not sent (the mirror would reject the whole batch) and the dependency is
+# counted as unverified, never as clean.
 ECOSYSTEMS = {
     "Maven",
     "PyPI",
@@ -40,7 +149,17 @@ ECOSYSTEMS = {
     "Packagist",
     "NuGet",
     "SwiftURL",
+    "OSS-Fuzz",
 }
+
+
+class OSVUnavailable(Exception):
+    """The vulnerability database gave no usable answer (outage, stale mirror, rate limit, bad request)."""
+
+
+class OSVTooLarge(OSVUnavailable):
+    """HTTP 413: the request (body size or lookup cost) is too big; a smaller one may pass."""
+
 
 _SEVERITY_BUCKETS = [
     (9.0, "CRITICAL"),
@@ -457,30 +576,203 @@ def _parse_osv_vuln(
 
 
 class OSVClient:
-    """OSV client with cache, offline fallback and a querybatch pre-filter."""
+    """OSV client with cache, offline fallback and a querybatch pre-filter.
+
+    Any answer that is not a usable 200 (unreachable, 503 stale/unavailable
+    mirror, 429 after one bounded retry, 400, malformed JSON) is a failure:
+    the affected dependencies are counted as unresolved so the scan reports
+    SCA as incomplete. Nothing here turns a failure into "no vulnerabilities".
+    """
 
     def __init__(
         self,
         cache: Optional[OSVCache] = None,
-        api_url: str = OSV_API_URL,
-        batch_url: str = OSV_BATCH_URL,
+        api_url: Optional[str] = None,
+        batch_url: Optional[str] = None,
         timeout: float = 10.0,
         session: Optional[requests.Session] = None,
+        sleep=None,
+        clock=None,
     ):
-        self.api_url = api_url
-        self.batch_url = batch_url
+        env_query, env_batch = endpoints_from_env()
+        if api_url and not batch_url:
+            # A caller-supplied query URL derives its batch URL from the same base.
+            api_url, batch_url = resolve_osv_endpoints(api_url, None)
+        self.api_url = api_url or env_query
+        self.batch_url = batch_url or env_batch
         self.timeout = timeout
         self.cache = cache or OSVCache()
-        # Coverage counters: tell "0 CVEs because OSV said so" from "0 because OSV was unreachable".
+        # Coverage counters: tell "0 CVEs because the database said so" from
+        # "0 because it could not answer".
         self.batch_failures = 0
         self.query_failures_no_cache = 0
+        self.unsupported_ecosystem_skips = 0
+        self.stale_cache_served = 0
+        self.last_error: Optional[str] = None
+        self.last_error_detail: Optional[str] = None
+        self.snapshot_utc: Optional[str] = None
+        self.snapshot_age_hours: Optional[float] = None
+        # Once the server is down/stale/rate-limiting, stop asking for this run.
+        self._circuit_open = False
+        self._retries_used = 0
+        # One log line per failure kind per run, not one per dependency.
+        self._logged_kinds: set = set()
+        self.skipped_after_circuit = 0
+        self._sleep = sleep or time.sleep
+        self._clock = clock or time.monotonic
+        self._sent: Dict[str, deque] = {"query": deque(), "batch": deque()}
+        self._last_sent: Optional[float] = None
+        self.paced_seconds = 0.0
         self._session = session or requests.Session()
         self._session.headers.update(
             {
                 "Content-Type": "application/json",
-                "User-Agent": "Narvy-CLI-SCA/1.0 (OSV; +https://narvy.io)",
+                "User-Agent": f"narvy-cli/{__version__} (dependency check; +https://narvy.io)",
             }
         )
+
+    # -- transport -------------------------------------------------------
+
+    def _fail(self, kind: str, detail: str = "", trip: bool = False) -> None:
+        self.last_error = kind
+        self.last_error_detail = detail[:300] if detail else None
+        if trip and not self._circuit_open:
+            self._circuit_open = True
+            logger.warning(
+                "OSV: vulnerability database at %s unavailable (%s%s); no further "
+                "lookups this run, remaining dependencies are left unverified and the "
+                "dependency check is reported incomplete.",
+                endpoint_host(self.api_url), kind,
+                (": " + detail[:80]) if detail else "",
+            )
+
+    def _log_once(self, kind: str, message: str) -> None:
+        """First occurrence of `kind` at WARNING, the rest at DEBUG (counted anyway)."""
+        if kind in self._logged_kinds:
+            logger.debug(message)
+            return
+        self._logged_kinds.add(kind)
+        logger.warning(message + " (further occurrences not logged; see the coverage note)")
+
+    def _record_snapshot(self, resp: Any) -> None:
+        headers = getattr(resp, "headers", None) or {}
+        try:
+            snap = headers.get("X-OSV-Snapshot")
+            age = headers.get("X-OSV-Snapshot-Age-Hours")
+        except AttributeError:
+            return
+        if snap:
+            self.snapshot_utc = str(snap)
+        if age is not None:
+            try:
+                self.snapshot_age_hours = float(age)
+            except (TypeError, ValueError):
+                pass
+
+    @staticmethod
+    def _error_json(resp: Any) -> Dict[str, Any]:
+        try:
+            data = resp.json()
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _retry_after(self, resp: Any) -> float:
+        headers = getattr(resp, "headers", None) or {}
+        raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+        try:
+            wait = float(raw) if raw is not None else 1.0
+        except (TypeError, ValueError):
+            wait = 1.0
+        return max(0.0, min(wait, _RETRY_AFTER_CAP_SECONDS))
+
+    def _pace(self, url: str) -> None:
+        """Wait, if needed, so requests to the Narvy endpoint stay under its per-IP limits."""
+        if not is_narvy_endpoint(url):
+            return
+        kind = "batch" if url.rstrip("/").endswith("/querybatch") else "query"
+        sent = self._sent[kind]
+        now = self._clock()
+        wait = 0.0
+        if self._last_sent is not None:
+            wait = max(wait, _PACE_MIN_INTERVAL_SECONDS - (now - self._last_sent))
+        while sent and now - sent[0] >= _PACE_WINDOW_SECONDS:
+            sent.popleft()
+        if len(sent) >= _PACE_PER_WINDOW[kind]:
+            wait = max(wait, _PACE_WINDOW_SECONDS - (now - sent[0]))
+        if wait > 0:
+            if wait >= 1.0:
+                self._log_once(f"pace:{kind}", f"OSV: pacing requests to stay under the "
+                               f"vulnerability database's rate limit (waiting {wait:.0f} s)")
+            self._sleep(wait)
+            self.paced_seconds += wait
+            now = self._clock()
+            while sent and now - sent[0] >= _PACE_WINDOW_SECONDS:
+                sent.popleft()
+        sent.append(now)
+        self._last_sent = now
+
+    def _post(self, url: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        """POST and return the JSON body of a 200, else raise OSVUnavailable."""
+        if self._circuit_open:
+            raise OSVUnavailable(_CIRCUIT_OPEN)
+        attempt = 0
+        while True:
+            self._pace(url)
+            try:
+                resp = self._session.post(url, json=body, timeout=self.timeout)
+            except requests.RequestException as exc:
+                self._fail("unreachable", str(exc), trip=True)
+                raise OSVUnavailable("unreachable") from exc
+            self._record_snapshot(resp)
+            status = getattr(resp, "status_code", 200)
+            if status == 429:
+                if attempt == 0 and self._retries_used < _MAX_RETRIES_PER_CLIENT:
+                    attempt += 1
+                    self._retries_used += 1
+                    self._sleep(self._retry_after(resp))
+                    continue
+                self._fail("rate_limited", "HTTP 429", trip=True)
+                raise OSVUnavailable("rate_limited")
+            if status == 503:
+                err = self._error_json(resp)
+                kind = err.get("error") if err.get("error") in ("mirror_stale", "mirror_unavailable") else "unavailable"
+                if err.get("snapshot_utc"):
+                    self.snapshot_utc = str(err["snapshot_utc"])
+                self._fail(kind, str(err.get("message") or "HTTP 503"), trip=True)
+                raise OSVUnavailable(kind)
+            if status == 413:
+                # Not a server outage: the batch is split and retried by the caller.
+                err = self._error_json(resp)
+                self._fail("too_large", str(err.get("message") or "HTTP 413"))
+                raise OSVTooLarge("too_large")
+            if status == 400:
+                err = self._error_json(resp)
+                self._fail("bad_request", str(err.get("message") or "HTTP 400"))
+                raise OSVUnavailable("bad_request")
+            if isinstance(status, int) and status >= 400:
+                # 404 = no such endpoint (wrong OSV_API_URL): every later call would fail too.
+                self._fail(f"http_{status}", f"HTTP {status}", trip=True)
+                raise OSVUnavailable(f"http_{status}")
+            try:
+                resp.raise_for_status()
+                payload = resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                self._fail("invalid_response", str(exc))
+                raise OSVUnavailable("invalid_response") from exc
+            if not isinstance(payload, dict):
+                self._fail("invalid_response", "response is not a JSON object")
+                raise OSVUnavailable("invalid_response")
+            return payload
+
+    # -- lookups ---------------------------------------------------------
+
+    def _parse_all(self, raw_vulns, package_name, version, ecosystem) -> List[OSVFinding]:
+        return [
+            f
+            for f in (_parse_osv_vuln(v, package_name, version, ecosystem) for v in raw_vulns)
+            if f is not None
+        ]
 
     def query(
         self,
@@ -493,61 +785,46 @@ class OSVClient:
         if not package_name or not version:
             return []
         if ecosystem not in ECOSYSTEMS:
-            logger.warning(f"OSV: unknown ecosystem '{ecosystem}', querying anyway")
+            # Not carried by the database: never sent, never reported clean.
+            self._log_once(f"unsupported:{ecosystem}",
+                           f"OSV: ecosystem '{ecosystem}' is not covered by the vulnerability "
+                           f"database; its dependencies are left unverified")
+            self.unsupported_ecosystem_skips += 1
+            return []
 
         if use_cache:
             cached = self.cache.get(package_name, version, ecosystem)
             if cached is not None:
-                return [
-                    f
-                    for f in (
-                        _parse_osv_vuln(v, package_name, version, ecosystem)
-                        for v in cached
-                    )
-                    if f is not None
-                ]
+                return self._parse_all(cached, package_name, version, ecosystem)
 
         body = {
             "package": {"name": package_name, "ecosystem": ecosystem},
             "version": version,
         }
         try:
-            resp = self._session.post(self.api_url, json=body, timeout=self.timeout)
-            resp.raise_for_status()
-            payload = resp.json()
+            payload = self._post(self.api_url, body)
             raw_vulns = payload.get("vulns", []) or []
-
-            self.cache.put(package_name, version, ecosystem, raw_vulns)
-
-            findings = [
-                f
-                for f in (
-                    _parse_osv_vuln(v, package_name, version, ecosystem)
-                    for v in raw_vulns
-                )
-                if f is not None
-            ]
-            return findings
-
-        except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
-            logger.warning(f"OSV query failed for {package_name}@{version}: {exc}")
+            if not isinstance(raw_vulns, list):
+                self._fail("invalid_response", "'vulns' is not a list")
+                raise OSVUnavailable("invalid_response")
+        except OSVUnavailable as exc:
+            if str(exc) == _CIRCUIT_OPEN:
+                self.skipped_after_circuit += 1
+            elif not self._circuit_open:
+                # Per-dependency failure that did not take the database down (400, bad JSON).
+                self._log_once(f"query:{exc}", f"OSV query failed for {package_name}@{version}: {exc}")
             stale = self.cache.get_stale(package_name, version, ecosystem)
             if stale is not None:
-                logger.warning(
-                    f"OSV: serving STALE cache for {package_name}@{version} "
-                    f"(network unreachable)"
-                )
-                return [
-                    f
-                    for f in (
-                        _parse_osv_vuln(v, package_name, version, ecosystem)
-                        for v in stale
-                    )
-                    if f is not None
-                ]
+                self._log_once("stale_cache", "OSV: serving expired cached results for some "
+                               "dependencies (vulnerability database unavailable)")
+                self.stale_cache_served += 1
+                return self._parse_all(stale, package_name, version, ecosystem)
             # Failed and nothing cached: this dependency is UNKNOWN, not clean.
             self.query_failures_no_cache += 1
             return []
+
+        self.cache.put(package_name, version, ecosystem, raw_vulns)
+        return self._parse_all(raw_vulns, package_name, version, ecosystem)
 
     def query_dict(self, package_name: str, version: str, ecosystem: str = "Maven") -> List[Dict[str, Any]]:
         # OSV lists one CVE under several advisory ids (GHSA/PYSEC/CVE); dedupe on the CVE.
@@ -561,16 +838,35 @@ class OSVClient:
             out.append(f.to_dict())
         return out
 
+    @staticmethod
+    def _chunks(queries: List[Dict[str, Any]], pkgs: List[tuple], size: int):
+        """Split into chunks of at most `size` queries and MAX_BATCH_BODY_BYTES of JSON."""
+        size = max(1, min(size, MAX_BATCH_QUERIES))
+        i = 0
+        while i < len(queries):
+            n = min(size, len(queries) - i)
+            while n > 1 and len(json.dumps({"queries": queries[i:i + n]})) > MAX_BATCH_BODY_BYTES:
+                n //= 2
+            yield i, queries[i:i + n], pkgs[i:i + n]
+            i += n
+
     def has_any_vuln_batch(
         self,
         packages: List[tuple],
         ecosystem: str = "Maven",
-        batch_size: int = 100,
+        batch_size: int = MAX_BATCH_QUERIES,
     ) -> Dict[tuple, bool]:
-        """Pre-filter (name, version) tuples through OSV's id-only batch endpoint."""
+        """Pre-filter (name, version) tuples through the id-only batch endpoint.
+
+        False means the database answered "no known vulnerability". Anything
+        it did not answer is True, so query() runs and records the failure.
+        """
         result = {pkg: False for pkg in packages}
         if not packages:
             return result
+        if ecosystem not in ECOSYSTEMS:
+            # Defer to query(), which counts them unverified without sending.
+            return {pkg: True for pkg in packages}
 
         # Mark cached packages True so query() still runs (from cache); False would
         # silently drop their CVEs for the whole cache TTL.
@@ -583,37 +879,101 @@ class OSVClient:
         if not uncached:
             return result
 
-        for i in range(0, len(uncached), batch_size):
-            chunk = uncached[i:i + batch_size]
-            queries = [
-                {"package": {"name": name, "ecosystem": ecosystem}, "version": version}
-                for name, version in chunk
-            ]
-            try:
-                resp = self._session.post(self.batch_url, json={"queries": queries}, timeout=self.timeout)
-                resp.raise_for_status()
-                data = resp.json()
-                results = data.get("results", []) or []
-                # A short/empty results array leaves some queried deps unanswered:
-                # mark each unresolved (defer to query()) so the coverage gate sees it.
-                incomplete = False
-                for idx in range(len(chunk)):
-                    r = results[idx] if idx < len(results) else None
-                    if not isinstance(r, dict):
-                        result[chunk[idx]] = True
-                        incomplete = True
-                    elif r.get("vulns"):
-                        result[chunk[idx]] = True
-                if incomplete:
-                    self.batch_failures += 1
-            except (requests.RequestException, ValueError, json.JSONDecodeError) as exc:
-                logger.warning(f"OSV batch query failed (chunk {i}-{i+len(chunk)}): {exc}")
-                self.batch_failures += 1
-                # Unknown for this chunk: defer to query() rather than under-report.
-                for name, version in chunk:
-                    result[(name, version)] = True
+        queries = [
+            {"package": {"name": name, "ecosystem": ecosystem}, "version": version}
+            for name, version in uncached
+        ]
+        for start, chunk_queries, chunk in self._chunks(queries, uncached, batch_size):
+            self._batch_chunk(start, chunk_queries, chunk, result)
 
         return result
+
+    def _batch_chunk(self, start: int, chunk_queries: List[Dict[str, Any]], chunk: List[tuple],
+                     result: Dict[tuple, bool]) -> None:
+        """One batch request; a 413 splits it in halves and retries, down to one query."""
+        try:
+            data = self._post(self.batch_url, {"queries": chunk_queries})
+        except OSVTooLarge:
+            if len(chunk) > 1:
+                mid = len(chunk) // 2
+                self._batch_chunk(start, chunk_queries[:mid], chunk[:mid], result)
+                self._batch_chunk(start + mid, chunk_queries[mid:], chunk[mid:], result)
+                return
+            # A single query still too large: unanswered. query() decides, and
+            # counts it unresolved if it also fails.
+            self._log_once("batch:too_large", "OSV batch query too large even alone")
+            self.batch_failures += 1
+            result[chunk[0]] = True
+            return
+        except OSVUnavailable as exc:
+            if str(exc) != _CIRCUIT_OPEN and not self._circuit_open:
+                self._log_once(f"batch:{exc}", f"OSV batch query failed: {exc}")
+            self.batch_failures += 1
+            # Unknown for this chunk: defer to query() rather than under-report.
+            for pkg in chunk:
+                result[pkg] = True
+            return
+        results = data.get("results", []) or []
+        if not isinstance(results, list):
+            results = []
+        # A short/empty results array leaves some queried deps unanswered:
+        # mark each unresolved (defer to query()) so the coverage gate sees it.
+        incomplete = False
+        for idx in range(len(chunk)):
+            r = results[idx] if idx < len(results) else None
+            if not isinstance(r, dict):
+                result[chunk[idx]] = True
+                incomplete = True
+            elif r.get("vulns"):
+                result[chunk[idx]] = True
+        if incomplete:
+            self.batch_failures += 1
+
+    def counters(self) -> Dict[str, int]:
+        return {
+            "unresolved": self.query_failures_no_cache,
+            "unsupported": self.unsupported_ecosystem_skips,
+            "stale": self.stale_cache_served,
+        }
+
+    def coverage_stats(self, before: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+        """SCA stats fields for the lookups made since `before` (a counters() snapshot)."""
+        before = before or {"unresolved": 0, "unsupported": 0, "stale": 0}
+        now = self.counters()
+        unresolved = now["unresolved"] - before.get("unresolved", 0)
+        out: Dict[str, Any] = {
+            "osv_dependencies_unresolved": unresolved,
+            "osv_unreachable": unresolved > 0,
+            "osv_unsupported_ecosystem": now["unsupported"] - before.get("unsupported", 0),
+            "osv_stale_cache_served": now["stale"] - before.get("stale", 0),
+            "vulnerability_db": {
+                "endpoint_host": endpoint_host(self.api_url),
+                "narvy_eu_mirror": is_narvy_endpoint(self.api_url),
+            },
+        }
+        if self.snapshot_utc:
+            out["vulnerability_db"]["snapshot_utc"] = self.snapshot_utc
+        if self.snapshot_age_hours is not None:
+            out["vulnerability_db"]["snapshot_age_hours"] = self.snapshot_age_hours
+        if self.last_error:
+            out["vulnerability_db"]["last_error"] = self.last_error
+        return out
+
+
+def coverage_before(client: Any) -> Dict[str, int]:
+    """counters() for a real client, zeros for a duck-typed stub."""
+    fn = getattr(client, "counters", None)
+    if callable(fn):
+        return fn()
+    return {"unresolved": getattr(client, "query_failures_no_cache", 0), "unsupported": 0, "stale": 0}
+
+
+def coverage_after(client: Any, before: Dict[str, int]) -> Dict[str, Any]:
+    fn = getattr(client, "coverage_stats", None)
+    if callable(fn):
+        return fn(before)
+    unresolved = getattr(client, "query_failures_no_cache", 0) - before.get("unresolved", 0)
+    return {"osv_dependencies_unresolved": unresolved, "osv_unreachable": unresolved > 0}
 
 
 _default_client: Optional[OSVClient] = None

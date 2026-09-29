@@ -428,6 +428,9 @@ _RULE_CATALOG: Dict[str, Dict[str, Any]] = {
 }
 
 
+
+RULE_COUNT = len(_RULE_CATALOG)
+
 def scan(apk_path: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     """Run the ELF hardening checks over an APK/AAB. Returns (findings, rule_defs, stats). Never raises."""
     stats: Dict[str, Any] = {

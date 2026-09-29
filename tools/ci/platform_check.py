@@ -5,6 +5,8 @@ Runs the installed CLI the way a new user does (`python -m narvy`, and the
   - a web source repo with known issues, a non-cp1252 character in a flagged
     line, a berry yarn.lock and two versions of one package;
   - a real APK whose file name and directory contain spaces;
+  - the same APK from a non-ASCII folder with ~1.1 GB of free memory simulated
+    (the reported laptop that 1.1.3-1.1.5 refused);
 and asserts on the SARIF/JSON content, not just the exit code.
 """
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -128,6 +131,7 @@ def main():
     check(shutil.which("narvy") is None, "harness: user Scripts dir is off PATH (the new-user situation)")
 
     rc, out, err = run([py, "-m", "narvy", "doctor"])
+    print(out[-3000:])
     print(err[-3000:])
 
     # --- source repo ------------------------------------------------------
@@ -194,7 +198,8 @@ def main():
     check(rc == 0, "APK scan exit 0")
     flat = " ".join((out + err).split())
     check("Deep analysis INCOMPLETE" not in flat and "(Semgrep) pass is time-bounded" not in flat
-          and "(Semgrep) pass runs to completion on the hosted engine" not in flat,
+          and "(Semgrep) pass runs to completion on the hosted engine" not in flat
+          and "(Semgrep) pass failed" not in flat,
           "APK: structural pass reported complete")
     apk_rules = set()
     n = 0
@@ -204,9 +209,66 @@ def main():
         n = len(res)
         apk_rules = {r["ruleId"] for r in res}
         print("apk rules:", sorted(apk_rules))
-    check(n >= 15, f"APK: >= 15 findings (Linux baseline 20), got {n}")
+    check(n >= 15, f"APK: >= 15 findings (Linux baseline 19), got {n}")
     check("AND-CONF-001" in apk_rules, "APK: manifest check ran")
     check("android-webview-js-enabled" in apk_rules, "APK: semgrep pass over jadx output ran")
+
+    # --- the reported low-memory laptop -------------------------------------
+    # 1.1.3-1.1.5 refused this 6.5k-class app when ~1.1 GB was free ("--max-mem 4g
+    # asks JADX for 4.0 GB ..."). It must run with a heap that fits, through the
+    # real jadx.bat on Windows, from a non-ASCII folder, with the default --max-mem.
+    uni_dir = os.path.join(work, "Données été")
+    os.makedirs(uni_dir, exist_ok=True)
+    uni_apk = os.path.join(uni_dir, "appli é.apk")
+    shutil.copyfile(apk, uni_apk)
+    lm_json = os.path.join(work, "out dir", "low memory.json")
+    rc, out, err = run([py, "-m", "narvy", "scan", uni_apk, "-o", "json", "-f", lm_json],
+                       env=dict(home_env, NARVY_ASSUME_AVAILABLE_MB="1126"), timeout=3000)
+    # rich colours numbers even through a pipe: strip ANSI before matching.
+    flat = " ".join(re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out + err).split())
+    print(flat[-1500:])
+    check(rc == 0, "low memory (1.1 GB free): APK scan exit 0")
+    check("Decompilation Failed" not in flat and "--force" not in flat,
+          "low memory: not refused, no --force advice")
+    m = re.search(r"JADX heap (\d+) MB", flat)
+    check(m is not None and 384 <= int(m.group(1)) <= 768,
+          f"low memory: heap sized to what is free ({m.group(0) if m else 'no heap line'})")
+    n_lm = 0
+    if os.path.isfile(lm_json):
+        with open(lm_json, encoding="utf-8") as f:
+            n_lm = len(json.load(f).get("findings", []))
+    check(n_lm >= 15, f"low memory: same findings as a roomy run (>= 15), got {n_lm}")
+
+    # Another drive letter: the app on the workspace drive (D: on hosted Windows
+    # runners), temp dir, home and cwd on C:.
+    ws = os.environ.get("GITHUB_WORKSPACE", "")
+    if os.name == "nt" and ws and os.path.splitdrive(ws)[0].upper() != os.path.splitdrive(work)[0].upper():
+        other = os.path.join(ws, "narvy other drive")
+        os.makedirs(other, exist_ok=True)
+        od_apk = os.path.join(other, "app.apk")
+        shutil.copyfile(apk, od_apk)
+        od_json = os.path.join(work, "out dir", "other drive.json")
+        rc, out, err = run([py, "-m", "narvy", "scan", od_apk, "-o", "json", "-f", od_json],
+                           env=home_env, timeout=3000, cwd=work)
+        n_od = 0
+        if os.path.isfile(od_json):
+            with open(od_json, encoding="utf-8") as f:
+                n_od = len(json.load(f).get("findings", []))
+        check(rc == 0 and n_od >= 15, f"APK on another drive ({od_apk[:2]}) scans (>= 15 findings, got {n_od})")
+        src_od = os.path.join(other, "my repo")
+        make_source_repo(src_od)
+        rc, out, err = run([py, "-m", "narvy", "scan", src_od, "-o", "json", "-f",
+                            os.path.join(work, "out dir", "src other drive.json")], cwd=work)
+        check(rc == 0 and "Traceback" not in err, "source repo on another drive scans")
+    else:
+        print("skip: other-drive scenario needs Windows with a workspace on another drive")
+
+    rc, out, err = run([py, "-m", "narvy", "scan", apk, "--max-mem", "lots"])
+    check(rc == 3, "invalid --max-mem is a usage error (exit 3)")
+
+    rc, out, err = run([py, "-m", "narvy", "doctor"], env=dict(NARVY_ASSUME_AVAILABLE_MB="1126"))
+    flat = " ".join((out + err).split())
+    check(rc == 0 and "1.1 GB available" in flat, "doctor reports the free memory it sizes the heap from")
 
     print()
     if FAILURES:

@@ -27,6 +27,8 @@ Your code, binaries and findings are never uploaded unless you explicitly
 pass `--upload`. The CLI does send anonymous usage statistics, described
 exactly in [Telemetry](#telemetry), which you can turn off.
 
+The dependency check sends package names and versions (never code, file paths or findings) to Narvy's EU-hosted vulnerability database. Set OSV_API_URL to use another OSV-compatible server.
+
 ## Install
 
 ```bash
@@ -152,14 +154,22 @@ Run `narvy doctor` before your first scan to check your Java/jadx/iOS
 tooling setup, and `narvy <command> --help` for the full flag list of
 any subcommand.
 
+The console summary table groups hits of the same rule in the same file
+into one row, with a hit count and the lines involved. `--no-group` shows
+one row per hit. SARIF and JSON output always list every hit.
+
 ### Very large Android apps
 
 Decompiling is memory-hungry, and file size is a poor predictor of how much
 you need. Before decompiling, the CLI reads the DEX headers to estimate the
-Java heap the app needs and checks it against `--max-mem` and your
-machine's free memory, so an app that won't fit fails in about a second
-instead of after several minutes of doomed work. The estimate is a
-heuristic, not a hard limit - `--force` runs the decompile regardless.
+Java heap the app needs and sizes the jadx heap from that estimate and the
+memory free right now: a small app on a busy 8 GB laptop gets a small heap
+instead of a refusal. `--max-mem` sets an upper limit (default `auto`). When
+the estimate does not fit in free memory the scan still runs with the
+largest heap that does, and says so. If jadx runs out of memory it is
+retried once (a bigger heap when memory allows, otherwise one worker
+thread), then the scan fails with the numbers. `--force` runs exactly
+`--max-mem`, without sizing or retry.
 
 ### Sending results to your Narvy dashboard
 
@@ -193,6 +203,29 @@ exhaust the machine. `NARVY_SEMGREP_JOBS` and `NARVY_SEMGREP_MAX_MEMORY_MB`
 (0 = no ceiling) override them; files skipped because of the ceiling are
 listed in the scan notes. Outside a terminal (CI logs), a progress line is
 printed every 30 seconds; `NARVY_PROGRESS_INTERVAL` changes that (0 = off).
+
+## Dependency check (SCA)
+
+The dependency check sends package names and versions (never code, file paths or findings) to Narvy's EU-hosted vulnerability database. Set OSV_API_URL to use another OSV-compatible server.
+
+What is sent, per dependency: the package name, its ecosystem (npm, PyPI,
+Maven, ...) and the resolved version. Nothing else: no code, no file paths,
+no project or repository name, no findings. The database is a mirror of
+[OSV.dev](https://osv.dev) (data from OSV.dev and the sources it
+aggregates, including the GitHub Advisory Database), refreshed from the
+OSV.dev export and hosted in the EU by Narvy.
+
+`OSV_API_URL` takes a base URL (`/query` and `/querybatch` are appended,
+e.g. `OSV_API_URL=https://api.osv.dev/v1`) or, as in earlier releases, the
+full query URL ending in `/query`. The batch URL follows it unless
+`OSV_BATCH_API_URL` is set.
+
+The check is reported INCOMPLETE, never clean, when the database cannot give
+a usable answer: unreachable, rate-limited, or its data older than 48 hours.
+Dependencies it cannot look up (an ecosystem the database does not carry, an
+iOS library with no known source repository URL) are counted as unverified
+in the scan's coverage note. Results are cached for 7 days in
+`~/.narvy/osv_cache.db`.
 
 ## Telemetry
 

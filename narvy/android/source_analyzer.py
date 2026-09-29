@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from narvy.rule_engine import load_rules_from_dir, run_rules_on_file
+from narvy.pathnorm import canonical_path
 from narvy import semgrep_engine
 from narvy import crypto_taint_lite
 from narvy.scope_config import ScopeConfig
@@ -265,6 +266,7 @@ def analyze_source(source_dir: str, override_config: Optional[ScopeConfig] = Non
             **empty_stats,
         }
 
+    source_dir = canonical_path(source_dir)
     notes: List[str] = []
     all_findings: List[Dict[str, Any]] = []
 
@@ -343,6 +345,9 @@ def analyze_source(source_dir: str, override_config: Optional[ScopeConfig] = Non
         )
 
     rule_defs = list(rules) + semgrep_rule_defs
+    rules_run = {"pattern": len(rules), "taint": len(crypto_taint_lite.RULE_IDS)}
+    if semgrep_rule_defs and semgrep_engine.LAST_RUN.get("status") == "ok":
+        rules_run["structural"] = len(semgrep_rule_defs)
 
     all_findings = _drop_prefkey_echo_secrets(source_dir, all_findings)
     all_findings = _downrank_test_findings(all_findings)
@@ -352,6 +357,7 @@ def analyze_source(source_dir: str, override_config: Optional[ScopeConfig] = Non
         "error": None,
         "findings": all_findings,
         "rule_defs": rule_defs,
+        "rules_run": rules_run,
         "manifests_found": len(manifest_paths),
         "own_roots": sorted(own_roots),
         "code_files_scanned": code_files_scanned,

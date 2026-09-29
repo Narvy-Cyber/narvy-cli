@@ -96,23 +96,22 @@ def _check_icdump():
 def _check_memory():
     """Report how much RAM is free and what size of app that buys."""
     from .apk_memory_preflight import (
-        HEAP_MB_PER_CLASS, JVM_RSS_OVERHEAD, RAM_SAFETY_RESERVE_MB, available_ram_mb,
+        HEAP_MB_PER_CLASS, available_ram_mb, heap_that_fits_mb,
     )
     avail = available_ram_mb()
     if avail is None:
         return True, "Could not determine available memory on this platform", None
-    usable_heap_mb = max(0, (avail - RAM_SAFETY_RESERVE_MB) / JVM_RSS_OVERHEAD)
+    usable_heap_mb = heap_that_fits_mb(avail) or 0
     classes = int(usable_heap_mb / HEAP_MB_PER_CLASS)
     detail = (
-        f"{avail / 1024:.1f} GB available - enough Java heap for an app of roughly "
-        f"{classes // 1000}k classes (default --max-mem 4g handles ~80k)"
+        f"{avail / 1024:.1f} GB available - room for a {usable_heap_mb / 1024:.1f} GB Java heap, "
+        f"enough for an app of roughly {classes // 1000}k classes (the heap is sized per app)"
     )
-    if avail < 5 * 1024:
+    if avail < 3 * 1024:
         return True, detail, (
-            "Large commercial apps need 8-24 GB of free memory to decompile locally. "
-            "The hosted scan (`--upload`) removes the local memory ceiling and handles "
-            "any app size - use it for large apps, or scan locally within this "
-            "machine's memory."
+            "Small and mid-size apps decompile fine in this; large commercial apps "
+            "(50k+ classes) need several GB free. Close other apps before scanning a "
+            "large one, or upload it from your Narvy dashboard for a hosted scan."
         )
     return True, detail, None
 

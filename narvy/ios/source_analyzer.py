@@ -9,7 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from narvy.rule_engine import load_rules_from_dir, run_rules_on_file
+from narvy.pathnorm import canonical_path
 from narvy import semgrep_engine
+from narvy import secret_value_grade
 from narvy.proc import run_tree
 from narvy import comment_filter
 from narvy.ios.third_party_filter import is_ios_vendor_dir_path, IOS_VENDOR_DIR_NAMES
@@ -230,7 +232,9 @@ def _run_swift_semgrep(source_dir: str,
             },
             "engine": "semgrep",
         })
-    return findings
+    # A secret-NAMED property only stays CRITICAL when its value is evidence.
+    return secret_value_grade.regrade_findings_from_files(
+        findings, source_dir, semgrep_engine._line_reader(source_dir))
 
 
 def analyze_source(source_dir: str) -> Dict[str, Any]:
@@ -247,6 +251,7 @@ def analyze_source(source_dir: str) -> Dict[str, Any]:
             "notes": [],
         }
 
+    source_dir = canonical_path(source_dir)
     notes: List[str] = []
     all_findings: List[Dict[str, Any]] = []
 
@@ -271,8 +276,11 @@ def analyze_source(source_dir: str) -> Dict[str, Any]:
             finding["engine"] = "regex"
         all_findings.extend(findings_in_file)
 
+    rules_run = {"pattern": len(objc_rules)}
     if semgrep_engine.is_available():
         swift_findings = _run_swift_semgrep(source_dir)
+        if semgrep_engine.LAST_RUN.get("status") == "ok":
+            rules_run["structural"] = len(swift_semgrep_rule_defs)
         if swift_findings:
             all_findings.extend(swift_findings)
         _sg_note = semgrep_engine.degraded_coverage_note()
@@ -289,12 +297,14 @@ def analyze_source(source_dir: str) -> Dict[str, Any]:
     notes.extend(plist_notes)
 
     rule_defs = list(objc_rules) + swift_semgrep_rule_defs + plist_checks.get_rule_defs()
+    rules_run["config"] = len(plist_checks.get_rule_defs())
 
     return {
         "ok": True,
         "error": None,
         "findings": all_findings,
         "rule_defs": rule_defs,
+        "rules_run": rules_run,
         "swift_files_scanned": len(swift_files),
         "objc_files_scanned": len(objc_files),
         "skipped_third_party": skipped_third_party,

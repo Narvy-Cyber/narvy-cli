@@ -79,8 +79,10 @@ class DegradedCoverageTests(unittest.TestCase):
         self.assertTrue(semgrep_engine.LAST_RUN["degraded"])
         note = semgrep_engine.degraded_coverage_note()
         self.assertIsNotNone(note, "a timeout MUST produce a user warning")
-        self.assertIn("--upload", note)
-        self.assertIn("hosted engine", note)
+        self.assertIn("NARVY_SEMGREP_TIMEOUT", note)
+        # --upload sends findings only: it must not be offered as the way to finish the pass
+        self.assertNotIn("`narvy scan --upload`", note)
+        self.assertIn("--upload-binary", note)
 
     def test_clean_run_raises_no_false_alarm(self):
         d = _make_tree(5)

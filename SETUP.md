@@ -337,26 +337,30 @@ app's third-party libraries against known CVEs and merges the results into
 the SAME report, tagged `SCA-<CVE id>` (e.g. `SCA-CVE-2021-0341`), right
 alongside the SAST findings. Data sources:
 
-- **[OSV.dev](https://osv.dev)** for the primary CVE lookup - free, no API
-  key, no auth header, no documented rate limit for normal single-machine
-  use. This is the only realistic choice for a free/local CLI with zero
-  Narvy backend in the loop (same "zero credential custody" pattern
-  as `cloud-scan`). Results are cached locally in
-  `~/.narvy/osv_cache.db` (SQLite, 7-day TTL) so re-scanning the same
-  app, or scanning several apps that share common libraries, doesn't
-  re-query the network every time. A cheap batch pre-filter
-  (`/v1/querybatch`) checks which of an app's (often 50-300) dependencies
-  have ANY known vuln before spending a full detail query on each one.
-- **GitHub Advisory Database** (iOS only, `ecosystem=swift`) as a
-  supplementary source, because OSV's Swift-ecosystem coverage is real but
-  thin. **Rate limit:** GitHub's REST API is
-  rate-limited to 60 requests/hour *unauthenticated* - the CLI caches every
-  response for 24h in `~/.narvy/github_advisory_cache/`, caps itself
-  to at most 25 distinct package lookups per scan, and stops issuing new
-  requests once the `X-RateLimit-Remaining` response header drops to 5 or
-  below, so one large scan can't burn your whole hourly budget. If you hit
-  the limit mid-scan, the console tells you plainly and the scan finishes
-  anyway (OSV + the curated local DB below still ran normally).
+- **Narvy's EU-hosted vulnerability database**, a mirror of
+  [OSV.dev](https://osv.dev) (OSV.dev data, including the GitHub Advisory
+  Database records it aggregates), for the CVE lookup. The dependency check sends package names and versions (never code, file paths or findings) to Narvy's EU-hosted vulnerability database. Set OSV_API_URL to use another OSV-compatible server.
+  Only the package name, ecosystem and resolved version of each dependency
+  are sent. `OSV_API_URL` takes a base URL (`/query` and `/querybatch` are
+  appended, e.g. `https://api.osv.dev/v1`) or the full `/query` URL used by
+  earlier releases; `OSV_BATCH_API_URL` overrides the batch URL. Results
+  are cached locally in `~/.narvy/osv_cache.db` (SQLite, 7-day TTL) so
+  re-scanning the same app, or scanning several apps that share common
+  libraries, doesn't re-query the network every time. A batch pre-filter
+  (`/querybatch`, at most 1000 dependencies per request, split in halves
+  when the server answers 413) checks which
+  dependencies have ANY known vuln before spending a full detail query on
+  each one. If the database is unreachable, rate-limits the machine, or
+  reports that its data is older than 48 hours, SCA is reported as
+  INCOMPLETE (and `--fail-on` exits 2), never as clean.
+- **GitHub Advisory Database, direct** (iOS only, off by default). Every
+  reviewed GitHub `swift` advisory is exported to OSV as `SwiftURL`, so the
+  database above already carries them (checked against the full GitHub
+  list when this changed: 63 of 63). `NARVY_GITHUB_ADVISORIES=1` adds the
+  old direct lookup back; it sends the bare library name to
+  api.github.com, is limited to 60 requests/hour unauthenticated
+  (`GITHUB_TOKEN` raises that), caches each response for 24h in
+  `~/.narvy/github_advisory_cache/` and makes at most 25 lookups per scan.
 - A **small curated local database** (a handful of verified, real,
   independently-checked CVEs - e.g. AFNetworking's CVE-2016-4817 SSL
   bypass) as an instant, zero-network baseline for a few historically
@@ -372,9 +376,14 @@ alongside the SAST findings. Data sources:
 
 ### Ecosystem notes
 
-OSV.dev has no "CocoaPods" ecosystem: the API rejects it outright
+OSV has no "CocoaPods" ecosystem: the API rejects it outright
 (`{"code":3,"message":"invalid ecosystem"}`), and its one Swift ecosystem
-("SwiftURL") is keyed by GitHub repo URL, not by library name. See
+("SwiftURL") is keyed by repository URL (`github.com/<owner>/<repo>`), not
+by library name. A CocoaPods pod or embedded framework whose repository is
+not known is still looked up by its bare name (a few advisories are
+published that way), but a miss proves nothing, so those dependencies are
+counted as unverified in the SCA coverage note. Ecosystems the database
+does not carry are never sent and are counted the same way. See
 `sca/osv_client.py`.
 
 ---
