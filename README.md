@@ -23,6 +23,11 @@ access or your own existing credentials:
 - `cloud-scan` - AWS account posture check using your own ambient AWS
   credentials
 
+and one check that is not a security scan:
+
+- `store-check` - Google Play and App Store upload requirements for an
+  APK, AAB, split-APK set or IPA, offline (see [Store check](#store-check))
+
 Your code, binaries and findings are never uploaded unless you explicitly
 pass `--upload`. The CLI does send anonymous usage statistics, described
 exactly in [Telemetry](#telemetry), which you can turn off.
@@ -148,6 +153,10 @@ narvy scans
 
 # Scan + upload every .apk/.aab/.apkm/.xapk/.ipa found in a folder, in one command
 narvy upload-all ./my-apps-folder/
+
+# Google Play / App Store upload requirements, offline (not a security scan)
+narvy store-check app-release.aab
+narvy store-check MyApp.ipa --lang fr --json
 ```
 
 Run `narvy doctor` before your first scan to check your Java/jadx/iOS
@@ -204,6 +213,40 @@ exhaust the machine. `NARVY_SEMGREP_JOBS` and `NARVY_SEMGREP_MAX_MEMORY_MB`
 listed in the scan notes. Outside a terminal (CI logs), a progress line is
 printed every 30 seconds; `NARVY_PROGRESS_INTERVAL` changes that (0 = off).
 
+## Store check
+
+`narvy store-check` answers one question: will Google Play or the App Store
+accept this build, and what will they ask about it? It reads the manifest,
+resources, native libraries, Info.plist, Mach-O load commands, imported
+symbols and privacy manifests of the file, and evaluates them against the
+store requirements in force at a date (`--as-of`, default today).
+
+```bash
+narvy store-check app-release.aab
+narvy store-check app.xapk --fail-on warning      # CI gate on warnings too
+narvy store-check MyApp.ipa --json > store.json   # EN and FR messages in one report
+narvy store-check MyApp.ipa --as-of 2027-02-01    # evaluate a future deadline
+```
+
+| Store | Checks |
+|-------|--------|
+| Google Play | `PLAY-TARGET-SDK`, `PLAY-16KB-ELF`, `PLAY-16KB-ZIPALIGN`, `PLAY-EXPORTED`, `PLAY-DEBUGGABLE`, `PLAY-CLEARTEXT`, `PLAY-FGS-TYPE`, `PLAY-FGS-PERMISSION`, `PLAY-FGS-DECLARATION`, `PLAY-PERMISSION-DECLARATION` |
+| App Store | `APPSTORE-SDK-VERSION`, `APPSTORE-MIN-OS`, `APPSTORE-REQUIRED-REASON-API`, `APPSTORE-PRIVACY-MANIFEST`, `APPSTORE-THIRD-PARTY-SDK`, `APPSTORE-ATS`, `APPSTORE-PURPOSE-STRINGS` |
+
+Each check reports `fail` (severity `blocker`, `warning` or `info`),
+`pass`, `not_determined` (the binary does not settle the question) or
+`not_applicable`, with the evidence read from the file and the official
+page the rule comes from. Store values and their sources live in
+`narvy/store_check/data/`.
+
+It runs offline: no network call, no telemetry event, nothing written to
+disk (the archive is read in memory). It does not check store listing
+metadata, Data safety answers, whether a declared permission use is
+acceptable under Play policy, or SDK signatures.
+
+Exit codes: 0 no blocker (with `--fail-on warning`, no warning either),
+1 at least one blocker (or warning), 3 the file cannot be analysed.
+
 ## Dependency check (SCA)
 
 The dependency check sends package names and versions (never code, file paths or findings) to Narvy's EU-hosted vulnerability database. Set OSV_API_URL to use another OSV-compatible server.
@@ -229,8 +272,8 @@ in the scan's coverage note. Results are cached for 7 days in
 
 ## Telemetry
 
-The CLI sends one small anonymous event per command, so we can see which
-scan types are used and where they fail. It is sent in the background with
+The CLI sends one small anonymous event per command (`store-check` sends
+none), so we can see which scan types are used and where they fail. It is sent in the background with
 a 1 second timeout, is never retried or stored for later, and never fails a
 scan. At most it adds 1 second at exit. A notice is printed the first time it runs.
 

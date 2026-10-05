@@ -41,6 +41,7 @@ from . import decompiler as _decompiler
 from .apk_memory_preflight import is_auto as is_auto_mem
 from .rule_engine import load_rules_from_dir, run_rules_on_file
 from . import auth, own_reports, uploader, telemetry
+from . import secret_output
 from .third_party_filter import get_own_package_roots, resolve_file_scope, check_android_override
 from .scope_config import load_scope_config
 from . import semgrep_engine
@@ -63,6 +64,7 @@ from .web.scan_blocklist import check_blocklist, ScanBlocked, REFUSAL_MESSAGE
 from .web.ssrf_guard import validate_url as web_validate_url, SSRFBlocked
 from .host.ssh_exec import HostConn, SSHExecError, _validate_conn
 from .host.audit import audit_host
+from .store_check import cli as store_check_cli
 from .host.report import normalize_host_findings, severity_counts as host_severity_counts
 # cloud/aws_scan.py and its boto3 dependency are imported lazily inside
 # cmd_cloud_scan(): boto3 is an opt-in extra, not a dependency of the whole CLI.
@@ -158,7 +160,7 @@ def _print_raw_tool_output(label, text):
     if not text:
         return
     console.print(f"\n[dim]--- raw {label} output ---[/dim]")
-    console.print(f"[dim]{rich_escape(text)}[/dim]")
+    console.print(f"[dim]{rich_escape(secret_output.sp.mask_text(text))}[/dim]")
     console.print("[dim]--- end raw output ---[/dim]\n")
 
 
@@ -1632,6 +1634,7 @@ def _scan_to_json(all_findings, rules, scan_mode, target_path, encrypted, scan_m
             "recommendation": details.get("recommendation"),
             "cwe": details.get("cwe"),
             "masvs": details.get("masvs"),
+            **secret_output.json_secret_fields(f),
         })
         if f.get("original_severity"):
             out_findings[-1]["original_severity"] = f["original_severity"]
@@ -1846,6 +1849,11 @@ def cmd_scan(args):
         more = len(own_reports.SKIPPED) - 5
         console.print(f"[dim]Ignored Narvy report file(s) from an earlier run: {rich_escape(names)}"
                       f"{f' and {more} more' if more > 0 else ''}.[/dim]")
+
+    # Honest secret wording + masking, once, on the final list: after every
+    # severity decision, before the table, JSON, SARIF and the upload payload.
+    # Narvy never tests a secret; no output (local or uploaded) carries a raw value.
+    secret_output.present_cli_findings(all_findings, target_path, scan_mode)
 
     # Say so when a hybrid repo (RN/Flutter/Capacitor) has code this mode
     # didn't cover, instead of exiting 0 silently.
@@ -2398,6 +2406,8 @@ def _web_to_sarif(findings):
         f.get("url", ""),
         f.get("severity"),
     ) for f in findings]
+    for res, f in zip(results, findings):
+        res["properties"].update(secret_output.sarif_secret_properties(f))
     return {
         "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
         "version": "2.1.0",
@@ -2464,6 +2474,8 @@ def cmd_web_scan(args):
         _print_raw_tool_output("nuclei", result.get("stderr"))
 
     findings = result.get("findings", [])
+    # Honest secret wording + masking before any output (same list as result["findings"]).
+    secret_output.present_web_findings(findings)
 
     if args.format == "json":
         output = json.dumps({"tool": "Narvy Web Scanner CLI", **result}, indent=2)
@@ -2718,6 +2730,23 @@ def _cloud_to_sarif(findings):
     }
 
 
+STORE_CHECK_EXIT_CODES_HELP = (
+    "exit codes:\n"
+    "  0  no blocker (with --fail-on warning: no warning either)\n"
+    "  1  at least one blocker (with --fail-on warning: or at least one warning)\n"
+    "  3  the file cannot be analysed (not found, not an APK, AAB, split-APK set\n"
+    "     or IPA, damaged archive) or an option is invalid\n"
+    "  130  interrupted (Ctrl-C, SIGTERM)\n\n"
+    "Offline: no network call, no telemetry, nothing written to disk. Store\n"
+    "requirements are dated; --as-of evaluates them at another date."
+)
+
+
+def cmd_store_check(args, parser):
+    """Store readiness checks (narvy.store_check). Not a security scan, no telemetry."""
+    raise SystemExit(store_check_cli.run(args, parser, input_error_code=EXIT_BAD_TARGET))
+
+
 def cmd_cloud_scan(args):
     telemetry.note(surface="cloud")
     _reject_format_as_file(args.output_file)
@@ -2903,6 +2932,8 @@ def _safe_console_streams():
 
 def cli(prog=None):
     _safe_console_streams()
+    # Mask provider-format tokens, PEM blocks, JWTs and URL passwords in any log record.
+    secret_output.sp.install_log_masking()
     parser =_ArgumentParser(prog=prog, allow_abbrev=False, description=(
         "Narvy CLI - Static Analysis for Android APKs/AABs, iOS IPAs, "
         "Android/iOS source projects, and web/backend source projects "
@@ -3049,6 +3080,13 @@ def cli(prog=None):
                          help="Write output to this path ('-' = stdout, the default). Consistent with `scan`: -f = file.")
     p_cloud.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "any"], help=FAIL_ON_HELP)
     p_cloud.set_defaults(func=cmd_cloud_scan)
+
+    p_store = sub.add_parser(
+        "store-check", allow_abbrev=False, epilog=STORE_CHECK_EXIT_CODES_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="Check an APK, AAB, XAPK or IPA against Google Play and App Store upload requirements (offline)")
+    store_check_cli.add_arguments(p_store)
+    p_store.set_defaults(func=lambda a: cmd_store_check(a, p_store))
 
     args = parser.parse_args()
     # SIGTERM/SIGHUP (CI job cancel, docker stop, dropped SSH) take the Ctrl-C path so

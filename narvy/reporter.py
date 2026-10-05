@@ -2,6 +2,7 @@ import json
 from typing import List, Dict, Any
 
 from narvy import __version__
+from narvy.secret_output import sarif_secret_properties
 
 # Canonical SARIF severity mapping, shared by every emitter (scan + web/host/cloud).
 # level = SARIF's per-result rank; security-severity = GitHub/GitLab 0-10 code-scanning score.
@@ -57,7 +58,10 @@ def generate_sarif_report(findings: List[Dict[str, Any]], rules: List[Dict[str, 
             "ruleId": finding['rule_id'],
             "level": _SARIF_LEVEL.get(_sev, "warning"),
             "message": {
-                "text": finding['details']['description']
+                # A presented secret leads with its honest title ("Potential secret: ...
+                # (format match, not tested)"); every other finding keeps its description.
+                "text": (finding.get('title') if finding.get('secret_presentation')
+                         and finding.get('title') else finding['details']['description'])
             },
             "locations": [{
                 "physicalLocation": {
@@ -78,6 +82,7 @@ def generate_sarif_report(findings: List[Dict[str, Any]], rules: List[Dict[str, 
                     "prngContextEvidence": finding['details'].get('prng_context_evidence', '')}
                    if isinstance(finding.get('details'), dict)
                    and finding['details'].get('prng_context') else {}),
+                **sarif_secret_properties(finding),
             }
         })
 

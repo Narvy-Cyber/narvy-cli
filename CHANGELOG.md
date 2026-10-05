@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0]
+
+### Added
+
+- `narvy store-check <file>`: store readiness checks for an APK, AAB,
+  split-APK set (`.apks`, `.xapk`, `.apkm`) or IPA against the Google Play
+  and App Store upload requirements: target API level, 16 KB page size
+  (ELF segment alignment and zip alignment of native libraries),
+  `android:exported` on components with intent filters, debuggable builds,
+  cleartext traffic, foreground service types, permissions that need a Play
+  Console declaration, iOS SDK and minimum OS version, required-reason APIs
+  against the privacy manifests, listed third-party SDKs without a privacy
+  manifest, App Transport Security and purpose strings. Every finding cites
+  the value read in the binary and the official page the rule comes from;
+  a question the binary cannot settle is reported `not determined`, never
+  guessed. Options: `--json` (both languages), `--lang fr`, `--as-of DATE`
+  (store requirements are dated), `--fail-on warning`, `--verbose`. Exit
+  codes: 0 no blocker, 1 blocker (or warning with `--fail-on warning`),
+  3 file not analysable. The check runs offline, reads the archive in
+  memory, writes nothing to disk and sends no telemetry. Python standard
+  library only, no new dependency. It is not a security scan.
+
+### Changed
+
+- Secret findings are worded for what they are: "Potential secret: <kind>
+  (format match, not tested)" or "(pattern match, not tested)". Narvy never
+  tests a secret (no login, no API call, no revocation check). Findings
+  carry `secret_confidence` (`likely` or `potential`) and `secret_tested:
+  false` in JSON and SARIF. Public client keys shipped in app code (Firebase
+  configuration, Google API keys restricted by design) are reported as
+  Info.
+- Secret values are masked in every output: console table, JSON, SARIF,
+  the upload payload, raw tool output (`--verbose`) and log records. The
+  wording and masking are the same as the Narvy dashboard, so dashboard
+  fingerprints of uploaded findings do not change.
+
 ## [1.1.5]
 
 ### Changed
