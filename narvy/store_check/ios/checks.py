@@ -14,6 +14,10 @@ def _t(en: str, fr: str):
     return {"en": en, "fr": fr}
 
 
+def _pl(n: int, one: str, many: str) -> str:
+    return (one if n == 1 else many).format(n=n)
+
+
 def _rel(ipa: IPA, path: str) -> str:
     return path[len("Payload/"):] if path.startswith("Payload/") else path
 
@@ -48,7 +52,7 @@ def _is_apple_runtime(b: Bundle) -> bool:
     return b.kind == "dylib" and b.name.startswith("libswift")
 
 
-TITLE_RR = _t("Required-reason APIs are declared in the privacy manifest (ITMS-91053)",
+REQ_RR = _t("Required-reason APIs are declared in the privacy manifest (ITMS-91053)",
               "Les API à justification sont déclarées dans le manifeste de confidentialité (ITMS-91053)")
 
 
@@ -56,8 +60,10 @@ def check_required_reason(ipa: IPA, as_of: dt.date) -> Result:
     cid = "APPSTORE-REQUIRED-REASON-API"
     url = A.REQUIRED_REASON_URL
     if as_of < A.REQUIRED_REASON_ENFORCED:
-        return make(cid, NOT_APPLICABLE, WARNING, TITLE_RR, url, "Not enforced before 2024-05-01.",
-                    "Non appliqué avant le 2024-05-01.")
+        return make(cid, NOT_APPLICABLE, WARNING, REQ_RR, url, "Not enforced before 2024-05-01.",
+                    "Non appliqué avant le 2024-05-01.",
+                    title=_t("Required-reason API rule not enforced before 2024-05-01",
+                             "Règle des API à justification non appliquée avant le 2024-05-01"))
     fails: List[Evidence] = []
     undetermined: List[Evidence] = []
     passes: List[Evidence] = []
@@ -117,7 +123,7 @@ def check_required_reason(ipa: IPA, as_of: dt.date) -> Result:
             passes.append(Evidence(where, "selector references not readable", notes))
     if fails:
         n_bin = len({e.path for e in fails})
-        return make(cid, FAIL, WARNING, TITLE_RR, url,
+        return make(cid, FAIL, WARNING, REQ_RR, url,
                     f"{n_bin} binary(ies) import required-reason APIs whose category is not declared in the privacy "
                     "manifest of the bundle that contains them. Apple's documentation requires a declaration and says "
                     "such uploads are not accepted since 2024-05-01 (ITMS-91053). Reported as a warning, not a blocker: "
@@ -128,19 +134,27 @@ def check_required_reason(ipa: IPA, as_of: dt.date) -> Result:
                     "déclaration et indique que ces envois sont refusés depuis le 2024-05-01 (ITMS-91053). Signalé en "
                     "avertissement et non en bloquant : l'outil d'analyse d'Apple n'est pas public et des applications "
                     "publiées contiennent des imports non déclarés, un refus ne peut donc pas être prédit avec certitude.",
-                    fails + undetermined, [A.API_TYPE_URL])
+                    fails + undetermined, [A.API_TYPE_URL],
+                    title=_t(_pl(n_bin, "Undeclared required-reason APIs in {n} binary (ITMS-91053)",
+                                 "Undeclared required-reason APIs in {n} binaries (ITMS-91053)"),
+                             _pl(n_bin, "API à justification non déclarées dans {n} binaire (ITMS-91053)",
+                                 "API à justification non déclarées dans {n} binaires (ITMS-91053)")))
     if undetermined:
-        return make(cid, NOT_DETERMINED, WARNING, TITLE_RR, url,
+        return make(cid, NOT_DETERMINED, WARNING, REQ_RR, url,
                     "No undeclared required-reason API was proven, but some evidence could not be settled.",
                     "Aucune API à justification non déclarée n'a été prouvée, mais certains éléments n'ont pas pu être tranchés.",
-                    undetermined + passes, [A.API_TYPE_URL])
-    return make(cid, PASS, WARNING, TITLE_RR, url,
+                    undetermined + passes, [A.API_TYPE_URL],
+                    title=_t("Required-reason API declarations not determined (ITMS-91053)",
+                             "Déclarations des API à justification non déterminées (ITMS-91053)"))
+    return make(cid, PASS, WARNING, REQ_RR, url,
                 "Every required-reason API category referenced by a binary is declared in the covering privacy manifest.",
                 "Chaque catégorie d'API à justification référencée par un binaire est déclarée dans le manifeste qui le couvre.",
-                passes, [A.API_TYPE_URL])
+                passes, [A.API_TYPE_URL],
+                title=_t("No undeclared required-reason API (ITMS-91053)",
+                         "Aucune API à justification non déclarée (ITMS-91053)"))
 
 
-TITLE_PM = _t("Privacy manifests are present and valid", "Les manifestes de confidentialité sont présents et valides")
+REQ_PM = _t("Privacy manifests are present and valid", "Les manifestes de confidentialité sont présents et valides")
 
 
 def check_privacy_manifest(ipa: IPA, as_of: dt.date) -> Result:
@@ -168,27 +182,35 @@ def check_privacy_manifest(ipa: IPA, as_of: dt.date) -> Result:
                 invalid.append(Evidence(_rel(ipa, mp), f"{cat}: reason code(s) not in Apple's list: {', '.join(map(str, bad))}"))
     main_has = bool(ipa.main.own_manifests)
     if invalid:
-        return make(cid, FAIL, WARNING, TITLE_PM, url,
+        return make(cid, FAIL, WARNING, REQ_PM, url,
                     "Some privacy manifests are malformed or use categories / reason codes that are not in Apple's "
                     "documented list.",
                     "Certains manifestes de confidentialité sont mal formés ou utilisent des catégories ou codes de "
-                    "justification absents de la liste documentée par Apple.", invalid, [A.API_TYPE_URL])
+                    "justification absents de la liste documentée par Apple.", invalid, [A.API_TYPE_URL],
+                    title=_t(_pl(len(invalid), "Invalid privacy manifest: {n} error", "Invalid privacy manifest: {n} errors"),
+                             _pl(len(invalid), "Manifeste de confidentialité invalide : {n} erreur",
+                                 "Manifeste de confidentialité invalide : {n} erreurs")))
     if not main_has:
-        return make(cid, FAIL, INFO, TITLE_PM, url,
+        return make(cid, FAIL, INFO, REQ_PM, url,
                     "The app bundle has no PrivacyInfo.xcprivacy at its root. It is only mandatory when the app's own "
                     "code uses required-reason APIs (see APPSTORE-REQUIRED-REASON-API), but Apple recommends one.",
                     "Le bundle de l'application n'a pas de PrivacyInfo.xcprivacy à sa racine. Il n'est obligatoire que si "
                     "le code de l'application utilise des API à justification (voir APPSTORE-REQUIRED-REASON-API), mais "
                     "Apple le recommande.",
                     [Evidence(_rel(ipa, ipa.app_dir), "PrivacyInfo.xcprivacy absent"),
-                     Evidence("(all bundles)", f"{len(ipa.manifests)} privacy manifest(s) in the IPA")])
-    return make(cid, PASS, WARNING, TITLE_PM, url,
+                     Evidence("(all bundles)", f"{len(ipa.manifests)} privacy manifest(s) in the IPA")],
+                    title=_t("No PrivacyInfo.xcprivacy at the app bundle root",
+                             "Aucun PrivacyInfo.xcprivacy à la racine du bundle de l'application"))
+    return make(cid, PASS, WARNING, REQ_PM, url,
                 f"{len(ipa.manifests)} privacy manifest(s) found, all valid.",
                 f"{len(ipa.manifests)} manifeste(s) de confidentialité trouvé(s), tous valides.",
-                [Evidence(_rel(ipa, p), "valid") for p in sorted(ipa.manifests)][:30])
+                [Evidence(_rel(ipa, p), "valid") for p in sorted(ipa.manifests)][:30],
+                title=_t(_pl(len(ipa.manifests), "{n} privacy manifest, valid", "{n} privacy manifests, all valid"),
+                         _pl(len(ipa.manifests), "{n} manifeste de confidentialité, valide",
+                             "{n} manifestes de confidentialité, tous valides")))
 
 
-TITLE_SDK = _t("Listed third-party SDKs ship their own privacy manifest",
+REQ_SDK = _t("Listed third-party SDKs ship their own privacy manifest",
                "Les SDK tiers listés par Apple embarquent leur propre manifeste de confidentialité")
 
 
@@ -198,11 +220,13 @@ def check_listed_sdks(ipa: IPA, as_of: dt.date) -> Result:
     listed = set(A.LISTED_SDKS)
     found = [b for b in ipa.bundles if b.kind == "framework" and b.name[:-len(".framework")] in listed]
     if not found:
-        return make(cid, NOT_APPLICABLE, WARNING, TITLE_SDK, url,
+        return make(cid, NOT_APPLICABLE, WARNING, REQ_SDK, url,
                     "No embedded framework matches Apple's list of commonly used SDKs. Statically linked SDKs are not "
                     "detected by this check.",
                     "Aucun framework embarqué ne correspond à la liste Apple des SDK courants. Les SDK liés statiquement "
-                    "ne sont pas détectés par ce contrôle.")
+                    "ne sont pas détectés par ce contrôle.",
+                    title=_t("No embedded framework from Apple's list of SDKs",
+                             "Aucun framework embarqué de la liste des SDK d'Apple"))
     missing = [b for b in found if not (b.own_manifests or b.nested_manifests)]
     ok = [b for b in found if b not in missing]
     sig_note_en = ("The SDK signature requirement cannot be verified from an IPA: embedded frameworks are re-signed "
@@ -210,20 +234,28 @@ def check_listed_sdks(ipa: IPA, as_of: dt.date) -> Result:
     sig_note_fr = ("L'exigence de signature des SDK ne peut pas être vérifiée depuis une IPA : les frameworks embarqués "
                    "sont re-signés avec l'identité de l'application. Xcode la vérifie à la compilation.")
     if missing:
-        return make(cid, FAIL, WARNING, TITLE_SDK, url,
+        return make(cid, FAIL, WARNING, REQ_SDK, url,
                     f"{len(missing)} framework(s) on Apple's list ship without a privacy manifest. App Store Connect "
                     "rejects this for a new app, or for an update that adds the SDK. " + sig_note_en,
                     f"{len(missing)} framework(s) de la liste Apple sont livrés sans manifeste de confidentialité. App Store "
                     "Connect le refuse pour une nouvelle application, ou pour une mise à jour qui ajoute ce SDK. " + sig_note_fr,
                     [Evidence(_rel(ipa, b.path), "no PrivacyInfo.xcprivacy in the framework") for b in missing] +
-                    [Evidence(_rel(ipa, b.path), "privacy manifest present") for b in ok])
-    return make(cid, PASS, WARNING, TITLE_SDK, url,
+                    [Evidence(_rel(ipa, b.path), "privacy manifest present") for b in ok],
+                    title=_t(_pl(len(missing), "{n} SDK from Apple's list ships without a privacy manifest",
+                                 "{n} SDKs from Apple's list ship without a privacy manifest"),
+                             _pl(len(missing), "{n} SDK de la liste Apple livré sans manifeste de confidentialité",
+                                 "{n} SDK de la liste Apple livrés sans manifeste de confidentialité")))
+    return make(cid, PASS, WARNING, REQ_SDK, url,
                 f"All {len(found)} listed framework(s) ship a privacy manifest. " + sig_note_en,
                 f"Les {len(found)} framework(s) listés embarquent un manifeste de confidentialité. " + sig_note_fr,
-                [Evidence(_rel(ipa, b.path), "privacy manifest present") for b in ok])
+                [Evidence(_rel(ipa, b.path), "privacy manifest present") for b in ok],
+                title=_t(_pl(len(found), "The SDK from Apple's list ships its privacy manifest",
+                             "All {n} SDKs from Apple's list ship their privacy manifest"),
+                         _pl(len(found), "Le SDK de la liste Apple embarque son manifeste de confidentialité",
+                             "Les {n} SDK de la liste Apple embarquent leur manifeste de confidentialité")))
 
 
-TITLE_ATS = _t("App Transport Security is not disabled globally (NSAllowsArbitraryLoads)",
+REQ_ATS = _t("App Transport Security is not disabled globally (NSAllowsArbitraryLoads)",
                "App Transport Security n'est pas désactivé globalement (NSAllowsArbitraryLoads)")
 
 
@@ -253,20 +285,24 @@ def check_ats(ipa: IPA, as_of: dt.date) -> Result:
                 if isinstance(cfg, dict) and cfg.get("NSExceptionAllowsInsecureHTTPLoads") is True:
                     exceptions.append(Evidence(where, f"{d}: NSExceptionAllowsInsecureHTTPLoads = true"))
     if disabled:
-        return make(cid, FAIL, WARNING, TITLE_ATS, url,
+        return make(cid, FAIL, WARNING, REQ_ATS, url,
                     "NSAllowsArbitraryLoads is true: ATS is disabled for all domains. App Review asks for a justification; "
                     "prefer per-domain exceptions.",
                     "NSAllowsArbitraryLoads vaut true : ATS est désactivé pour tous les domaines. L'App Review demande une "
-                    "justification ; préférez des exceptions par domaine.", disabled + ignored + exceptions)
+                    "justification ; préférez des exceptions par domaine.", disabled + ignored + exceptions,
+                    title=_t("ATS disabled for all domains (NSAllowsArbitraryLoads)",
+                             "ATS désactivé pour tous les domaines (NSAllowsArbitraryLoads)"))
     if ignored or exceptions:
-        return make(cid, FAIL, INFO, TITLE_ATS, url,
+        return make(cid, FAIL, INFO, REQ_ATS, url,
                     "ATS is not disabled globally, but insecure HTTP exceptions exist (listed in the evidence).",
                     "ATS n'est pas désactivé globalement, mais des exceptions HTTP non sécurisées existent (voir les preuves).",
-                    ignored + exceptions)
-    return make(cid, PASS, WARNING, TITLE_ATS, url, "ATS is not relaxed.", "ATS n'est pas assoupli.")
+                    ignored + exceptions,
+                    title=_t("ATS on, with insecure HTTP exceptions", "ATS actif, avec des exceptions HTTP non sécurisées"))
+    return make(cid, PASS, WARNING, REQ_ATS, url, "ATS is not relaxed.", "ATS n'est pas assoupli.",
+                title=_t("ATS not relaxed", "ATS non assoupli"))
 
 
-TITLE_USAGE = _t("Purpose strings exist for declared capabilities", "Les textes d'usage existent pour les capacités déclarées")
+REQ_USAGE = _t("Purpose strings exist for declared capabilities", "Les textes d'usage existent pour les capacités déclarées")
 
 _USAGE_KEY_RE = re.compile(r"^(NS\w+UsageDescription|NFCReaderUsageDescription)$")
 
@@ -308,21 +344,26 @@ def check_usage_strings(ipa: IPA, as_of: dt.date) -> Result:
             if not present:
                 fails.append(Evidence(where, f"entitlement {ent} without {' / '.join(keys)}"))
     if fails:
-        return make(cid, FAIL, WARNING, TITLE_USAGE, url,
+        return make(cid, FAIL, WARNING, REQ_USAGE, url,
                     "Some purpose strings are missing or empty for capabilities the app declares. Accessing the protected "
                     "resource without its purpose string crashes the app, and App Review rejects it (guideline 5.1.1).",
                     "Certains textes d'usage sont absents ou vides pour des capacités déclarées par l'application. Accéder "
                     "à la ressource protégée sans texte d'usage fait planter l'application, et l'App Review la refuse "
                     "(règle 5.1.1).", fails + unknown,
-                    [v[1] for v in A.ENTITLEMENT_USAGE_KEYS.values()])
+                    [v[1] for v in A.ENTITLEMENT_USAGE_KEYS.values()],
+                    title=_t(_pl(len(fails), "{n} purpose string missing or empty", "{n} purpose strings missing or empty"),
+                             _pl(len(fails), "{n} texte d'usage absent ou vide", "{n} textes d'usage absents ou vides")))
     if unknown:
-        return make(cid, NOT_DETERMINED, WARNING, TITLE_USAGE, url,
+        return make(cid, NOT_DETERMINED, WARNING, REQ_USAGE, url,
                     "No missing purpose string was proven, but some bundles could not be fully checked.",
                     "Aucun texte d'usage manquant n'a été prouvé, mais certains bundles n'ont pas pu être entièrement vérifiés.",
-                    unknown)
-    return make(cid, PASS, WARNING, TITLE_USAGE, url,
+                    unknown, title=_t("Purpose strings not determined for some bundles",
+                                      "Textes d'usage non déterminés pour certains bundles"))
+    return make(cid, PASS, WARNING, REQ_USAGE, url,
                 "Declared purpose strings are non-empty and entitlement-gated capabilities have theirs.",
-                "Les textes d'usage déclarés sont renseignés et les capacités liées aux entitlements ont le leur.")
+                "Les textes d'usage déclarés sont renseignés et les capacités liées aux entitlements ont le leur.",
+                title=_t("Purpose strings present for declared capabilities",
+                         "Textes d'usage présents pour les capacités déclarées"))
 
 
 def _major(s) -> Optional[int]:
@@ -334,7 +375,7 @@ def _major(s) -> Optional[int]:
     return int(m.group(1))
 
 
-TITLE_SDKVER = _t("Built with the SDK and Xcode required by App Store Connect",
+REQ_SDKVER = _t("Built with the SDK and Xcode required by App Store Connect",
                   "Compilé avec le SDK et la version de Xcode exigés par App Store Connect")
 
 
@@ -352,13 +393,17 @@ def check_sdk_version(ipa: IPA, as_of: dt.date) -> Result:
         ev.append(Evidence(_rel(ipa, ipa.main.executable_path or ""), ", ".join(
             f"{s.arch}: sdk {s.sdk}" for s in ipa.main.slices), "LC_BUILD_VERSION / LC_VERSION_MIN"))
     if req is None:
-        return make(cid, NOT_APPLICABLE, BLOCKER, TITLE_SDKVER, url, "No requirement recorded for this date.",
-                    "Aucune exigence enregistrée pour cette date.", ev)
+        return make(cid, NOT_APPLICABLE, BLOCKER, REQ_SDKVER, url, "No requirement recorded for this date.",
+                    "Aucune exigence enregistrée pour cette date.", ev,
+                    title=_t("No App Store Connect SDK requirement recorded for this date",
+                             "Aucune exigence de SDK App Store Connect enregistrée à cette date"))
     need_sdk, need_xcode, eff = req
     if isinstance(platforms, list) and platforms and "iPhoneOS" not in platforms and eff < dt.date(2026, 4, 28):
-        return make(cid, NOT_DETERMINED, BLOCKER, TITLE_SDKVER, url,
+        return make(cid, NOT_DETERMINED, BLOCKER, REQ_SDKVER, url,
                     "Not an iOS app: the SDK requirement for this platform and date is not encoded.",
-                    "Pas une application iOS : l'exigence de SDK pour cette plateforme et cette date n'est pas encodée.", ev)
+                    "Pas une application iOS : l'exigence de SDK pour cette plateforme et cette date n'est pas encodée.", ev,
+                    title=_t("SDK requirement not encoded for this platform",
+                             "Exigence de SDK non encodée pour cette plateforme"))
     indicators = []
     for label, val in (("DTSDKName", info.get("DTSDKName")), ("DTPlatformVersion", info.get("DTPlatformVersion"))):
         m = _major(val)
@@ -371,30 +416,36 @@ def check_sdk_version(ipa: IPA, as_of: dt.date) -> Result:
     xcode_raw = info.get("DTXcode")
     xcode = int(xcode_raw) // 100 if isinstance(xcode_raw, str) and xcode_raw.isdigit() else None
     if not indicators:
-        return make(cid, NOT_DETERMINED, BLOCKER, TITLE_SDKVER, url,
+        return make(cid, NOT_DETERMINED, BLOCKER, REQ_SDKVER, url,
                     "The SDK used to build the app is not recorded in the binary or Info.plist.",
-                    "Le SDK utilisé pour compiler l'application n'est enregistré ni dans le binaire ni dans l'Info.plist.", ev)
+                    "Le SDK utilisé pour compiler l'application n'est enregistré ni dans le binaire ni dans l'Info.plist.", ev,
+                    title=_t("Build SDK not determined (not recorded)", "SDK de compilation non déterminé (non enregistré)"))
     below = [m for _l, m in indicators if m < need_sdk]
     if below and len(below) == len(indicators):
         sdk = max(m for _l, m in indicators)
         x_en = f", Xcode {xcode}" if xcode else ""
-        return make(cid, FAIL, BLOCKER, TITLE_SDKVER, url,
+        return make(cid, FAIL, BLOCKER, REQ_SDKVER, url,
                     f"This build cannot be uploaded: built with SDK {sdk}{x_en}. Since {eff.isoformat()}, App Store "
                     f"Connect requires Xcode {need_xcode} or later with the {need_sdk} SDKs.",
                     f"Ce build ne peut pas être envoyé : compilé avec le SDK {sdk}{x_en}. Depuis le {eff.isoformat()}, "
-                    f"App Store Connect exige Xcode {need_xcode} ou plus avec les SDK {need_sdk}.", ev)
+                    f"App Store Connect exige Xcode {need_xcode} ou plus avec les SDK {need_sdk}.", ev,
+                    title=_t(f"SDK {sdk} is below App Store Connect's requirement (SDK {need_sdk}, Xcode {need_xcode})",
+                             f"SDK {sdk} inférieur à l'exigence d'App Store Connect (SDK {need_sdk}, Xcode {need_xcode})"))
     if below or (xcode is not None and xcode < need_xcode):
-        return make(cid, NOT_DETERMINED, BLOCKER, TITLE_SDKVER, url,
+        return make(cid, NOT_DETERMINED, BLOCKER, REQ_SDKVER, url,
                     "The SDK / Xcode versions recorded in the Info.plist and the executable disagree.",
-                    "Les versions de SDK / Xcode enregistrées dans l'Info.plist et l'exécutable ne concordent pas.", ev)
+                    "Les versions de SDK / Xcode enregistrées dans l'Info.plist et l'exécutable ne concordent pas.", ev,
+                    title=_t("Build SDK not determined (Info.plist and executable disagree)",
+                             "SDK de compilation non déterminé (Info.plist et exécutable divergent)"))
     sdk = min(m for _l, m in indicators)
-    return make(cid, PASS, BLOCKER, TITLE_SDKVER, url,
+    return make(cid, PASS, BLOCKER, REQ_SDKVER, url,
                 f"Built with SDK {sdk}" + (f" and Xcode {xcode}" if xcode else "") + f": meets the {eff.isoformat()} requirement.",
                 f"Compilé avec le SDK {sdk}" + (f" et Xcode {xcode}" if xcode else "") + f" : conforme à l'exigence du {eff.isoformat()}.",
-                ev)
+                ev, title=_t(f"SDK {sdk} meets App Store Connect's requirement (SDK {need_sdk})",
+                             f"SDK {sdk} conforme à l'exigence d'App Store Connect (SDK {need_sdk})"))
 
 
-TITLE_MINOS = _t("Minimum iOS version accepted by App Store Connect",
+REQ_MINOS = _t("Minimum iOS version accepted by App Store Connect",
                  "Version minimale d'iOS acceptée par App Store Connect")
 
 
@@ -415,11 +466,15 @@ def check_min_os(ipa: IPA, as_of: dt.date) -> Result:
     ev = [Evidence(where, str(mos), "MinimumOSVersion")]
     platforms = info.get("CFBundleSupportedPlatforms")
     if isinstance(platforms, list) and platforms and "iPhoneOS" not in platforms:
-        return make(cid, NOT_APPLICABLE, BLOCKER, TITLE_MINOS, url, "Not an iOS / iPadOS app.",
-                    "Pas une application iOS / iPadOS.", ev)
+        return make(cid, NOT_APPLICABLE, BLOCKER, REQ_MINOS, url, "Not an iOS / iPadOS app.",
+                    "Pas une application iOS / iPadOS.", ev,
+                    title=_t("Not an iOS or iPadOS app: minimum iOS rule does not apply",
+                             "Pas une application iOS ou iPadOS : règle d'iOS minimum sans objet"))
     if req is None:
-        return make(cid, NOT_APPLICABLE, BLOCKER, TITLE_MINOS, url, "No requirement recorded for this date.",
-                    "Aucune exigence enregistrée pour cette date.", ev)
+        return make(cid, NOT_APPLICABLE, BLOCKER, REQ_MINOS, url, "No requirement recorded for this date.",
+                    "Aucune exigence enregistrée pour cette date.", ev,
+                    title=_t("No minimum iOS requirement recorded for this date",
+                             "Aucune exigence d'iOS minimum enregistrée à cette date"))
     need, eff = req
     v = _vtuple(mos) if isinstance(mos, str) else None
     if v is None and ipa.main.slices:
@@ -429,17 +484,22 @@ def check_min_os(ipa: IPA, as_of: dt.date) -> Result:
             v = _vtuple(m)
             ev.append(Evidence(_rel(ipa, ipa.main.executable_path or ""), m, "LC_BUILD_VERSION minos"))
     if v is None:
-        return make(cid, NOT_DETERMINED, BLOCKER, TITLE_MINOS, url, "The minimum iOS version could not be read.",
-                    "La version minimale d'iOS n'a pas pu être lue.", ev)
+        return make(cid, NOT_DETERMINED, BLOCKER, REQ_MINOS, url, "The minimum iOS version could not be read.",
+                    "La version minimale d'iOS n'a pas pu être lue.", ev,
+                    title=_t("Minimum iOS version not determined", "Version minimale d'iOS non déterminée"))
     vs = ".".join(map(str, v))
     if v[0] < need:
-        return make(cid, FAIL, BLOCKER, TITLE_MINOS, url,
+        return make(cid, FAIL, BLOCKER, REQ_MINOS, url,
                     f"The app supports iOS {vs} and later. Since {eff.isoformat()}, iOS and iPadOS apps uploaded to "
                     f"App Store Connect must target iOS {need} or later.",
                     f"L'application supporte iOS {vs} et plus. Depuis le {eff.isoformat()}, les applications iOS et "
-                    f"iPadOS envoyées sur App Store Connect doivent cibler iOS {need} ou plus.", ev)
-    return make(cid, PASS, BLOCKER, TITLE_MINOS, url, f"Minimum iOS {vs} meets the iOS {need}+ requirement.",
-                f"iOS minimum {vs} conforme à l'exigence iOS {need}+.", ev)
+                    f"iPadOS envoyées sur App Store Connect doivent cibler iOS {need} ou plus.", ev,
+                    title=_t(f"Minimum iOS {vs} is below App Store Connect's requirement (iOS {need})",
+                             f"iOS minimum {vs} inférieur à l'exigence d'App Store Connect (iOS {need})"))
+    return make(cid, PASS, BLOCKER, REQ_MINOS, url, f"Minimum iOS {vs} meets the iOS {need}+ requirement.",
+                f"iOS minimum {vs} conforme à l'exigence iOS {need}+.", ev,
+                title=_t(f"Minimum iOS {vs} meets App Store Connect's requirement (iOS {need})",
+                         f"iOS minimum {vs} conforme à l'exigence d'App Store Connect (iOS {need})"))
 
 
 def run_ios_checks(ipa: IPA, as_of: dt.date) -> List[Result]:

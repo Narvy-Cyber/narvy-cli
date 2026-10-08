@@ -9,6 +9,16 @@ A check never guesses. It returns one of four statuses:
 
 ``severity`` is only meaningful for ``fail`` (and is kept on other statuses so a
 consumer knows how bad a failure of that check would be).
+
+Two texts name a result:
+
+* ``title``        what this run found, worded for its status and citing the
+                   value read when it helps ("Target API 33 is below Google
+                   Play's requirement (API 36)"). Since engine 0.2.0.
+* ``requirement``  the rule itself, the same for every status ("Target API
+                   level meets Google Play's current requirement"). Engine
+                   0.1.0 put this text in ``title`` for every status, which
+                   read as a contradiction on a failure.
 """
 from __future__ import annotations
 
@@ -52,13 +62,14 @@ class Result:
     doc_url: str
     evidence: List[Evidence] = field(default_factory=list)
     extra_doc_urls: List[str] = field(default_factory=list)
+    requirement: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.status not in STATUSES:
             raise ValueError(f"bad status {self.status!r}")
         if self.severity not in SEVERITIES:
             raise ValueError(f"bad severity {self.severity!r}")
-        for d in (self.title, self.message):
+        for d in (self.title, self.message, self.requirement):
             if not d.get("en") or not d.get("fr"):
                 raise ValueError(f"{self.check_id}: EN and FR text are both required")
 
@@ -68,6 +79,7 @@ class Result:
             "status": self.status,
             "severity": self.severity,
             "title": self.title,
+            "requirement": self.requirement,
             "message": self.message,
             "doc_url": self.doc_url,
             "extra_doc_urls": list(self.extra_doc_urls),
@@ -111,9 +123,10 @@ class Report:
         }
 
 
-def make(check_id: str, status: str, severity: str, title: Dict[str, str], doc_url: str,
+def make(check_id: str, status: str, severity: str, requirement: Dict[str, str], doc_url: str,
          en: str, fr: str, evidence: Optional[List[Evidence]] = None,
-         extra_doc_urls: Optional[List[str]] = None) -> Result:
+         extra_doc_urls: Optional[List[str]] = None, *, title: Dict[str, str]) -> Result:
     return Result(check_id=check_id, status=status, severity=severity, title=title,
                   message={"en": en, "fr": fr}, doc_url=doc_url,
-                  evidence=list(evidence or []), extra_doc_urls=list(extra_doc_urls or []))
+                  evidence=list(evidence or []), extra_doc_urls=list(extra_doc_urls or []),
+                  requirement=requirement)

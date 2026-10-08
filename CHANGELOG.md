@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1]
+
+### Fixed
+
+- `narvy store-check`: a failed check was titled with the wording of the
+  rule it failed, so the terminal printed contradictions such as
+  `[BLOCKER] PLAY-TARGET-SDK: Target API level meets Google Play's current
+  requirement`. Every check now has a title per status, in English and
+  French, citing the value read when it helps: `Target API 33 is below
+  Google Play's requirement (API 36)` on a failure, `Target API 36 meets
+  Google Play's requirement (API 36)` on a pass, `Target API level not
+  determined (targetSdkVersion unresolved)` when the binary does not settle
+  it. Check ids, statuses, severities, messages and exit codes are
+  unchanged.
+
+### Changed
+
+- `narvy store-check --json`: `title` keeps its shape (`{"en", "fr"}`) and
+  now describes the result for its status. The rule text that `title`
+  carried in 1.2.0 moves to a new `requirement` field (`{"en", "fr"}`), the
+  same for every status. `tool_version` of the store-check report is
+  `0.2.0`. A consumer that used `title` as a fixed label per check id
+  should read `requirement` instead.
+
 ## [1.2.0]
 
 ### Added

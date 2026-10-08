@@ -236,8 +236,11 @@ narvy store-check MyApp.ipa --as-of 2027-02-01    # evaluate a future deadline
 Each check reports `fail` (severity `blocker`, `warning` or `info`),
 `pass`, `not_determined` (the binary does not settle the question) or
 `not_applicable`, with the evidence read from the file and the official
-page the rule comes from. Store values and their sources live in
-`narvy/store_check/data/`.
+page the rule comes from. In `--json`, `title` describes the result for its
+status and cites the value read ("Target API 33 is below Google Play's
+requirement (API 36)"), and `requirement` holds the rule itself ("Target API
+level meets Google Play's current requirement"), both in English and French.
+Store values and their sources live in `narvy/store_check/data/`.
 
 It runs offline: no network call, no telemetry event, nothing written to
 disk (the archive is read in memory). It does not check store listing
