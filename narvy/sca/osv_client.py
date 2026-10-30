@@ -1,10 +1,13 @@
-"""OSV client with a local SQLite cache and an offline fallback.
+"""OSV client: local database by default, network API only with --osv-api.
 
-By default the dependency check talks to Narvy's EU-hosted OSV mirror (a copy
-of the OSV.dev database). Only package names, ecosystems and versions are
-sent: never code, file paths or findings.
+Default (LocalOSVClient): every lookup is answered from the OSV database
+downloaded per ecosystem by osv_localdb; no package name leaves the machine.
 
-Endpoint configuration (environment):
+With --osv-api (OSVClient): the previous behaviour. Package names, ecosystems
+and versions are sent to Narvy's EU-hosted OSV mirror, or to OSV_API_URL
+(never code, file paths or findings).
+
+Endpoint configuration for --osv-api (environment):
 
 - ``OSV_API_URL``: either a base URL (``https://host/path``; ``/query`` and
   ``/querybatch`` are appended) or, as in earlier releases, the full single
@@ -114,9 +117,15 @@ def endpoint_host(url: str) -> str:
         return url
 
 
+LOCAL_QUERY_URL = "local:osv/query"
+LOCAL_BATCH_URL = "local:osv/querybatch"
+
+
 def egress_notice(url: Optional[str] = None) -> str:
     """The line printed when the dependency check starts, naming where it sends data."""
     url = url or endpoints_from_env()[0]
+    if url == LOCAL_QUERY_URL:
+        return "Checking dependencies against the local OSV database (nothing is sent)..."
     if is_narvy_endpoint(url):
         return ("Checking dependencies against Narvy's EU vulnerability database "
                 "(sends package names and versions only, never code)...")
@@ -976,13 +985,163 @@ def coverage_after(client: Any, before: Dict[str, int]) -> Dict[str, Any]:
     return {"osv_dependencies_unresolved": unresolved, "osv_unreachable": unresolved > 0}
 
 
+class _NullCache:
+    """No per-package response cache: the local database is the cache."""
+
+    hits = misses = writes = 0
+
+    def get(self, *a, **k):
+        return None
+
+    def get_stale(self, *a, **k):
+        return None
+
+    def put(self, *a, **k):
+        return None
+
+    def stats(self) -> Dict[str, int]:
+        return {"hits": 0, "misses": 0, "writes": 0}
+
+    def size(self) -> int:
+        return 0
+
+
+class _NoNetworkSession:
+    """Stands in for requests.Session in local mode: any API call is a bug."""
+
+    def __init__(self):
+        self.headers: Dict[str, str] = {}
+
+    def post(self, *a, **k):
+        raise RuntimeError("local OSV mode must not call a network API")
+
+
+def _unpack_query(q: Dict[str, Any]) -> Tuple[str, str, str]:
+    pkg = (q or {}).get("package") or {}
+    return str(pkg.get("ecosystem") or ""), str(pkg.get("name") or ""), str((q or {}).get("version") or "")
+
+
+class LocalOSVClient(OSVClient):
+    """Same interface and coverage accounting as OSVClient, answered from the
+    local per-ecosystem database. A missing database (offline, download failed)
+    leaves the affected dependencies unresolved, never clean, and never falls
+    back to a network API."""
+
+    def __init__(self, store=None, offline: bool = False, notify=None, **kw):
+        from . import osv_localdb
+        super().__init__(cache=_NullCache(), api_url=LOCAL_QUERY_URL, batch_url=LOCAL_BATCH_URL,
+                         session=_NoNetworkSession(), **kw)
+        self.store = store or osv_localdb.LocalStore(offline=offline, notify=notify)
+        self.offline = self.store.offline
+        self._stale_keys: set = set()
+        self._used_ecosystems: List[str] = []
+
+    def _db_error(self, eco: str, exc) -> None:
+        self._fail(exc.kind, str(exc))
+        self._log_once("localdb:%s" % eco, "OSV: %s" % exc)
+        # One line per ecosystem is enough; skip the generic per-batch/per-query ones.
+        self._logged_kinds.update({"batch:%s" % exc.kind, "query:%s" % exc.kind})
+        raise OSVUnavailable(exc.kind) from exc
+
+    def _db(self, eco: str):
+        from .osv_localdb import LocalDBError
+        try:
+            db = self.store.get(eco)
+        except LocalDBError as exc:
+            self._db_error(eco, exc)
+        if eco not in self._used_ecosystems:
+            self._used_ecosystems.append(eco)
+        return db
+
+    def _lookup(self, eco: str, name: str, version: str, records: bool):
+        """(ids, records or {id: modified}). A damaged file is moved aside and
+        downloaded again once; if that fails the lookup is unresolved."""
+        from .osv_localdb import LocalDBError
+        for attempt in (0, 1):
+            db = self._db(eco)
+            try:
+                ids = db.match_ids(eco, name, version)
+                extra = db.get_records(ids) if records else db.get_modified(ids)
+            except LocalDBError as exc:
+                if exc.kind == "local_db_corrupt" and attempt == 0:
+                    try:
+                        self.store.recover(eco, exc)
+                    except LocalDBError as exc2:
+                        self._db_error(eco, exc2)
+                    continue
+                self._db_error(eco, exc)
+            if eco in self.store.stale:
+                self._stale_keys.add((eco, name, version))
+            return ids, extra
+        raise OSVUnavailable("local_db_corrupt")
+
+    def _post(self, url: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        if url == self.batch_url:
+            results = []
+            for q in (body or {}).get("queries") or []:
+                eco, name, version = _unpack_query(q)
+                if not name:
+                    results.append({})
+                    continue
+                ids, mods = self._lookup(eco, name, version, records=False)
+                results.append({"vulns": [{"id": i, "modified": mods.get(i, "")} for i in ids]} if ids else {})
+            return {"results": results}
+        eco, name, version = _unpack_query(body)
+        if not name:
+            return {"vulns": []}
+        return {"vulns": self._lookup(eco, name, version, records=True)[1]}
+
+    def counters(self) -> Dict[str, int]:
+        c = super().counters()
+        c["stale"] = len(self._stale_keys)
+        return c
+
+    def coverage_stats(self, before: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+        out = super().coverage_stats(before)
+        db: Dict[str, Any] = {
+            "source": "local",
+            "endpoint_host": str(self.store.directory),
+            "narvy_eu_mirror": False,
+            "offline": self.offline,
+            "ecosystems": {},
+        }
+        for eco in self._used_ecosystems:
+            info = self.store.info(eco)
+            if info:
+                db["ecosystems"][eco] = info
+        if self.last_error:
+            db["last_error"] = self.last_error
+        out["vulnerability_db"] = db
+        return out
+
+
 _default_client: Optional[OSVClient] = None
 _default_lock = threading.Lock()
+_default_mode: Dict[str, Any] = {"api": False, "offline": False, "notify": None}
+
+
+def configure(api: bool = False, offline: bool = False, notify=None) -> None:
+    """Pick the backend of get_default_client(): local database (default) or network API."""
+    global _default_client
+    if api and offline:
+        raise ValueError("--osv-api and --offline are mutually exclusive")
+    with _default_lock:
+        _default_mode.update(api=api, offline=offline, notify=notify)
+        _default_client = None
+
+
+def is_offline() -> bool:
+    """True when the scan runs with --offline (no network call of any kind)."""
+    return bool(_default_mode["offline"])
 
 
 def get_default_client() -> OSVClient:
     global _default_client
     with _default_lock:
         if _default_client is None:
-            _default_client = OSVClient()
+            if _default_mode["api"]:
+                _default_client = OSVClient()
+            else:
+                _default_client = LocalOSVClient(offline=_default_mode["offline"],
+                                                 notify=_default_mode["notify"])
         return _default_client

@@ -36,6 +36,7 @@ except Exception:
 
 from narvy import __version__
 from narvy.reporter import generate_sarif_report, sarif_level, sarif_security_severity
+from narvy.gitlab_report import gitlab_sast_from_cli_sarif
 from .decompiler import decompile_apk
 from . import decompiler as _decompiler
 from .apk_memory_preflight import is_auto as is_auto_mem
@@ -59,6 +60,7 @@ from .sca import android_deps as sca_android_deps
 from .sca import ios_deps as sca_ios_deps
 from .sca import web_deps as sca_web_deps
 from .sca import osv_client as sca_osv
+from .sca import osv_localdb as sca_osv_localdb
 from .web.scanner import NucleiScanner
 from .web.scan_blocklist import check_blocklist, ScanBlocked, REFUSAL_MESSAGE
 from .web.ssrf_guard import validate_url as web_validate_url, SSRFBlocked
@@ -860,6 +862,7 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
         native_apk_path = apk_path
     decompile_error = None
     sca_cov = None
+    code_skipped = None
     with scan_progress() as progress:
         task1 = progress.add_task("[green]Decompiling APK...", total=1)
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
@@ -873,86 +876,99 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
             ok, decompile_error = decompile_apk(apk_path, temp_dir, max_mem, force=force,
                                                 extra_inputs=extra_dex_inputs,
                                                 notify=_heap_notify)
-            if not ok:
+            code_skipped = None
+            if not ok and _decompiler.LAST_FAILURE_KIND == "tool_missing_offline":
+                # --offline and jadx/Java missing: no download. The passes that read the
+                # raw APK (dependencies, native libraries) still run; code analysis is
+                # reported not run (INCOMPLETE, exit 2 with --fail-on).
+                progress.update(task1, completed=1, description="[yellow]Decompilation skipped (--offline).")
+                console.print(f"[bold yellow]Code analysis NOT RUN: {rich_escape(decompile_error)}[/bold yellow]")
+                code_skipped = decompile_error
+            elif not ok:
                 progress.update(task1, completed=1, description="[red]Decompilation Failed.")
                 progress.stop()
                 # Progress owns the cursor: printing before stop() mangles this.
                 # Escaped: the message carries raw jadx output, which can hold [brackets].
                 console.print(f"\n[bold red]{rich_escape(decompile_error)}[/bold red]\n")
                 return None
-            progress.update(task1, completed=1, description="[green]Decompilation Complete.")
+            else:
+                progress.update(task1, completed=1, description="[green]Decompilation Complete.")
             if _decompiler.LAST_HEAP_NOTE:
                 console.print(f"[dim]{rich_escape(_decompiler.LAST_HEAP_NOTE)}[/dim]")
 
-            task2 = progress.add_task("[cyan]Analyzing files...", total=None)
-            rules_path = os.path.join(os.path.dirname(__file__), 'rules', 'android')
-            rules = load_rules_from_dir(rules_path)
-            progress.update(task2, description=f"[cyan]Analyzing with {len(rules)} pattern rules...")
-            rules_run = {"pattern": len(rules), "taint": len(crypto_taint_lite.RULE_IDS)}
-
+            rules = []
+            rules_run = {}
             all_findings = []
-            all_source_files = [os.path.join(root, file) for root, _, files in os.walk(temp_dir) for file in files if file.endswith(('.java', '.kt', '.xml'))]
+            if code_skipped is None:
+                task2 = progress.add_task("[cyan]Analyzing files...", total=None)
+                rules_path = os.path.join(os.path.dirname(__file__), 'rules', 'android')
+                rules = load_rules_from_dir(rules_path)
+                progress.update(task2, description=f"[cyan]Analyzing with {len(rules)} pattern rules...")
+                rules_run = {"pattern": len(rules), "taint": len(crypto_taint_lite.RULE_IDS)}
 
-            own_roots = get_own_package_roots(temp_dir)
-            if own_roots:
-                console.print(f"[dim]App package roots: {', '.join(sorted(own_roots))} (scoping analysis to this app's own code).[/dim]")
-            else:
-                console.print("[dim]Could not determine app package from manifest - falling back to known-SDK denylist.[/dim]")
+                all_findings = []
+                all_source_files = [os.path.join(root, file) for root, _, files in os.walk(temp_dir) for file in files if file.endswith(('.java', '.kt', '.xml'))]
 
-            source_files = [f for f in all_source_files if resolve_file_scope(f, own_roots, override_config)]
-            skipped = len(all_source_files) - len(source_files)
-            if skipped:
-                console.print(f"[dim]Skipped {skipped} third-party/framework files ({skipped * 100 // len(all_source_files)}%).[/dim]")
-            if override_config:
-                override_calls = [check_android_override(f, override_config) for f in all_source_files]
-                forced_own = override_calls.count('own')
-                forced_vendor = override_calls.count('vendor')
-                if forced_own or forced_vendor:
-                    console.print(
-                        f"[dim].narvy-scope.yml overrides ({override_config.source_path}): "
-                        f"{forced_own} file(s) forced first-party, "
-                        f"{forced_vendor} file(s) forced third-party-excluded.[/dim]"
-                    )
-
-            progress.update(task2, total=len(source_files))
-            for file_path in source_files:
-                relative_path = os.path.relpath(file_path, temp_dir)
-                findings_in_file = run_rules_on_file(file_path, rules)
-                for finding in findings_in_file:
-                    finding['file_path'] = relative_path
-                    finding['engine'] = 'regex'
-                all_findings.extend(findings_in_file)
-
-                if file_path.endswith(('.java', '.kt')):
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as fh:
-                            taint_findings = crypto_taint_lite.check_file(fh.read())
-                    except OSError:
-                        taint_findings = []
-                    for finding in taint_findings:
-                        finding['file_path'] = relative_path
-                    all_findings.extend(taint_findings)
-
-                progress.update(task2, advance=1)
-            progress.update(task2, description="[green]Analysis Complete.")
-
-            # Semgrep takes a directory plus exclude globs, not a file list.
-            if semgrep_engine.is_available():
-                console.print("[dim]Running deep structural analysis (AST-aware, taint-tracking) - can take several minutes on larger apps, this is normal, don't interrupt.[/dim]")
-                task3 = progress.add_task("[cyan]Deep structural analysis...", total=None)
-                semgrep_findings = semgrep_engine.run_semgrep(temp_dir, own_roots=own_roots, override_config=override_config)
-                if semgrep_findings:
-                    all_findings.extend(semgrep_findings)
-                if semgrep_engine.LAST_RUN.get('status') == 'ok':
-                    rules_run["structural"] = len(semgrep_engine.load_rule_defs())
-                _sg_note = semgrep_engine.degraded_coverage_note()
-                if _sg_note:
-                    progress.update(task3, completed=1, description="[yellow]Deep analysis INCOMPLETE (partial coverage).")
-                    console.print(f"[bold yellow]{_sg_note}[/bold yellow]")
+                own_roots = get_own_package_roots(temp_dir)
+                if own_roots:
+                    console.print(f"[dim]App package roots: {', '.join(sorted(own_roots))} (scoping analysis to this app's own code).[/dim]")
                 else:
-                    progress.update(task3, completed=1, description=f"[green]Deep analysis complete ({len(semgrep_findings or [])} findings).")
-            else:
-                console.print("[dim]semgrep not found - install with `pip install semgrep` for deeper structural detection. Continuing with regex rules only.[/dim]")
+                    console.print("[dim]Could not determine app package from manifest - falling back to known-SDK denylist.[/dim]")
+
+                source_files = [f for f in all_source_files if resolve_file_scope(f, own_roots, override_config)]
+                skipped = len(all_source_files) - len(source_files)
+                if skipped:
+                    console.print(f"[dim]Skipped {skipped} third-party/framework files ({skipped * 100 // len(all_source_files)}%).[/dim]")
+                if override_config:
+                    override_calls = [check_android_override(f, override_config) for f in all_source_files]
+                    forced_own = override_calls.count('own')
+                    forced_vendor = override_calls.count('vendor')
+                    if forced_own or forced_vendor:
+                        console.print(
+                            f"[dim].narvy-scope.yml overrides ({override_config.source_path}): "
+                            f"{forced_own} file(s) forced first-party, "
+                            f"{forced_vendor} file(s) forced third-party-excluded.[/dim]"
+                        )
+
+                progress.update(task2, total=len(source_files))
+                for file_path in source_files:
+                    relative_path = os.path.relpath(file_path, temp_dir)
+                    findings_in_file = run_rules_on_file(file_path, rules)
+                    for finding in findings_in_file:
+                        finding['file_path'] = relative_path
+                        finding['engine'] = 'regex'
+                    all_findings.extend(findings_in_file)
+
+                    if file_path.endswith(('.java', '.kt')):
+                        try:
+                            with open(file_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                                taint_findings = crypto_taint_lite.check_file(fh.read())
+                        except OSError:
+                            taint_findings = []
+                        for finding in taint_findings:
+                            finding['file_path'] = relative_path
+                        all_findings.extend(taint_findings)
+
+                    progress.update(task2, advance=1)
+                progress.update(task2, description="[green]Analysis Complete.")
+
+                # Semgrep takes a directory plus exclude globs, not a file list.
+                if semgrep_engine.is_available():
+                    console.print("[dim]Running deep structural analysis (AST-aware, taint-tracking) - can take several minutes on larger apps, this is normal, don't interrupt.[/dim]")
+                    task3 = progress.add_task("[cyan]Deep structural analysis...", total=None)
+                    semgrep_findings = semgrep_engine.run_semgrep(temp_dir, own_roots=own_roots, override_config=override_config)
+                    if semgrep_findings:
+                        all_findings.extend(semgrep_findings)
+                    if semgrep_engine.LAST_RUN.get('status') == 'ok':
+                        rules_run["structural"] = len(semgrep_engine.load_rule_defs())
+                    _sg_note = semgrep_engine.degraded_coverage_note()
+                    if _sg_note:
+                        progress.update(task3, completed=1, description="[yellow]Deep analysis INCOMPLETE (partial coverage).")
+                        console.print(f"[bold yellow]{_sg_note}[/bold yellow]")
+                    else:
+                        progress.update(task3, completed=1, description=f"[green]Deep analysis complete ({len(semgrep_findings or [])} findings).")
+                else:
+                    console.print("[dim]semgrep not found - install with `pip install semgrep` for deeper structural detection. Continuing with regex rules only.[/dim]")
 
             # Runs against the raw zip at apk_path, not the decompiled temp_dir.
             _print_sca_egress()
@@ -974,7 +990,7 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
                         f"as UNKNOWN, not as clean.[/bold yellow]"
                     )
             except Exception as e:
-                console.print(f"[dim]SCA dependency check failed (continuing without it): {e}[/dim]")
+                sca_cov = _sca_failed_coverage(e)
 
             console.print("[dim]Checking native library (.so) hardening flags (NX/PIE/RELRO/canary/RPATH)...[/dim]")
             try:
@@ -995,7 +1011,10 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
                     console.print("[dim]Native hardening check skipped (lief not installed).[/dim]")
             except Exception as e:
                 console.print(f"[dim]Native hardening check failed (continuing without it): {e}[/dim]")
-    return all_findings, rules, {"sca_coverage": sca_cov, "rules_run": rules_run}
+    meta = {"sca_coverage": sca_cov, "rules_run": rules_run}
+    if code_skipped is not None:
+        meta["code_coverage"] = {"status": "not_run", "reason": "tool_missing_offline", "note": code_skipped}
+    return all_findings, rules, meta
 
 
 _SCA_NOT_APPLICABLE = {
@@ -1117,6 +1136,39 @@ def _sca_coverage(stats):
     return cov
 
 
+def _sca_failed_coverage(exc):
+    """The dependency check raised: report it degraded (never clean, --fail-on exits 2)."""
+    console.print(f"[bold yellow]SCA dependency check stopped with an error: {rich_escape(str(exc))}. "
+                  f"Its CVE results are UNKNOWN, not clean.[/bold yellow]")
+    return {
+        "status": "degraded",
+        "degraded_reasons": ["sca_error"],
+        "dependencies_unresolved": "all",
+        "vulnerability_db": {"endpoint_host": "the dependency check", "last_error": "sca_error"},
+        "error": str(exc)[:300],
+    }
+
+
+def _sca_notify(msg):
+    console.print(f"[dim]{rich_escape(msg)}[/dim]")
+
+
+def _configure_osv(args):
+    """Local OSV database by default; --osv-api restores the network lookup."""
+    use_api = bool(getattr(args, "osv_api", False))
+    offline = bool(getattr(args, "offline", False))
+    if offline and (getattr(args, "upload", False) or getattr(args, "upload_binary", False)):
+        console.print("[bold red]--offline and --upload cannot be combined[/bold red] "
+                      "(--upload sends the findings to your Narvy account).")
+        raise SystemExit(EXIT_ERROR)
+    sca_osv.configure(api=use_api, offline=offline, notify=_sca_notify)
+    _decompiler.OFFLINE = offline
+    if use_api:
+        host = sca_osv.endpoint_host(sca_osv.endpoints_from_env()[0])
+        console.print(f"[bold yellow]--osv-api: the names and versions of your dependencies "
+                      f"are sent to {rich_escape(host)}.[/bold yellow]")
+
+
 def _print_sca_egress():
     """Say where the dependency check sends data, and that it is names + versions only."""
     try:
@@ -1136,6 +1188,15 @@ _SCA_DB_ERROR_TEXT = {
     "invalid_response": "it returned an unreadable answer",
     "too_large": "it refused the request as too large (HTTP 413)",
     "http_404": "no OSV API was found at that address (HTTP 404; check OSV_API_URL)",
+    "no_local_db_offline": "--offline was set and no copy is cached for this ecosystem; run `narvy db update` while online",
+    "download_failed": "it could not be downloaded and no earlier copy is cached",
+    "local_db_build_failed": "the downloaded file could not be read",
+    "local_db_unreadable": "the cached file is unreadable; run `narvy db update`",
+    "local_db_corrupt": "the cached file is corrupt and no new copy could be downloaded; run `narvy db update`",
+    "local_db_corrupt_offline": "the cached file is corrupt and --offline forbids downloading a new one; run `narvy db update`",
+    "local_db_too_old": "the cached copy is more than 7 days old; run `narvy db update`",
+    "sca_error": "it stopped with an error",
+    "cache_not_writable": "the cache directory is not writable (NARVY_OSV_DB_DIR to use another one)",
 }
 
 
@@ -1191,7 +1252,7 @@ def _run_ios_source_scan(source_dir):
             console.print(_sca_result_line(sca_stats, "dependencies"))
         _warn_github_advisory_truncated(sca_stats)
     except Exception as e:
-        console.print(f"[dim]SCA dependency check failed (continuing without it): {e}[/dim]")
+        sca_cov = _sca_failed_coverage(e)
 
     return result["findings"], result["rule_defs"], {"sca_coverage": sca_cov,
                                                      "rules_run": result.get("rules_run") or {}}
@@ -1246,7 +1307,7 @@ def _run_android_source_scan(source_dir, override_config=None):
                 f"UNKNOWN, not as clean.[/bold yellow]"
             )
     except Exception as e:
-        console.print(f"[dim]SCA dependency check failed (continuing without it): {e}[/dim]")
+        sca_cov = _sca_failed_coverage(e)
 
     return result["findings"], result["rule_defs"], {"sca_coverage": sca_cov,
                                                      "rules_run": result.get("rules_run") or {}}
@@ -1299,7 +1360,7 @@ def _run_web_source_scan(source_dir):
                 f"UNKNOWN, not as clean.[/yellow]"
             )
     except Exception as e:
-        console.print(f"[dim]SCA dependency check failed (continuing without it): {e}[/dim]")
+        sca_cov = _sca_failed_coverage(e)
 
     return result["findings"], result["rule_defs"], {"sca_coverage": sca_cov,
                                                      "rules_run": result.get("rules_run") or {}}
@@ -1334,7 +1395,7 @@ def _run_ios_binary_scan(ipa_path, override_config=None):
             console.print(_sca_result_line(sca_stats, "embedded framework(s)"))
         _warn_github_advisory_truncated(sca_stats)
     except Exception as e:
-        console.print(f"[dim]SCA dependency check failed (continuing without it): {e}[/dim]")
+        sca_cov = _sca_failed_coverage(e)
 
     return result["findings"], result["rule_defs"], {"encrypted": bool(result.get("encrypted")), "sca_coverage": sca_cov,
                                                      "rules_run": {"binary": len(ios_binary_analyzer.all_rule_defs())}}
@@ -1665,6 +1726,8 @@ def _scan_to_json(all_findings, rules, scan_mode, target_path, encrypted, scan_m
     unreadable = (scan_meta or {}).get("unreadable_paths")
     if unreadable:
         summary["unreadable_paths"] = unreadable
+    if (scan_meta or {}).get("code_coverage"):
+        summary["code_coverage"] = scan_meta["code_coverage"]
     structural = (scan_meta or {}).get("structural_coverage")
     if structural:
         summary["structural_coverage"] = structural
@@ -1746,8 +1809,179 @@ def _unreadable_paths(source_dir):
     return sorted(bad)
 
 
+def _parse_ecosystems(values):
+    by_lower = {e.lower(): e for e in sca_osv_localdb.ECOSYSTEMS}
+    out = []
+    for v in values:
+        for part in str(v).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            eco = by_lower.get(part.lower())
+            if eco is None:
+                console.print(f"[bold red]Unknown ecosystem '{rich_escape(part)}'.[/bold red] "
+                              f"Supported: {', '.join(sca_osv_localdb.ECOSYSTEMS)}")
+                raise SystemExit(EXIT_ERROR)
+            if eco not in out:
+                out.append(eco)
+    return out
+
+
+def cmd_db_update(args):
+    """Download the OSV export of each ecosystem and swap it in."""
+    if args.all:
+        ecos = list(sca_osv_localdb.ECOSYSTEMS)
+    else:
+        ecos = _parse_ecosystems(args.ecosystem) or sca_osv_localdb.cached_ecosystems()
+    if not ecos:
+        console.print("No OSV database is cached yet. Pass --ecosystem (e.g. --ecosystem npm,PyPI) or --all. "
+                      "A scan downloads the ecosystems it needs on its own.")
+        return
+    failed = []
+    for eco in ecos:
+        try:
+            sca_osv_localdb.download(eco, notify=_sca_notify)
+        except sca_osv_localdb.LocalDBError as exc:
+            failed.append(eco)
+            console.print(f"[bold red]{rich_escape(eco)}: update failed[/bold red] ({rich_escape(str(exc))}); "
+                          f"the previous copy, if any, is kept.")
+    if failed:
+        raise SystemExit(EXIT_ERROR)
+
+
+def cmd_db_status(args):
+    rows = sca_osv_localdb.status()
+    console.print(f"OSV database directory: {rich_escape(str(sca_osv_localdb.cache_dir()))}")
+    if not rows:
+        console.print("Nothing cached yet.")
+        return
+    table = Table()
+    for col in ("Ecosystem", "Snapshot (UTC)", "Age (h)", "Records", "Size (MB)"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(r["ecosystem"], str(r.get("snapshot_utc") or r.get("error", "")),
+                      str(r.get("age_hours", "")), str(r.get("records", "")), f"{r['db_bytes'] / 1e6:.0f}")
+    console.print(table)
+
+
+def _bom_target_supported(target_path):
+    if os.path.isdir(target_path):
+        return True
+    return (target_path.lower().endswith((".apk", ".aab", ".ipa")) and os.path.isfile(target_path)
+            and zipfile.is_zipfile(target_path))
+
+
+def _load_sign_key_or_exit(key_path):
+    """Load the Ed25519 key before any scan work, so a bad key fails fast."""
+    from . import sbom as _sbom
+    if not key_path:
+        return None
+    try:
+        return _sbom.load_private_key(key_path)
+    except _sbom.SigningUnavailable as e:
+        console.print(f"[bold red]{rich_escape(str(e))}[/bold red]")
+        raise SystemExit(EXIT_ERROR)
+    except (OSError, ValueError, TypeError) as e:
+        console.print(f"[bold red]Cannot use signing key {rich_escape(key_path)}:[/bold red] {rich_escape(str(e))}")
+        raise SystemExit(EXIT_ERROR)
+
+
+def _write_sbom(target_path, out_file, private_key):
+    from . import sbom as _sbom
+    doc = _sbom.build_sbom(target_path)
+    if private_key is not None:
+        doc = _sbom.sign_document(doc, private_key)
+    _sbom.write_json(doc, out_file)
+    n = len(doc["components"])
+    with_lic = sum(1 for c in doc["components"] if c.get("licenses"))
+    state = "signed (Ed25519)" if private_key is not None else "unsigned"
+    console.print(f"[green]SBOM[/green] CycloneDX {_sbom.SPEC_VERSION}, {state}: {n} component{'s' if n != 1 else ''}, "
+                  f"{with_lic} with a license -> {rich_escape(out_file)}")
+    return doc
+
+
+def _write_cbom(target_path, out_file):
+    from . import cbom as _cbom
+    from . import sbom as _sbom
+    doc, summary = _cbom.build_cbom(target_path)
+    _sbom.write_json(doc, out_file)
+    score = "none (no asymmetric algorithm found)" if summary["score"] is None else f"{summary['score']}/100"
+    console.print(f"[green]CBOM[/green] CycloneDX {_cbom.SPEC_VERSION}: {len(doc['components'])} algorithm{'s' if len(doc['components']) != 1 else ''}, "
+                  f"{summary['scanned']} {summary['scanned_label']} -> {rich_escape(out_file)}")
+    console.print(f"     PQC score: {score}. Quantum-vulnerable: {', '.join(summary['vulnerable']) or 'none found'}. "
+                  f"Post-quantum: {', '.join(summary['pqc']) or 'none found'}. "
+                  f"Classically weak: {', '.join(summary['weak']) or 'none found'}.")
+    if summary.get("providers"):
+        console.print(f"     {', '.join(summary['providers'])} bundled: post-quantum names it ships are listed, not scored.")
+    return doc, summary
+
+
+def _preflight_bom_paths(args, target_path):
+    for flag, attr in (("--sbom", "sbom"), ("--cbom", "cbom")):
+        out = getattr(args, attr, None)
+        if not out:
+            continue
+        if not _bom_target_supported(target_path):
+            console.print(f"[bold red]{flag} needs a source directory, or a valid .apk/.aab/.ipa (zip) file.[/bold red]")
+            raise SystemExit(EXIT_BAD_TARGET)
+        err = _preflight_output_writable(out)
+        if err:
+            console.print(f"[bold red]Cannot write {flag} output to {rich_escape(out)}: {err}.[/bold red]")
+            raise SystemExit(EXIT_ERROR)
+    if getattr(args, "sign_key", None) and not getattr(args, "sbom", None):
+        console.print("[bold red]--sign-key signs the SBOM: add --sbom FILE.[/bold red]")
+        raise SystemExit(EXIT_BAD_TARGET)
+
+
+def cmd_sbom(args):
+    target = args.target
+    if not os.path.exists(target) or not _bom_target_supported(target):
+        console.print("[bold red]Error:[/bold red] give a source directory, or a valid .apk/.aab/.ipa (zip) file.")
+        raise SystemExit(EXIT_BAD_TARGET)
+    key = _load_sign_key_or_exit(args.sign_key)
+    _write_sbom(target, args.file, key)
+    if key is None:
+        console.print("[dim]Unsigned. Add --sign-key KEY.pem (Ed25519) to sign it.[/dim]")
+
+
+def cmd_cbom(args):
+    target = args.target
+    if not os.path.exists(target) or not _bom_target_supported(target):
+        console.print("[bold red]Error:[/bold red] give a source directory, or a valid .apk/.aab/.ipa (zip) file.")
+        raise SystemExit(EXIT_BAD_TARGET)
+    _write_cbom(target, args.file)
+
+
+def cmd_verify_sbom(args):
+    from . import sbom as _sbom
+    try:
+        with open(args.file, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        console.print(f"[bold red]Cannot read {rich_escape(args.file)}:[/bold red] {rich_escape(str(e))}")
+        raise SystemExit(EXIT_BAD_TARGET)
+    try:
+        ok, reason = _sbom.verify_document(doc, args.public_key)
+    except _sbom.SigningUnavailable as e:
+        console.print(f"[bold red]{rich_escape(str(e))}[/bold red]")
+        raise SystemExit(EXIT_ERROR)
+    except (OSError, ValueError, TypeError) as e:
+        console.print(f"[bold red]Cannot use public key {rich_escape(str(args.public_key))}:[/bold red] {rich_escape(str(e))}")
+        raise SystemExit(EXIT_ERROR)
+    if ok:
+        console.print(f"[bold green]Signature {reason}.[/bold green]")
+        return
+    console.print(f"[bold red]Not verified: {reason}.[/bold red]")
+    raise SystemExit(EXIT_FAIL_ON)
+
+
+_DEFAULT_OUT = {"sarif": "narvy-results.sarif", "json": "narvy-results.json",
+                "gitlab": "gl-sast-report.json"}
+
+
 def cmd_scan(args):
     target_path = args.apk_path
+    scan_started = time.time()
     own_reports.SKIPPED.clear()
     own_reports.set_output_path(None)
     if getattr(args, "upload_binary", False):
@@ -1762,6 +1996,7 @@ def cmd_scan(args):
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise SystemExit(EXIT_BAD_TARGET)
     telemetry.note(surface=telemetry.surface_for_scan_mode(scan_mode))
+    _configure_osv(args)
     if scan_mode in ("android", "ios-binary") and not zipfile.is_zipfile(target_path):
         console.print(f"[bold red]Error:[/bold red] {target_path} is not a valid zip archive, "
                       "so it can't be an APK, AAB or IPA. The file may be truncated or corrupt.")
@@ -1785,8 +2020,8 @@ def cmd_scan(args):
             raise SystemExit(EXIT_BAD_TARGET)
 
     # Make sure the --file destination is writable before scanning.
-    if args.output in ("sarif", "json") and args.file != "-":
-        _default_out = "narvy-results.sarif" if args.output == "sarif" else "narvy-results.json"
+    if args.output in ("sarif", "json", "gitlab") and args.file != "-":
+        _default_out = _DEFAULT_OUT[args.output]
         _preflight_out = args.file or _default_out
         _werr = _preflight_output_writable(_preflight_out)
         if _werr:
@@ -1794,6 +2029,9 @@ def cmd_scan(args):
             console.print("[dim]Check the parent directory exists and is writable, or pick a different --file path.[/dim]")
             raise SystemExit(EXIT_ERROR)
         own_reports.set_output_path(_preflight_out)
+
+    _preflight_bom_paths(args, target_path)
+    _bom_key = _load_sign_key_or_exit(getattr(args, "sign_key", None))
 
     # Android and iOS-binary paths only: iOS source mode classifies vendored
     # code by directory convention instead.
@@ -1878,13 +2116,16 @@ def cmd_scan(args):
         scan_meta["unreadable_paths"] = unreadable
 
     structural_cov = _structural_coverage(scan_mode)
+    code_cov = scan_meta.get("code_coverage")
+    if code_cov and structural_cov:
+        structural_cov = {"status": "not_run", "note": code_cov["note"]}
     if structural_cov:
         scan_meta = dict(scan_meta)
         scan_meta["structural_coverage"] = structural_cov
 
-    if args.output in ('sarif', 'json'):
+    if args.output in ('sarif', 'json', 'gitlab'):
         # Written to a file, never stdout: progress notes would interleave.
-        if args.output == 'sarif':
+        if args.output in ('sarif', 'gitlab'):
             report = generate_sarif_report(
                 all_findings, rules,
                 encrypted=encrypted_scan,
@@ -1895,8 +2136,14 @@ def cmd_scan(args):
                     report["runs"][0].setdefault("properties", {})["structuralCoverage"] = structural_cov
                 except (KeyError, IndexError, TypeError, AttributeError):
                     pass
-            out_file = args.file or "narvy-results.sarif"
+            out_file = args.file or _DEFAULT_OUT[args.output]
             label = "SARIF report"
+            if args.output == 'gitlab':
+                # GitLab SAST report schema, for artifacts:reports:sast.
+                report = gitlab_sast_from_cli_sarif(
+                    report, version=__version__, started=scan_started, ended=time.time(),
+                    default_file=target_path if os.path.isfile(target_path) else None)
+                label = "GitLab SAST report"
         else:
             report = _scan_to_json(all_findings, rules, scan_mode, target_path, encrypted_scan, scan_meta=scan_meta)
             out_file = args.file or "narvy-results.json"
@@ -1991,6 +2238,13 @@ def cmd_scan(args):
         if getattr(args, "verbose", False):
             for rel in unreadable:
                 console.print(f"[yellow]  - {rich_escape(rel)}[/yellow]")
+
+    if getattr(args, "sbom", None) or getattr(args, "cbom", None):
+        console.print()
+        if getattr(args, "sbom", None):
+            _write_sbom(target_path, args.sbom, _bom_key)
+        if getattr(args, "cbom", None):
+            _write_cbom(target_path, args.cbom)
 
     _premium_note = web_source_analyzer.premium_checks_note(premium_counts)
     if _premium_note:
@@ -2107,7 +2361,7 @@ def cmd_scan(args):
         scope = {"android": "the decompiled app", "ios-binary": "the compiled binary only"}.get(
             scan_mode, "the source checkout")
         console.print(_rules_sentence(scope, all_findings, scan_meta))
-        if args.output not in ('sarif', 'json') and all_findings:
+        if args.output not in ('sarif', 'json', 'gitlab') and all_findings:
             if getattr(args, "no_group", False):
                 console.print("One row per rule hit, no de-duplication.")
             else:
@@ -2116,6 +2370,12 @@ def cmd_scan(args):
         console.print("To keep results in your Narvy dashboard (de-duplication, false-positive filtering, "
                       "history), run `narvy login` and add [bold]--upload[/bold].")
 
+    if scan_meta.get("code_coverage"):
+        console.print(
+            f"[bold yellow]Code analysis is INCOMPLETE: it did not run "
+            f"({rich_escape(scan_meta['code_coverage']['note'])}). 0 code findings is UNKNOWN, "
+            f"not clean.[/bold yellow]"
+        )
     # SCA whose vulnerability database gave no usable answer reports 0 CVEs as UNKNOWN, not clean.
     sca_cov = scan_meta.get("sca_coverage")
     if isinstance(sca_cov, dict) and sca_cov.get("status") == "degraded":
@@ -2141,11 +2401,22 @@ def cmd_scan(args):
             f"0 CVEs on those is UNKNOWN, not clean.[/yellow]"
         )
     if isinstance(sca_cov, dict) and sca_cov.get("dependencies_from_stale_cache"):
-        console.print(
-            f"[yellow]SCA coverage note: {sca_cov['dependencies_from_stale_cache']} "
-            f"dependency result(s) came from an expired local cache because the "
-            f"vulnerability database was unavailable; newer advisories may be missing.[/yellow]"
-        )
+        _vdb = sca_cov.get("vulnerability_db") or {}
+        if _vdb.get("source") == "local":
+            _ages = ", ".join(f"{e} {i.get('age_hours')} h" for e, i in (_vdb.get("ecosystems") or {}).items()
+                              if i.get("stale"))
+            console.print(
+                f"[yellow]SCA coverage note: {sca_cov['dependencies_from_stale_cache']} "
+                f"dependency result(s) came from a local OSV database older than "
+                f"{sca_osv_localdb.max_age_hours():g} h ({_ages}); newer advisories may be "
+                f"missing. Run `narvy db update`.[/yellow]"
+            )
+        else:
+            console.print(
+                f"[yellow]SCA coverage note: {sca_cov['dependencies_from_stale_cache']} "
+                f"dependency result(s) came from an expired local cache because the "
+                f"vulnerability database was unavailable; newer advisories may be missing.[/yellow]"
+            )
 
     # Must stay last so failing the build never swallows the report/upload.
     # A coverage gap = a pass that couldn't read the target, where exit 0 would falsely claim clean.
@@ -2165,8 +2436,10 @@ def cmd_scan(args):
                 "surface only, not the app's own (encrypted) code. Narvy dynamic analysis "
                 "on the platform covers that code for most apps."
             )
-        if scan_mode in ("android", "android-bundle", "android-source",
-                         "ios-source", "web-source"):
+        if scan_meta.get("code_coverage"):
+            coverage_gaps.append("Code analysis did not run: " + scan_meta["code_coverage"]["note"])
+        elif scan_mode in ("android", "android-bundle", "android-source",
+                           "ios-source", "web-source"):
             if not semgrep_engine.is_available():
                 coverage_gaps.append(
                     "The deep structural (Semgrep) pass did not run at all - semgrep is not "
@@ -2278,7 +2551,7 @@ def cmd_upload_all(args):
 
 def _reject_format_as_file(output_file):
     """Catch a swapped flag: -f/--file given a format name (e.g. `-f json`) instead of a path."""
-    if output_file in ("text", "json", "sarif"):
+    if output_file in ("text", "json", "sarif", "gitlab"):
         console.print(
             f"[bold red]ERROR:[/bold red] -f/--file expects a file path but got "
             f"'{output_file}', which is a format name. Use [bold]-o {output_file}[/bold] "
@@ -2909,6 +3182,14 @@ def cmd_init_ci(args):
         "[dim]It installs the CLI from PyPI with [bold]pip install narvy-cli[/bold] "
         "and runs on every push and pull request.[/dim]"
     )
+    if platform == "gitlab":
+        console.print(
+            "[dim]The template runs `narvy scan . --output gitlab --file gl-sast-report.json "
+            "--fail-on high`, declared under artifacts:reports:sast; the narvy_gate job fails "
+            "the pipeline on the --fail-on result. Adjust --fail-on (critical/high/medium/low/any) "
+            "to set how strict the gate is, and commit the file to enable it.[/dim]"
+        )
+        return
     console.print(
         "[dim]The template runs `narvy scan . --output sarif --file narvy-results.sarif "
         "--fail-on high`. Adjust --fail-on (critical/high/medium/low/any) to set how strict the "
@@ -2984,11 +3265,11 @@ def cli(prog=None):
     p_scan.add_argument("--max-mem", default="auto", help="Upper limit for the jadx Java heap, e.g. '2g' or '4096m'. Default 'auto': sized from the app and the memory free right now. Android only.")
     p_scan.add_argument("--force", action="store_true",
                         help="Run jadx with exactly --max-mem, without automatic heap sizing or the out-of-memory retry.")
-    p_scan.add_argument("--output", "-o", "--format", dest="output", default="console", choices=["console", "sarif", "json"],
-                        type=str.lower, help="Output format: console (default), sarif or json. sarif and json are written to --file.")
+    p_scan.add_argument("--output", "-o", "--format", dest="output", default="console", choices=["console", "sarif", "json", "gitlab"],
+                        type=str.lower, help="Output format: console (default), sarif, json, or gitlab (GitLab SAST report for artifacts:reports:sast). sarif, json and gitlab are written to --file.")
     p_scan.add_argument("-v", "--verbose", action="store_true",
                         help="List every file the scan could not read, not just the count.")
-    p_scan.add_argument("--file", "-f", default=None, help="Output file for --output sarif/json (default: narvy-results.sarif or narvy-results.json). Ignored for console output.")
+    p_scan.add_argument("--file", "-f", default=None, help="Output file for --output sarif/json/gitlab (default: narvy-results.sarif, narvy-results.json or gl-sast-report.json). Ignored for console output.")
     p_scan.add_argument("--upload", action="store_true", help="Send the findings (never your code or binary) to your Narvy dashboard after the scan. Needs `narvy login` and a paid plan.")
     p_scan.add_argument("--upload-binary", action="store_true", help="Upload the binary itself (.apk/.aab/.ipa) for a server-side scan instead of the results. Implies --upload.")
     p_scan.add_argument("--confirm-upload", action="store_true",
@@ -2997,7 +3278,55 @@ def cli(prog=None):
                         help="Console table: one row per rule hit instead of grouping the same rule in the same file.")
     p_scan.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "any"],
                         help=FAIL_ON_HELP + " Evaluated after --upload, so the results are still sent.")
+    p_scan.add_argument("--sbom", metavar="FILE", default=None,
+                        help="Also write a CycloneDX SBOM of the dependencies (offline). Source directory, .apk/.aab or .ipa.")
+    p_scan.add_argument("--sign-key", metavar="KEY.pem", default=None,
+                        help="Sign the --sbom with this Ed25519 private key (PEM, no passphrase). Needs: " + "pip install 'narvy-cli[sign]'.")
+    p_scan.add_argument("--cbom", metavar="FILE", default=None,
+                        help="Also write a CycloneDX CBOM (crypto algorithms found) with a post-quantum readiness score.")
+    _osv_mode = p_scan.add_mutually_exclusive_group()
+    _osv_mode.add_argument("--offline", action="store_true",
+                           help="Dependency check (SCA) uses only the OSV database already cached in "
+                                "~/.cache/narvy/osv; nothing is downloaded.")
+    _osv_mode.add_argument("--osv-api", action="store_true",
+                           help="Dependency check (SCA) through the OSV API instead of the local database. "
+                                "Sends the names and versions of your dependencies to the API "
+                                "(Narvy's EU mirror, or OSV_API_URL).")
     p_scan.set_defaults(func=cmd_scan)
+
+    p_db = sub.add_parser("db", allow_abbrev=False,
+                          help="Manage the local OSV vulnerability database used by the dependency check")
+    db_sub = p_db.add_subparsers(dest="db_command", required=True)
+    p_db_up = db_sub.add_parser("update", allow_abbrev=False,
+                                help="Download the OSV database again (default: the ecosystems already cached)")
+    p_db_up.add_argument("--ecosystem", "-e", action="append", default=[],
+                         help=f"Ecosystem to download (repeatable or comma separated): "
+                              f"{', '.join(sca_osv_localdb.ECOSYSTEMS)}")
+    p_db_up.add_argument("--all", action="store_true", help="Download every supported ecosystem")
+    p_db_up.set_defaults(func=cmd_db_update)
+    p_db_st = db_sub.add_parser("status", allow_abbrev=False, help="List the cached ecosystems, their age and size")
+    p_db_st.set_defaults(func=cmd_db_status)
+
+    p_sbom = sub.add_parser("sbom", allow_abbrev=False,
+                            help="Write a CycloneDX SBOM of a source directory, APK/AAB or IPA (offline, optional Ed25519 signature)")
+    p_sbom.add_argument("target", help="Source directory, .apk/.aab or .ipa")
+    p_sbom.add_argument("--file", "-f", default="narvy-sbom.cdx.json", help="Output file (default: narvy-sbom.cdx.json)")
+    p_sbom.add_argument("--sign-key", metavar="KEY.pem", default=None,
+                        help="Ed25519 private key (PEM, no passphrase). Without it the SBOM is unsigned. Needs: pip install 'narvy-cli[sign]'.")
+    p_sbom.set_defaults(func=cmd_sbom)
+
+    p_cbom = sub.add_parser("cbom", allow_abbrev=False,
+                            help="Write a CycloneDX CBOM: crypto algorithms found and a post-quantum readiness score (offline)")
+    p_cbom.add_argument("target", help="Source directory, .apk/.aab or .ipa")
+    p_cbom.add_argument("--file", "-f", default="narvy-cbom.cdx.json", help="Output file (default: narvy-cbom.cdx.json)")
+    p_cbom.set_defaults(func=cmd_cbom)
+
+    p_vsbom = sub.add_parser("verify-sbom", allow_abbrev=False,
+                             help="Check the Ed25519 signature of an SBOM written by narvy sbom --sign-key")
+    p_vsbom.add_argument("file", help="Signed CycloneDX JSON file")
+    p_vsbom.add_argument("--public-key", metavar="PUB.pem", default=None,
+                         help="Trusted Ed25519 public key (PEM). Without it only integrity is checked, not who signed.")
+    p_vsbom.set_defaults(func=cmd_verify_sbom)
 
     p_tel = sub.add_parser(
         "telemetry", allow_abbrev=False,
@@ -3094,7 +3423,8 @@ def cli(prog=None):
     from .proc import install_termination_handlers
     install_termination_handlers()
     command = getattr(args, "command", None)
-    track = command in telemetry.COMMANDS
+    # --offline: no usage event either (nothing leaves the machine).
+    track = command in telemetry.COMMANDS and not getattr(args, "offline", False)
     if track:
         telemetry.maybe_show_notice()
     started = time.monotonic()

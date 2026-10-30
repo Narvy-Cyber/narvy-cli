@@ -137,6 +137,16 @@ HEALTH_PERMISSION_PREFIX = "android.permission.health."
 HEALTH_URL = PERMISSIONS_POLICY_URL
 ACCESSIBILITY_BIND = "android.permission.BIND_ACCESSIBILITY_SERVICE"
 ACCESSIBILITY_URL = _A11Y_URL
+# https://support.google.com/googleplay/android-developer/answer/12564964
+#   (Understanding Google Play's VpnService policy, read 2026-10-09): "All apps
+#   that use the VpnService must complete the declaration form to avoid
+#   violating the policy resulting in potential enforcement actions."
+# A VpnService is declared as a <service> protected by BIND_VPN_SERVICE with an
+# intent filter for the android.net.VpnService action
+# (developer.android.com/reference/android/net/VpnService).
+VPN_BIND = "android.permission.BIND_VPN_SERVICE"
+VPN_ACTION = "android.net.VpnService"
+VPN_URL = "https://support.google.com/googleplay/android-developer/answer/12564964"
 
 # --- Debuggable --------------------------------------------------------------
 # https://developer.android.com/studio/publish/preparing#publishing-configure
@@ -151,6 +161,85 @@ DEBUGGABLE_URL = "https://developer.android.com/studio/publish/preparing#publish
 # https://developer.android.com/privacy-and-security/security-config#CleartextTrafficPermitted
 CLEARTEXT_URL = "https://developer.android.com/privacy-and-security/security-config#CleartextTrafficPermitted"
 CLEARTEXT_MANIFEST_URL = "https://developer.android.com/guide/topics/manifest/application-element#usesCleartextTraffic"
+
+
+# --- Policy changes effective 2027-01-27 (April and July 2026 policy updates) --
+# Read on 2026-10-09. Google's deadline table
+# https://developer.android.com/distribute/play-policies lists four changes
+# dated "January 27, 2027". Each one below quotes the Play Console Help article
+# that states it. All four depend on how the app uses a permission or a
+# service, which a binary does not show, so the store check never turns them
+# into a blocker: it reports what the manifest declares and what Google
+# requires from that date (a Play Console declaration, or a use that is no
+# longer allowed).
+POLICY_2027_DATE = _dt.date(2027, 1, 27)
+POLICY_DEADLINES_URL = "https://developer.android.com/distribute/play-policies"
+
+# Contacts Permissions policy.
+# https://support.google.com/googleplay/android-developer/answer/16909972
+#   (Preview: Permissions and APIs that Access Sensitive Information, "This
+#   article previews changes from our April 2026 policy updates."):
+#   "Apps that target Android 17 or higher (API level 37+) may only request the
+#    READ_CONTACTS permission if the Android Contact Picker is not sufficient for
+#    your app to provide core functionality. Apps that still request the
+#    READ_CONTACTS permission must submit a Play Console declaration to
+#    demonstrate access needs for Contacts and why Contact Picker would not
+#    suffice." "(This is a new policy, and will be effective January 27, 2027.)"
+# https://support.google.com/googleplay/android-developer/answer/16935362
+#   "January 27, 2027: Policy compliance is mandatory for all apps that target
+#    Android 17 or later (API level 37+). 30-day automatic self extension will
+#    be available in Console."
+CONTACTS_POLICY_URL = "https://support.google.com/googleplay/android-developer/answer/16935362"
+CONTACTS_PREVIEW_URL = "https://support.google.com/googleplay/android-developer/answer/16909972"
+CONTACT_PICKER_URL = "https://developer.android.com/about/versions/17/features/contact-picker"
+CONTACTS_PERMISSION = "android.permission.READ_CONTACTS"
+CONTACTS_TARGET_SDK = 37
+
+# Location Permissions policy: location button, precise location declaration.
+# https://support.google.com/googleplay/android-developer/answer/17033915
+#   (Minimum Scope: Foreground Location Access and the Location Button):
+#   "For apps targeting Android 17 (API level 37) and higher, the Android
+#    location button is the required minimum scope method for obtaining precise
+#    location for "transactional" (one-time) use cases."
+#   "If your app only requires precise location via the button, you must
+#    declare it in your AndroidManifest.xml using the onlyForLocationButton
+#    attribute" (android:usesPermissionFlags="onlyForLocationButton").
+#   "All apps requesting precise location (ACCESS_FINE_LOCATION) must complete
+#    a declaration in the Play Console to demonstrate access needs and justify
+#    why the location button or coarse location is insufficient."
+#   "January 27, 2027: Policy compliance is mandatory for all apps. 30 day self
+#    extensions will be available in Play Console."
+# Flag value: android.R.attr.usesPermissionFlags (0x01010644), flag
+# onlyForLocationButton = 0x20000 (developer.android.com/reference/android/R.attr
+# and PackageInfo.REQUESTED_PERMISSION_ONLY_FOR_LOCATION_BUTTON, API 37,
+# constant value 131072).
+LOCATION_POLICY_URL = "https://support.google.com/googleplay/android-developer/answer/17033915"
+LOCATION_BUTTON_URL = "https://developer.android.com/guide/topics/permissions/private-alternatives/location-button"
+FINE_LOCATION_PERMISSION = "android.permission.ACCESS_FINE_LOCATION"
+LOCATION_BUTTON_TARGET_SDK = 37
+ONLY_FOR_LOCATION_BUTTON_FLAG = 0x20000
+
+# Foreground services: geofencing removed as an approved use case.
+# https://support.google.com/googleplay/android-developer/answer/16965181
+#   (Preview: Understanding foreground service and full-screen intent
+#   requirements, April 2026 policy updates):
+#   "We're removing geofencing as an approved foreground services use case.
+#    Developers can instead use the Geofence API for this use case.
+#    (effective January 27, 2027)"
+FGS_GEOFENCING_URL = "https://support.google.com/googleplay/android-developer/answer/16965181"
+GEOFENCE_API_URL = "https://developer.android.com/develop/sensors-and-location/location/geofencing"
+
+# SMS and Call Log: account verification by phone call no longer allowed.
+# https://support.google.com/googleplay/android-developer/answer/17225965
+#   (Preview: Use of SMS or Call Log permission groups, "July 2026 policy
+#   updates"): "Our SMS and Call Log Permissions policy will no longer permit
+#   account verification via phone call as a use case for the READ_CALL_LOG
+#   permission. To securely verify accounts without requiring sensitive app
+#   permissions, use the Digital Credentials API instead, either directly or
+#   through a verification provider built upon it, or the SMS Retriever API."
+#   "(effective January 27, 2027)"
+CALL_LOG_VERIFICATION_URL = "https://support.google.com/googleplay/android-developer/answer/17225965"
+CALL_LOG_PERMISSION = "android.permission.READ_CALL_LOG"
 
 
 def target_requirement(as_of: _dt.date, form_factor: str):

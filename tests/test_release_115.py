@@ -169,9 +169,16 @@ def test_egress_notice_names_other_host_and_does_not_claim_narvy():
 def test_egress_line_printed_on_stderr_console(monkeypatch):
     buf = io.StringIO()
     monkeypatch.setattr(narvy_main, "console", Console(file=buf, width=300, color_system=None))
-    monkeypatch.setattr(osv_client, "_default_client", None)
-    narvy_main._print_sca_egress()
+    # 1.3.0: the network lookup is opt-in (--osv-api); the default is the local database.
+    osv_client.configure(api=True)
+    try:
+        narvy_main._print_sca_egress()
+    finally:
+        osv_client.configure()
     assert NARVY_LINE in buf.getvalue()
+    buf.truncate(0)
+    narvy_main._print_sca_egress()
+    assert "local OSV database (nothing is sent)" in buf.getvalue()
 
 
 # --- healthy mirror ------------------------------------------------------------
@@ -465,7 +472,7 @@ def test_cli_json_stdout_stays_clean_and_reports_stale_mirror(tmp_path):
     with _Mirror(_stale) as m:
         out = subprocess.run(
             [sys.executable, "-m", "narvy", "scan", str(proj), "--output", "json", "--file", "-",
-             "--fail-on", "critical"],
+             "--fail-on", "critical", "--osv-api"],
             capture_output=True, text=True, timeout=600, env=_cli_env(tmp_path, m.base))
     data = json.loads(out.stdout)
     cov = data["summary"]["sca_coverage"]

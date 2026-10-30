@@ -1,51 +1,173 @@
-# Narvy CLI
+# narvy-cli
 
-[![PyPI version](https://badge.fury.io/py/narvy-cli.svg)](https://badge.fury.io/py/narvy-cli)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+Local static security scanner for Android and iOS apps and their source code,
+plus Google Play and App Store upload checks for APK, AAB and IPA files.
 
-A free, local static application security testing (SAST) scanner. It runs
-entirely on your machine, needs no account, and finds real, high-signal
-vulnerabilities - hardcoded secrets, insecure configuration, weak
-cryptography, SSRF, injection, and more - in:
+[![PyPI](https://img.shields.io/pypi/v/narvy-cli)](https://pypi.org/project/narvy-cli/)
+[![Python](https://img.shields.io/pypi/pyversions/narvy-cli)](https://pypi.org/project/narvy-cli/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/Narvy-Cyber/narvy-cli/blob/main/LICENSE)
 
-- **Android**: `.apk` / `.aab`, split-APK bundles (`.apkm` / `.xapk` /
-  `.apks`), or a raw Gradle/Kotlin source checkout
-- **iOS**: an unencrypted `.ipa`, or a raw Xcode/Swift source checkout
-- **Web/backend source**: JavaScript/TypeScript, Python, PHP, Go, Ruby,
-  Rust, Java/Kotlin, and C#/.NET (secrets and dependencies)
-
-It also ships three standalone scanners that need nothing but network
-access or your own existing credentials:
-
-- `web-scan` - Nuclei-based scan of a live URL (passive by default, `--active` opt-in)
-- `host-audit` - agentless host audit over your own SSH access (Narvy's own
-  host checks plus Lynis (GPL-3.0) as the hardening baseline)
-- `cloud-scan` - AWS account posture check using your own ambient AWS
-  credentials
-
-and one check that is not a security scan:
-
-- `store-check` - Google Play and App Store upload requirements for an
-  APK, AAB, split-APK set or IPA, offline (see [Store check](#store-check))
-
-Your code, binaries and findings are never uploaded unless you explicitly
-pass `--upload`. The CLI does send anonymous usage statistics, described
-exactly in [Telemetry](#telemetry), which you can turn off.
-
-The dependency check sends package names and versions (never code, file paths or findings) to Narvy's EU-hosted vulnerability database. Set OSV_API_URL to use another OSV-compatible server.
+![narvy store-check on InsecureBankv2.apk](https://raw.githubusercontent.com/Narvy-Cyber/narvy-cli/main/docs/demo/store-check.gif)
 
 ## Install
 
 ```bash
-pipx install narvy-cli      # recommended, puts `narvy` on PATH (run `pipx ensurepath` once)
-pip install narvy-cli       # or plain pip
+pipx install narvy-cli      # or: pip install narvy-cli
 ```
+
+Python 3.10 or later. Android scans need Java 11 or later; if none is found,
+a JRE and jadx are downloaded into `~/.narvy/tools` on the first APK scan.
+No account is needed. Per-OS notes are in [Install details](#install-details).
+
+## Quick start
+
+```bash
+narvy store-check app-release.aab      # Play / App Store upload requirements, offline
+narvy scan app-release.apk             # APK, AAB, split APKs, IPA, or a source folder
+narvy scan ./repo --output sarif --file results.sarif --fail-on high   # CI gate
+```
+
+`narvy store-check` on [InsecureBankv2](https://github.com/dineshshetty/Android-InsecureBankv2),
+a deliberately vulnerable Android app (narvy-cli 1.2.2, some detail lines
+removed):
+
+```text
+$ narvy store-check InsecureBankv2.apk
+narvy-store-check 0.3.0  |  InsecureBankv2.apk  (android/apk)
+  id=com.android.insecurebankv2 version=1.0 build=1 min_os=15 target_sdk=22
+  requirements as of 2026-10-09  |  sha256 b18af2a0e44d7634...
+
+[BLOCKER] PLAY-DEBUGGABLE: Build is debuggable (android:debuggable=true)
+    android:debuggable is true. Google Play rejects debuggable APKs and app bundles.
+    - evidence: AndroidManifest.xml = true (application@android:debuggable)
+    doc: https://developer.android.com/studio/publish/preparing#publishing-configure
+
+[BLOCKER] PLAY-TARGET-SDK: Target API 22 is below Google Play's requirement (API 36)
+    - evidence: AndroidManifest.xml = targetSdkVersion=22
+    doc: https://developer.android.com/google/play/requirements/target-sdk
+
+[WARNING] PLAY-CLEARTEXT: Cleartext HTTP allowed for all domains (default for target API 22)
+[WARNING] PLAY-PERMISSION-DECLARATION: Play Console declaration needed: SMS, Call Log
+[NOT DETERMINED] PLAY-CALL-LOG-VERIFICATION: Required from 2027-01-27: READ_CALL_LOG not allowed for account verification by phone call (use not determined)
+[PASS] PLAY-16KB-ELF: No 64-bit native library to align for 16 KB pages
+
+Summary: 2 blockers, 2 warnings, 0 info, 1 not determined
+NOT READY: at least one blocker
+Deterministic checks only. Not a security scan.
+```
+
+`narvy scan` on the same APK (progress lines and per-finding detail
+removed):
+
+```text
+$ narvy scan InsecureBankv2.apk
+Found 19 potential issues:
+┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━┓
+┃ Severity ┃ Rule Name                            ┃ File                                 ┃               Lines ┃ Hits ┃ Confidence ┃
+┡━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━╇━━━━━━━━━━━━┩
+│ CRITICAL │ Potential secret: hardcoded          │ sources/com/android/insecurebankv2/… │              27, 35 │    2 │   MEDIUM   │
+│          │ encryption key (pattern match, not   │                                      │                     │      │            │
+│          │ tested)                              │                                      │                     │      │            │
+│ CRITICAL │ Application is Debuggable            │ resources/AndroidManifest.xml        │                  32 │    1 │    HIGH    │
+│ CRITICAL │ Potential secret: hardcoded          │ sources/com/android/insecurebankv2/… │                  22 │    1 │   MEDIUM   │
+│          │ encryption key (pattern match, not   │                                      │                     │      │            │
+│          │ tested)                              │                                      │                     │      │            │
+│   HIGH   │ Component is Exported without        │ resources/AndroidManifest.xml        │ 49, 56, 60, 64 (+2) │    6 │   MEDIUM   │
+│          │ Permission                           │                                      │                     │      │            │
+│   HIGH   │ Hardcoded Cryptographic IV           │ sources/com/android/insecurebankv2/… │              26, 34 │    2 │   MEDIUM   │
+│          │ (indirect)                           │                                      │                     │      │            │
+│   HIGH   │ Application Data Backup is Enabled   │ resources/AndroidManifest.xml        │                  33 │    1 │    HIGH    │
+│   HIGH   │ Logging a value that looks like a    │ sources/com/android/insecurebankv2/… │                 117 │    1 │   MEDIUM   │
+│          │ credential/token/secret - readable   │                                      │                     │      │            │
+│          │ via adb/crash reporters on many      │                                      │                     │      │            │
+│          │ devices.                             │                                      │                     │      │            │
+│   HIGH   │ JavaScript enabled in WebView - can  │ sources/com/android/insecurebankv2/… │                  30 │    1 │   MEDIUM   │
+│          │ enable XSS if untrusted content is   │                                      │                     │      │            │
+│          │ loaded.                              │                                      │                     │      │            │
+│  MEDIUM  │ Write to Unscoped External Storage   │ sources/com/android/insecurebankv2/… │            163, 181 │    2 │    LOW     │
+│  MEDIUM  │ Write to Unscoped External Storage   │ sources/com/android/insecurebankv2/… │              25, 29 │    2 │    LOW     │
+└──────────┴──────────────────────────────────────┴──────────────────────────────────────┴─────────────────────┴──────┴────────────┘
+Scanned the decompiled app with 48 local rules (28 pattern, 2 taint, 18 structural); 9 of them produced findings.
+```
+
+Run `narvy doctor` to check the Java, jadx and iOS tooling, and
+`narvy <command> --help` for every flag.
+
+## What it checks
+
+- **Android** (`.apk`, `.aab`, split APKs `.apkm` / `.xapk` / `.apks`, Gradle
+  or Kotlin source): manifest settings (debuggable, backup, exported
+  components, cleartext traffic), hardcoded secrets and keys, weak
+  cryptography (static keys and IVs, ECB, weak hashes), WebView settings,
+  insecure storage and logging, TLS trust bypass, native library hardening
+  flags (NX, PIE, RELRO, stack canary, RPATH).
+- **iOS** (unencrypted `.ipa`, Swift or Objective-C source): Info.plist and
+  App Transport Security, Mach-O hardening (PIE, stack canary, ARC), keychain
+  accessibility, URL schemes, hardcoded secrets, weak cryptography, TLS trust
+  bypass.
+- **Web and backend source** (JavaScript/TypeScript, Python, PHP, Go, Ruby,
+  Rust, Java/Kotlin; C#/.NET for secrets and dependencies): injection, SSRF,
+  XSS, unsafe deserialization, weak cryptography, hardcoded secrets.
+- **Dependencies**: known vulnerabilities, matched on your machine against a
+  downloaded copy of the [OSV.dev](https://osv.dev) database (see
+  [Dependency check](#dependency-check-sca)).
+- **Store readiness** (`store-check`): 14 Google Play and 7 App Store checks,
+  listed in [Store check](#store-check).
+
+Output: console, JSON, or SARIF for GitHub and GitLab code scanning.
+Secret findings are reported as potential: values are masked and never
+tested against the service they belong to.
+
+Three other commands work on targets you own, without an app file:
+`web-scan` (Nuclei scan of a live URL, passive unless `--active`),
+`host-audit` (over your SSH access, with Lynis as the hardening baseline) and
+`cloud-scan` (AWS posture, with your own credentials).
+
+## What leaves your machine
+
+| What | When | Sent to |
+|------|------|---------|
+| Nothing | `store-check` (no network call) | |
+| An ecosystem name (e.g. `npm`), to download its OSV database | `scan`, when the database for that ecosystem is missing or older than 24 h; `db update` | osv-vulnerabilities.storage.googleapis.com |
+| Package names, ecosystems and versions, never code or paths | only with `scan --osv-api` | Narvy's EU-hosted OSV mirror (`OSV_API_URL` to change) |
+| iOS library names | only with `NARVY_GITHUB_ADVISORIES=1` (never with `--offline`) | api.github.com |
+| JRE and jadx downloads | first APK scan, only if Java 11+ or jadx is missing | api.adoptium.net, github.com |
+| One anonymous usage event per command (fields listed in [Telemetry](#telemetry)) | every command except `store-check` and `telemetry`, on by default | narvy.io |
+| Findings, never code or binary | only with `--upload` (needs `narvy login`) | your Narvy account |
+
+`scan --offline` sends nothing: no database or tool download, no usage
+event, no GitHub advisory lookup. If jadx or Java is missing for an APK scan,
+the code analysis does not run (INCOMPLETE, exit 2 with `--fail-on`); run
+`narvy doctor` once while online to install them.
+
+Telemetry is on by default. Turn it off with `narvy telemetry off`,
+`NARVY_TELEMETRY=0` or `DO_NOT_TRACK=1`. Semgrep, which runs the structural
+rules, is started with its version check and metrics disabled.
+
+## License
+
+Apache License 2.0, rules included. See
+[LICENSE](https://github.com/Narvy-Cyber/narvy-cli/blob/main/LICENSE) and
+[License details](#license-details).
+
+Project site and hosted dashboard: [narvy.io](https://narvy.io).
+
+---
+
+## Install details
 
 If your shell says `narvy: command not found` / `The term 'narvy' is not
 recognized`, pip installed the command into a directory that is not on your
 PATH. `python -m narvy` always works (`py -m narvy` on Windows), and prints
 once the command that adds that directory to PATH. Narvy never edits PATH
 itself.
+
+Optional extras:
+
+```bash
+pip install 'narvy-cli[ios-full]'  # full Obj-C introspection for iOS binary scans
+pip install 'narvy-cli[cloud]'     # boto3, needed for cloud-scan
+```
 
 ### Windows
 
@@ -110,17 +232,6 @@ the same way Homebrew does. A `pip install --user` puts `narvy` in
 `export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc`, or run
 `python3 -m narvy`.
 
-### Requirements
-
-Android scans need Java 11+. If none is found, a JRE (and jadx) is
-downloaded into `~/.narvy/tools` on the first APK scan. Everything else
-is pure Python plus a couple of optional extras:
-
-```bash
-pip install 'narvy-cli[ios-full]'  # full Obj-C introspection for iOS binary scans
-pip install 'narvy-cli[cloud]'     # boto3, needed for cloud-scan
-```
-
 ## Usage
 
 ```bash
@@ -139,7 +250,7 @@ narvy scan ./my-api-repo/
 # SARIF output, for CI or GitHub/GitLab code scanning
 narvy scan app-release.apk --output sarif --file results.sarif
 
-# Passive web scan of a live URL - no active injection payloads, ever
+# Passive web scan of a live URL: no active injection payloads
 narvy web-scan https://example.com
 
 # Agentless host hardening audit over your own SSH access
@@ -154,14 +265,14 @@ narvy scans
 # Scan + upload every .apk/.aab/.apkm/.xapk/.ipa found in a folder, in one command
 narvy upload-all ./my-apps-folder/
 
+# CycloneDX SBOM (optionally Ed25519-signed) and CBOM with a PQC score, offline
+narvy sbom ./my-app -f sbom.cdx.json
+narvy cbom ./my-app -f cbom.cdx.json
+
 # Google Play / App Store upload requirements, offline (not a security scan)
 narvy store-check app-release.aab
 narvy store-check MyApp.ipa --lang fr --json
 ```
-
-Run `narvy doctor` before your first scan to check your Java/jadx/iOS
-tooling setup, and `narvy <command> --help` for the full flag list of
-any subcommand.
 
 The console summary table groups hits of the same rule in the same file
 into one row, with a hit count and the lines involved. `--no-group` shows
@@ -230,7 +341,7 @@ narvy store-check MyApp.ipa --as-of 2027-02-01    # evaluate a future deadline
 
 | Store | Checks |
 |-------|--------|
-| Google Play | `PLAY-TARGET-SDK`, `PLAY-16KB-ELF`, `PLAY-16KB-ZIPALIGN`, `PLAY-EXPORTED`, `PLAY-DEBUGGABLE`, `PLAY-CLEARTEXT`, `PLAY-FGS-TYPE`, `PLAY-FGS-PERMISSION`, `PLAY-FGS-DECLARATION`, `PLAY-PERMISSION-DECLARATION` |
+| Google Play | `PLAY-TARGET-SDK`, `PLAY-16KB-ELF`, `PLAY-16KB-ZIPALIGN`, `PLAY-EXPORTED`, `PLAY-DEBUGGABLE`, `PLAY-CLEARTEXT`, `PLAY-FGS-TYPE`, `PLAY-FGS-PERMISSION`, `PLAY-FGS-DECLARATION`, `PLAY-PERMISSION-DECLARATION`, `PLAY-CONTACTS-PERMISSION`, `PLAY-PRECISE-LOCATION`, `PLAY-FGS-GEOFENCING`, `PLAY-CALL-LOG-VERIFICATION` |
 | App Store | `APPSTORE-SDK-VERSION`, `APPSTORE-MIN-OS`, `APPSTORE-REQUIRED-REASON-API`, `APPSTORE-PRIVACY-MANIFEST`, `APPSTORE-THIRD-PARTY-SDK`, `APPSTORE-ATS`, `APPSTORE-PURPOSE-STRINGS` |
 
 Each check reports `fail` (severity `blocker`, `warning` or `info`),
@@ -242,6 +353,16 @@ requirement (API 36)"), and `requirement` holds the rule itself ("Target API
 level meets Google Play's current requirement"), both in English and French.
 Store values and their sources live in `narvy/store_check/data/`.
 
+Four Google Play policy changes take effect on 2027-01-27: the Contacts
+Permissions policy (`READ_CONTACTS` in apps that target API 37+), the
+precise location declaration and location button (`ACCESS_FINE_LOCATION`,
+`onlyForLocationButton`), geofencing removed as a foreground service use, and
+`READ_CALL_LOG` no longer accepted for account verification by phone call.
+Before that date their findings read "Required from 2027-01-27". They are
+never blockers: what Google requires (a declaration it approves, or a use it
+no longer allows) is not in the binary. When the answer depends on how the
+app uses a permission or a service, the check reports `not_determined`.
+
 It runs offline: no network call, no telemetry event, nothing written to
 disk (the archive is read in memory). It does not check store listing
 metadata, Data safety answers, whether a declared permission use is
@@ -252,33 +373,120 @@ Exit codes: 0 no blocker (with `--fail-on warning`, no warning either),
 
 ## Dependency check (SCA)
 
-The dependency check sends package names and versions (never code, file paths or findings) to Narvy's EU-hosted vulnerability database. Set OSV_API_URL to use another OSV-compatible server.
+Dependencies are matched on your machine against the public OSV database
+([OSV.dev data dumps](https://google.github.io/osv.dev/data/#data-dumps)).
+For each ecosystem a scan needs (npm, PyPI, Maven, Go, RubyGems, Packagist,
+crates.io, NuGet, SwiftURL), the CLI downloads
+`https://osv-vulnerabilities.storage.googleapis.com/<ecosystem>/all.zip`.
+The request names the ecosystem and nothing else: no package name, no code,
+no path. The file is checked (size, md5, zip integrity), stored as SQLite in
+`~/.cache/narvy/osv/` (`NARVY_OSV_DB_DIR` to change it) with a sha256
+checked on each use, and downloaded again when older than 24 hours.
 
-What is sent, per dependency: the package name, its ecosystem (npm, PyPI,
-Maven, ...) and the resolved version. Nothing else: no code, no file paths,
-no project or repository name, no findings. The database is a mirror of
-[OSV.dev](https://osv.dev) (data from OSV.dev and the sources it
-aggregates, including the GitHub Advisory Database), refreshed from the
-OSV.dev export and hosted in the EU by Narvy.
+```bash
+narvy db update                 # refresh the ecosystems already cached
+narvy db update -e npm,PyPI     # download these ecosystems
+narvy db status                 # what is cached, age, size, damaged files
+narvy scan . --offline          # use the cache only, nothing leaves the machine
+narvy scan . --osv-api          # previous behaviour: query the OSV API
+```
 
-`OSV_API_URL` takes a base URL (`/query` and `/querybatch` are appended,
-e.g. `OSV_API_URL=https://api.osv.dev/v1`) or, as in earlier releases, the
-full query URL ending in `/query`. The batch URL follows it unless
-`OSV_BATCH_API_URL` is set.
+Sizes on disk: npm 301 MB (220 MB download), PyPI 71 MB, Packagist 28 MB,
+Maven 27 MB, Go 19 MB, NuGet 14 MB, the others under 10 MB. A refresh builds
+the new file next to the old one: for npm, about 820 MB free space is needed
+while it runs (old file, zip and new file).
 
-The check is reported INCOMPLETE, never clean, when the database cannot give
-a usable answer: unreachable, rate-limited, or its data older than 48 hours.
-Dependencies it cannot look up (an ecosystem the database does not carry, an
-iOS library with no known source repository URL) are counted as unverified
-in the scan's coverage note. Results are cached for 7 days in
-`~/.narvy/osv_cache.db`.
+The check is reported INCOMPLETE (exit code 2 with `--fail-on`), never clean,
+when an ecosystem's database cannot be used: no copy and no download
+possible, `--offline` without a copy, a copy older than 7 days (online or
+offline), or a damaged file. A damaged file is moved aside as
+`<ecosystem>.db.corrupt` and downloaded again, except with `--offline`. A
+copy between 24 hours and 7 days old (refresh failed, or `--offline`) is
+used and the scan says how old it is.
+
+`--osv-api` sends each dependency's name, ecosystem and version to Narvy's
+EU-hosted OSV mirror, or to `OSV_API_URL` (a base URL, `/query` and
+`/querybatch` are appended; `OSV_BATCH_API_URL` overrides the batch URL).
+Responses are cached 7 days in `~/.narvy/osv_cache.db`.
+
+Dependencies with no lookup key (an ecosystem OSV does not carry, an iOS
+library with no known source repository URL) are counted as unverified.
+
+### CI
+
+Cache `~/.cache/narvy/osv` between runs, or every run downloads the
+database again. `narvy init-ci --github` and `--gitlab` write this for you.
+
+GitHub Actions, one key per UTC day:
+
+```yaml
+- id: osv_day
+  run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+- uses: actions/cache/restore@v4
+  with:
+    path: ~/.cache/narvy/osv
+    key: narvy-osv-${{ steps.osv_day.outputs.day }}
+    restore-keys: narvy-osv-
+- run: narvy scan . --fail-on high
+- if: always()
+  uses: actions/cache/save@v4
+  with:
+    path: ~/.cache/narvy/osv
+    key: narvy-osv-${{ steps.osv_day.outputs.day }}
+```
+
+GitLab caches only paths inside the project and has no date variable for a
+key: point `NARVY_OSV_DB_DIR` at `$CI_PROJECT_DIR/.narvy-osv` and cache that
+folder with a fixed key and `when: always`; the CLI refreshes a copy older
+than 24 hours.
+
+## SBOM and CBOM
+
+Both are offline, CycloneDX 1.6 JSON. They work on a source directory, an
+.apk/.aab or an .ipa, alone or as part of a scan.
+
+```bash
+narvy sbom ./my-app -f sbom.cdx.json --sign-key key.pem   # signed SBOM
+narvy verify-sbom sbom.cdx.json --public-key pub.pem      # exit 0 = valid
+narvy cbom ./my-app -f cbom.cdx.json                      # crypto inventory + PQC score
+narvy scan ./my-app --sbom sbom.cdx.json --sign-key key.pem --cbom cbom.cdx.json
+```
+
+**SBOM.** The dependencies the dependency check reads (npm, PyPI, Packagist,
+Go, RubyGems, crates.io, Maven/Gradle, NuGet, CocoaPods, SwiftPM; Maven
+coordinates left in an APK; versioned frameworks in an IPA). No
+vulnerabilities inside; `narvy scan` does that lookup. Licenses only where
+recorded locally: package-lock.json, installed node_modules, composer.lock.
+A version taken from a manifest range, not a lockfile, is marked
+`manifest-range-floor`.
+
+**Signing.** Ed25519, in the JSF format CycloneDX uses (`signature` at the
+root, signed over the canonical JSON). Needs `pip install 'narvy-cli[sign]'`
+and an unencrypted PEM key (`openssl genpkey -algorithm ed25519 -out key.pem`).
+Without `--sign-key` the SBOM is unsigned and the CLI says so. The embedded
+public key only proves the file was not changed; pass `--public-key` to
+`verify-sbom` to check who signed it.
+
+**CBOM.** Basic open inventory, not the platform's PQC analysis. It lists
+the algorithm families found: in source, at API call sites (regex, comments,
+vendored, build and test folders skipped); in an APK, as exact dex string
+constants (library code included); in an IPA, CommonCrypto, Security and
+CryptoKit symbols and Go crypto packages. No data flow, no key sizes. An APK
+that bundles Bouncy Castle lists the post-quantum names it ships, but they
+do not count in the score. Score per family found:
+`100 * post-quantum / (post-quantum + quantum-vulnerable)`.
+Quantum-vulnerable: RSA, ECDSA, ECDH, DH, DSA, X25519, Ed25519. Post-quantum:
+ML-KEM, ML-DSA, SLH-DSA. MD5, SHA-1, DES and 3DES are listed as classically
+weak and do not change the score. No asymmetric algorithm found gives no
+score, not 100.
 
 ## Telemetry
 
 The CLI sends one small anonymous event per command (`store-check` sends
-none), so we can see which scan types are used and where they fail. It is sent in the background with
-a 1 second timeout, is never retried or stored for later, and never fails a
-scan. At most it adds 1 second at exit. A notice is printed the first time it runs.
+none), so we can see which scan types are used and where they fail. It is
+sent in the background with a 1 second timeout, is never retried or stored
+for later, and never fails a scan. At most it adds 1 second at exit. A
+notice is printed the first time it runs.
 
 Exactly these fields are sent:
 
@@ -286,7 +494,7 @@ Exactly these fields are sent:
 |-------|---------|
 | `schema` | `1`, the event format version |
 | `install_id` | a random UUID created on first run and stored in `~/.narvy/config.json` (not derived from your machine, user or account) |
-| `cli_version`, `python_version`, `os` | `1.1.1`, `3.11`, `linux` / `darwin` / `windows` / `other` |
+| `cli_version`, `python_version`, `os` | `1.3.0`, `3.11`, `linux` / `darwin` / `windows` / `other` |
 | `ci` | `true` when a CI environment variable is set |
 | `command` | `scan`, `web-scan`, `host-audit`, ... |
 | `surface` | `android`, `ios`, `source`, `web`, `host`, `cloud` or `none` |
@@ -306,7 +514,8 @@ export NARVY_TELEMETRY=0
 export DO_NOT_TRACK=1
 ```
 
-`narvy telemetry status` shows the current state.
+`narvy telemetry status` shows the current state. The code is in
+[`narvy/telemetry.py`](https://github.com/Narvy-Cyber/narvy-cli/blob/main/narvy/telemetry.py).
 
 ## Free rules and premium rules
 
@@ -328,7 +537,7 @@ number of checks it did not run. It never hides a finding it did compute.
 - Encrypted iOS binaries (the normal App Store distribution state) are
   detected but not decrypted; only the local, static checks that don't need
   the decrypted binary run.
-- Web-source coverage depth isn't uniform across all eight languages - Rust
+- Web-source coverage depth isn't uniform across all eight languages: Rust
   and C#/.NET have a smaller rule set than the others, and the CLI says so
   in its own output when it applies.
 - Only one architecture's native libraries are checked in a multi-ABI
@@ -337,12 +546,13 @@ number of checks it did not run. It never hides a finding it did compute.
   read when Windows long-path support is enabled
   (`LongPathsEnabled`); a very deep package tree in `%TEMP%` can hit it.
 
-See [SETUP.md](SETUP.md) for detailed install/troubleshooting steps and the
-exact commands this README's examples were run against.
+See [SETUP.md](https://github.com/Narvy-Cyber/narvy-cli/blob/main/SETUP.md)
+for detailed install and troubleshooting steps.
 
-## License
+## License details
 
-Apache License 2.0 - see [LICENSE](LICENSE).
+Apache License 2.0, see
+[LICENSE](https://github.com/Narvy-Cyber/narvy-cli/blob/main/LICENSE).
 
 Rule packs under `narvy/rules/` are authored by Narvy
 (Apache 2.0, same as the rest of this package) and contain no third-party
@@ -357,7 +567,7 @@ as Narvy's own.
 
 ## Contributing
 
-Issues and pull requests welcome, especially new or improved detection
+Issues and pull requests are welcome, in particular new or improved detection
 rules. All rule packs are Narvy's own, under `narvy/rules/`: Android/iOS
 (`rules/android`, `rules/ios`) and web/backend (`rules/web`). The
 web/backend packs run on the Semgrep OSS engine, which Narvy invokes as a

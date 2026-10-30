@@ -20,12 +20,16 @@ AS_OF = dt.date(2026, 10, 4)
 # file -> {check_id: (status, severity or None)}
 EXPECTED = {
     "InsecureBankv2.apk": {"PLAY-TARGET-SDK": ("fail", "blocker"), "PLAY-DEBUGGABLE": ("fail", "blocker"),
-                           "PLAY-PERMISSION-DECLARATION": ("fail", "warning"), "PLAY-CLEARTEXT": ("fail", "warning")},
+                           "PLAY-PERMISSION-DECLARATION": ("fail", "warning"), "PLAY-CLEARTEXT": ("fail", "warning"),
+                           "PLAY-CALL-LOG-VERIFICATION": ("not_determined", "warning"),
+                           "PLAY-PRECISE-LOCATION": ("not_applicable", None)},
     "sieve.apk": {"PLAY-TARGET-SDK": ("fail", "blocker"), "PLAY-DEBUGGABLE": ("fail", "blocker")},
     "com.termux.apk": {"PLAY-TARGET-SDK": ("fail", "blocker"), "PLAY-16KB-ELF": ("fail", "warning"),
                        "PLAY-DEBUGGABLE": ("pass", None), "PLAY-EXPORTED": ("not_applicable", None)},
     "bitwarden.apk": {"PLAY-16KB-ELF": ("fail", "warning")},
-    "signal.apk": {"PLAY-16KB-ELF": ("pass", None), "PLAY-DEBUGGABLE": ("pass", None)},
+    "signal.apk": {"PLAY-16KB-ELF": ("pass", None), "PLAY-DEBUGGABLE": ("pass", None),
+                   "PLAY-PRECISE-LOCATION": ("fail", "warning"), "PLAY-CONTACTS-PERMISSION": ("not_applicable", None)},
+    "net.osmand.apk": {"PLAY-FGS-GEOFENCING": ("not_determined", "warning"), "PLAY-PRECISE-LOCATION": ("fail", "warning")},
     "org.wikipedia.apk": {"PLAY-TARGET-SDK": ("pass", None), "PLAY-EXPORTED": ("pass", None),
                           "PLAY-DEBUGGABLE": ("pass", None)},
     "com.whatsapp.xapk": {"PLAY-TARGET-SDK": ("fail", "blocker"), "PLAY-16KB-ELF": ("pass", None),
@@ -75,3 +79,29 @@ def test_no_blocker_on_current_store_builds():
         rep = analyze(T + n, as_of=AS_OF)
         blockers = [r.check_id for r in rep.results if r.status == "fail" and r.severity == "blocker"]
         assert blockers == [], (n, blockers)
+
+
+@pytest.mark.real
+def test_vpn_apps_need_the_vpnservice_declaration():
+    """Verified with `aapt dump xmltree` on 2026-10-09: each declares a service
+    protected by BIND_VPN_SERVICE with an android.net.VpnService intent filter."""
+    names = ["net.mullvad.mullvadvpn.xapk", "com.duckduckgo.mobile.android.apk"]
+    present = [n for n in names if os.path.exists(T + n)]
+    if not present:
+        pytest.skip("real binaries not present")
+    for n in present:
+        r = {x.check_id: x for x in analyze(T + n, as_of=AS_OF).results}["PLAY-PERMISSION-DECLARATION"]
+        assert r.status == "fail" and "VpnService" in r.title["en"], n
+
+
+@pytest.mark.real
+def test_policy_2027_rules_are_never_blockers_on_real_binaries():
+    present = [n for n in EXPECTED if n.endswith((".apk", ".xapk", ".aab")) and os.path.exists(T + n)]
+    if not present:
+        pytest.skip("real binaries not present")
+    new = {"PLAY-CONTACTS-PERMISSION", "PLAY-PRECISE-LOCATION", "PLAY-FGS-GEOFENCING", "PLAY-CALL-LOG-VERIFICATION"}
+    for n in present:
+        for as_of in (AS_OF, dt.date(2027, 2, 15)):
+            for r in analyze(T + n, as_of=as_of).results:
+                if r.check_id in new:
+                    assert not (r.status == "fail" and r.severity == "blocker"), (n, r.check_id)

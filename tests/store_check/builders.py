@@ -19,7 +19,7 @@ ATTR = {
     "exported": 0x01010010, "minSdkVersion": 0x0101020C, "versionCode": 0x0101021B, "versionName": 0x0101021C,
     "required": 0x0101028E, "targetSdkVersion": 0x01010270, "maxSdkVersion": 0x01010271,
     "extractNativeLibs": 0x010104EA, "usesCleartextTraffic": 0x010104EC, "networkSecurityConfig": 0x01010527,
-    "foregroundServiceType": 0x01010599,
+    "foregroundServiceType": 0x01010599, "usesPermissionFlags": 0x01010644,
 }
 
 FGS = {"dataSync": 0x01, "mediaPlayback": 0x02, "phoneCall": 0x04, "location": 0x08, "connectedDevice": 0x10,

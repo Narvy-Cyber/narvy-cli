@@ -27,6 +27,8 @@ ATTR_IDS = {
     "foregroundServiceType": 0x01010599,
     "versionCode": 0x0101021B,
     "versionName": 0x0101021C,
+    # <uses-permission android:usesPermissionFlags> (R.attr constant 16844356)
+    "usesPermissionFlags": 0x01010644,
     # network security config attributes
     "cleartextTrafficPermitted": None,  # NSC attrs are not framework attrs
     "includeSubdomains": None,

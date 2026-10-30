@@ -563,7 +563,9 @@ def _scan_deps(deps: List[_IOSDep], osv_client: Optional[OSVClient] = None) -> T
 
     cov_before = coverage_before(client)
 
-    gh_enabled = github_advisories_enabled()
+    # --offline: never call api.github.com, even with NARVY_GITHUB_ADVISORIES=1.
+    from .osv_client import is_offline
+    gh_enabled = github_advisories_enabled() and not is_offline()
     unmapped = 0
 
     # Id-only batch pre-filter; anything it could not answer stays True so the

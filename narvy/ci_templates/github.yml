@@ -27,6 +27,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install narvy-cli
 
+      # The dependency check downloads the OSV database (npm alone is about 220 MB).
+      # Kept in the Actions cache, one key per UTC day; the CLI refreshes a copy older than 24 h.
+      - name: UTC day for the OSV database cache key
+        id: osv_day
+        run: echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the OSV database cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/narvy/osv
+          key: narvy-osv-${{ steps.osv_day.outputs.day }}
+          restore-keys: narvy-osv-
+
       - name: Run Narvy scan
         # SARIF is written before the --fail-on gate, so the Security tab fills even on a failing build.
         run: |
@@ -34,6 +47,13 @@ jobs:
             --output sarif \
             --file narvy-results.sarif \
             --fail-on high
+
+      - name: Save the OSV database cache
+        if: always()   # also when --fail-on failed the build
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/narvy/osv
+          key: narvy-osv-${{ steps.osv_day.outputs.day }}
 
       - name: Upload SARIF to GitHub code scanning
         if: always()   # upload even when the scan step failed the build via --fail-on

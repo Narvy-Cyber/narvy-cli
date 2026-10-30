@@ -18,17 +18,31 @@ from .model import BLOCKER, FAIL, INFO, NOT_APPLICABLE, NOT_DETERMINED, PASS, WA
 LABELS = {
     "en": {FAIL: {BLOCKER: "BLOCKER", WARNING: "WARNING", INFO: "INFO"}, PASS: "PASS",
            NOT_DETERMINED: "NOT DETERMINED", NOT_APPLICABLE: "N/A",
-           "summary": "Summary", "blockers": "blocker(s)", "warnings": "warning(s)", "infos": "info",
-           "nd": "not determined", "evidence": "evidence", "doc": "doc", "as_of": "requirements as of",
+           "summary": "Summary", "evidence": "evidence", "doc": "doc", "as_of": "requirements as of",
            "verdict_block": "NOT READY: at least one blocker", "verdict_ok": "No blocker found by these checks",
            "scope": "Deterministic checks only. Not a security scan.", "colon": ": "},
     "fr": {FAIL: {BLOCKER: "BLOQUANT", WARNING: "AVERTISSEMENT", INFO: "INFO"}, PASS: "OK",
            NOT_DETERMINED: "NON DÉTERMINÉ", NOT_APPLICABLE: "N/A",
-           "summary": "Résumé", "blockers": "bloquant(s)", "warnings": "avertissement(s)", "infos": "info",
-           "nd": "non déterminé(s)", "evidence": "preuve", "doc": "doc", "as_of": "exigences au",
+           "summary": "Résumé", "evidence": "preuve", "doc": "doc", "as_of": "exigences au",
            "verdict_block": "PAS PRÊT : au moins un point bloquant", "verdict_ok": "Aucun point bloquant trouvé par ces contrôles",
            "scope": "Contrôles déterministes uniquement. Ce n'est pas un scan de sécurité.", "colon": " : "},
 }
+
+
+# Summary nouns, (singular, plural). French uses the singular for 0 and 1
+# ("0 bloquant", "1 bloquant", "2 bloquants"), English only for 1.
+COUNT_NOUNS = {
+    "en": {"blocker": ("blocker", "blockers"), "warning": ("warning", "warnings"), "info": ("info", "info"),
+           "not_determined": ("not determined", "not determined")},
+    "fr": {"blocker": ("bloquant", "bloquants"), "warning": ("avertissement", "avertissements"), "info": ("information", "informations"),
+           "not_determined": ("non déterminé", "non déterminés")},
+}
+
+
+def count_label(lang: str, key: str, n: int) -> str:
+    one, many = COUNT_NOUNS[lang][key]
+    singular = n <= 1 if lang == "fr" else n == 1
+    return f"{n} {one if singular else many}"
 
 
 def _label(lang: str, status: str, severity: str) -> str:
@@ -68,8 +82,8 @@ def render_text(report: Report, lang: str = "en", verbose: bool = False) -> str:
             out.append(f"    {L['doc']}{L['colon']}{r.doc_url}")
         out.append("")
     c = report.counts()
-    out.append(f"{L['summary']}{L['colon']}{c['blocker']} {L['blockers']}, {c['warning']} {L['warnings']}, "
-               f"{c['info']} {L['infos']}, {c['not_determined']} {L['nd']}")
+    counts = ", ".join(count_label(lang, k, c[k]) for k in ("blocker", "warning", "info", "not_determined"))
+    out.append(f"{L['summary']}{L['colon']}{counts}")
     out.append(L["verdict_block"] if c["blocker"] else L["verdict_ok"])
     for n in report.notes:
         out.append(f"note: {n}")

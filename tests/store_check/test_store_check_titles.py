@@ -57,7 +57,7 @@ def test_json_keeps_title_shape_and_adds_requirement(tmp_path, capsys):
     p.write_bytes(B.apk(B.manifest(target=30)))
     main([str(p), "--json", "--as-of", "2026-10-04"])
     d = json.loads(capsys.readouterr().out)
-    assert d["tool_version"] == "0.2.0"
+    assert d["tool_version"] == "0.3.0"
     for r in d["results"]:
         assert set(r["title"]) == {"en", "fr"} and set(r["requirement"]) == {"en", "fr"}
         assert r["title"]["en"] != r["requirement"]["en"]

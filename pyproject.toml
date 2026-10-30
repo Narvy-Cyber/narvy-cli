@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "narvy-cli"
-description = "Free, local SAST scanner for Android, iOS, and polyglot web/backend source - plus passive web, host-audit, and cloud-posture scanning."
+description = "Local static security scanner for Android and iOS apps and source code, with offline Google Play and App Store upload checks."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -36,6 +36,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://narvy.io"
+Source = "https://github.com/Narvy-Cyber/narvy-cli"
+Issues = "https://github.com/Narvy-Cyber/narvy-cli/issues"
+Changelog = "https://github.com/Narvy-Cyber/narvy-cli/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # icdump only ships Linux/macOS wheels, so it's opt-in. Without it the iOS
@@ -43,6 +46,8 @@ Homepage = "https://narvy.io"
 ios-full = ["icdump"]
 # boto3 is ~35MB of transitive weight, so cloud-scan is opt-in.
 cloud = ["boto3"]
+# Ed25519 signing of SBOMs (narvy sbom --sign-key, narvy verify-sbom).
+sign = ["cryptography"]
 
 [project.scripts]
 narvy = "narvy.main:cli"

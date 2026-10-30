@@ -5,6 +5,96 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0]
+
+1.2.2 was not published on its own; its changes ship in 1.3.0.
+
+### Changed
+
+- Dependency check (SCA): dependencies are matched locally against the
+  public OSV database. No package name or version is sent. For each
+  ecosystem a scan needs, the CLI downloads
+  `https://osv-vulnerabilities.storage.googleapis.com/<ecosystem>/all.zip`
+  (the request names the ecosystem only), checks it (size, md5, zip
+  integrity), stores it as SQLite in `~/.cache/narvy/osv/` with a sha256
+  checked on each use, and downloads it again when older than 24 hours.
+  A failed refresh keeps the previous copy and the scan reports its age; a
+  copy older than 7 days is not used and the check is reported INCOMPLETE
+  (exit 2 with `--fail-on`). A damaged file is moved aside as
+  `<ecosystem>.db.corrupt` and downloaded again. npm is about 220 MB to
+  download and 301 MB on disk; a refresh needs about 820 MB free while it
+  runs.
+- NuGet and crates.io package names match case-insensitively, as on
+  api.osv.dev.
+- An error inside the dependency check reports it INCOMPLETE (exit 2 with
+  `--fail-on`) instead of skipping it.
+- The network lookup of earlier releases (Narvy's EU mirror, or
+  `OSV_API_URL`) is available with `narvy scan --osv-api`, off by default.
+  It prints a warning that dependency names and versions are sent.
+- `init-ci --github` caches `~/.cache/narvy/osv` (one key per UTC day);
+  `init-ci --gitlab` caches it in `.narvy-osv/`.
+- `narvy store-check`: the summary line uses real plurals in English and
+  French ("1 blocker, 2 warnings", "0 bloquant, 2 avertissements") instead
+  of "blocker(s)".
+- The store-check report's `tool_version` is `0.3.0`. Results of the checks
+  present in 1.2.1 are unchanged, except `PLAY-PERMISSION-DECLARATION` on
+  apps that declare a VpnService.
+- README rewritten (install, quick start with real output, what each
+  command sends), store-check demo, PyPI summary and project URLs.
+
+### Added
+
+- `narvy scan --offline`: nothing leaves the machine (no database or tool
+  download, no usage event, no GitHub advisory lookup; `--upload` is
+  refused). An ecosystem with no usable cached copy is reported not checked
+  (SCA INCOMPLETE). An APK scan without jadx or Java installed skips the
+  code analysis, reported not run (exit 2 with `--fail-on`); `narvy doctor`
+  installs them while online.
+- `narvy db update [--ecosystem ...] [--all]` and `narvy db status`.
+- `narvy sbom`: CycloneDX 1.6 SBOM of a source directory, APK/AAB or IPA,
+  built offline from the dependencies the dependency check reads. Licenses
+  only where recorded locally (package-lock.json, node_modules,
+  composer.lock). `--sign-key` signs it with Ed25519 (JSF); unsigned
+  otherwise, and said so. Signing needs `pip install 'narvy-cli[sign]'`.
+- `narvy verify-sbom`: checks the signature; `--public-key` also checks the
+  signer. Exit 1 when unsigned, modified or signed by another key.
+- `narvy cbom`: CycloneDX 1.6 CBOM, a basic open crypto inventory (source
+  call sites, dex string constants, iOS crypto symbols) with a post-quantum
+  readiness score per algorithm family. No score when no asymmetric
+  algorithm is found. Post-quantum names shipped by a bundled Bouncy Castle
+  are listed, not scored.
+- `narvy scan --sbom FILE [--sign-key KEY] --cbom FILE` writes both after
+  the scan.
+
+- `narvy scan --output gitlab`: GitLab SAST report (`gl-sast-report.json`,
+  security report schema 15.2.1) for `artifacts:reports:sast`, read by the
+  merge request security widget and the pipeline Security tab. The
+  `init-ci --gitlab` template uses it; GitLab ingests a report only from a
+  job that succeeds, so the `--fail-on` exit code now fails a second
+  `narvy_gate` job.
+- `narvy store-check`: four Google Play policy changes that take effect on
+  2027-01-27, each citing the Play Console Help article it comes from:
+  - `PLAY-CONTACTS-PERMISSION`: an app that targets API 37+ and requests
+    `READ_CONTACTS` needs a Play Console declaration explaining why the
+    Android Contact Picker is not enough.
+  - `PLAY-PRECISE-LOCATION`: `ACCESS_FINE_LOCATION` without the
+    `onlyForLocationButton` flag needs the precise location declaration;
+    from target API 37, one-time precise location must go through the
+    location button. The flag passes the check.
+  - `PLAY-FGS-GEOFENCING`: geofencing is no longer an approved foreground
+    service use. A service of type `location` is reported as not
+    determined, since its use is not in the binary.
+  - `PLAY-CALL-LOG-VERIFICATION`: `READ_CALL_LOG` is no longer accepted for
+    account verification by phone call. Reported as not determined when
+    the permission is requested.
+  Before 2027-01-27 (or the `--as-of` date) their titles start with
+  "Required from 2027-01-27". None of them is ever a blocker: what Google
+  requires (an approved declaration, or a use it no longer allows) cannot
+  be read from a binary.
+- `PLAY-PERMISSION-DECLARATION` now detects a `VpnService` (a service
+  protected by `BIND_VPN_SERVICE` or with an `android.net.VpnService`
+  intent filter): Google Play requires the VpnService declaration for it.
+
 ## [1.2.1]
 
 ### Fixed

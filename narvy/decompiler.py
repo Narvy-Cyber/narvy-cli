@@ -52,7 +52,26 @@ JRE_URL = (
 JRE_HOME = os.path.join(TOOLS_DIR, f"jre-{_JRE_MAJOR}")
 
 
+# Set by `narvy scan --offline`: a missing tool is never downloaded.
+OFFLINE = False
+# Why the last decompile_apk failed, when it is not a jadx error: "tool_missing_offline".
+LAST_FAILURE_KIND = None
+
+
+class ToolMissingOffline(RuntimeError):
+    """A tool the scan needs is not installed and --offline forbids downloading it."""
+
+
+def _offline_refuse(tool: str, url: str) -> None:
+    if OFFLINE:
+        raise ToolMissingOffline(
+            f"{tool} is not installed and --offline forbids downloading it from {url}. "
+            f"Run `narvy doctor` once while online (it downloads it to {TOOLS_DIR}), "
+            f"then scan with --offline again.")
+
+
 def _download_jadx():
+    _offline_refuse(f"jadx {JADX_VERSION}", JADX_URL)
     os.makedirs(TOOLS_DIR, exist_ok=True)
     zip_path = os.path.join(TOOLS_DIR, f"jadx-{JADX_VERSION}.zip")
     logger.info(f"jadx not found on PATH - downloading {JADX_URL}")
@@ -110,6 +129,7 @@ def _jre_bin_dir():
 
 
 def _download_jre():
+    _offline_refuse(f"Java 11+ (no usable system Java; JRE {_JRE_MAJOR})", "api.adoptium.net")
     os.makedirs(TOOLS_DIR, exist_ok=True)
     is_zip = _IS_WINDOWS
     archive_path = os.path.join(TOOLS_DIR, f"jre-{_JRE_MAJOR}.{'zip' if is_zip else 'tar.gz'}")
@@ -390,9 +410,10 @@ def decompile_apk(apk_path: str, output_dir: str, max_mem: str = None, force: bo
     if validation_error:
         return False, validation_error
 
-    global LAST_HEAP_NOTE, LAST_ATTEMPTS
+    global LAST_HEAP_NOTE, LAST_ATTEMPTS, LAST_FAILURE_KIND
     LAST_HEAP_NOTE = None
     LAST_ATTEMPTS = []
+    LAST_FAILURE_KIND = None
 
     def _say(level, text):
         if notify and text:
@@ -412,11 +433,17 @@ def decompile_apk(apk_path: str, output_dir: str, max_mem: str = None, force: bo
 
     try:
         jadx_bin = resolve_jadx_binary()
+    except ToolMissingOffline as e:
+        LAST_FAILURE_KIND = "tool_missing_offline"
+        return False, str(e)
     except Exception as e:
         return False, f"Could not obtain jadx: {e}. Run `narvy doctor` to check your setup."
 
     try:
         jre_bin_dir = resolve_java_home()
+    except ToolMissingOffline as e:
+        LAST_FAILURE_KIND = "tool_missing_offline"
+        return False, str(e)
     except Exception as e:
         return False, (
             f"No usable Java found, and auto-downloading one failed: {e}. "

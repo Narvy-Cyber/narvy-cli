@@ -76,13 +76,104 @@ class NucleiScanner:
     # Passive safety = GET/HEAD only, no body; an omitted method defaults to GET.
     _SAFE_HTTP_METHODS = ("GET", "HEAD", "")
 
+    # Verdict cache. Parsing every passive template (~2,700 YAML files) costs
+    # seconds to minutes per scan; the verdict depends only on the file content
+    # and on this filter's code, so that is the key: sha256(template bytes),
+    # with the whole cache invalidated when the filter code changes. Path,
+    # mtime or size are never trusted (a same-size rewrite with a preserved
+    # mtime would keep a stale verdict). Only a literal JSON true is GET-only.
+    _GET_ONLY_CACHE: Dict[str, bool] = {}
+    _GET_ONLY_DISK_LOADED = False
+    _GET_ONLY_DIRTY = False
+    _GET_ONLY_CACHE_VERSION = 1
+    _GET_ONLY_FILTER_SIG: Optional[str] = None
+
+    @classmethod
+    def _get_only_filter_signature(cls) -> str:
+        if cls._GET_ONLY_FILTER_SIG is None:
+            import hashlib
+            import inspect
+            fn = cls._template_is_get_only_uncached
+            try:
+                src = inspect.getsource(fn)
+            except (OSError, TypeError):
+                code = getattr(fn, "__func__", fn).__code__
+                src = repr((code.co_code, code.co_consts, code.co_names))
+            h = hashlib.sha256(src.encode("utf-8", "replace"))
+            h.update(repr(cls._SAFE_HTTP_METHODS).encode())
+            cls._GET_ONLY_FILTER_SIG = h.hexdigest()
+        return cls._GET_ONLY_FILTER_SIG
+
+    @classmethod
+    def _get_only_cache_path(cls) -> str:
+        return os.environ.get("NARVY_GET_ONLY_CACHE") or os.path.join(
+            os.path.expanduser("~"), ".narvy", "nuclei_get_only_v%d.json" % cls._GET_ONLY_CACHE_VERSION)
+
+    @classmethod
+    def _load_get_only_disk_cache(cls) -> None:
+        if cls._GET_ONLY_DISK_LOADED:
+            return
+        cls._GET_ONLY_DISK_LOADED = True
+        try:
+            with open(cls._get_only_cache_path(), "r") as fh:
+                raw = json.load(fh)
+            if not isinstance(raw, dict):
+                return
+            if raw.get("version") != cls._GET_ONLY_CACHE_VERSION or \
+                    raw.get("filter_sig") != cls._get_only_filter_signature():
+                return
+            for k, v in (raw.get("entries") or {}).items():
+                if isinstance(k, str) and len(k) == 64:
+                    cls._GET_ONLY_CACHE.setdefault(k, v is True)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.info(f"nuclei GET-only verdict cache unreadable, rebuilding: {e}")
+
+    @classmethod
+    def _save_get_only_disk_cache(cls) -> None:
+        if not cls._GET_ONLY_DIRTY:
+            return
+        path = cls._get_only_cache_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+            with os.fdopen(fd, "w") as fh:
+                json.dump({"version": cls._GET_ONLY_CACHE_VERSION,
+                           "filter_sig": cls._get_only_filter_signature(),
+                           "entries": dict(cls._GET_ONLY_CACHE)}, fh)
+            os.replace(tmp, path)
+            cls._GET_ONLY_DIRTY = False
+        except Exception as e:
+            logger.info(f"nuclei GET-only verdict cache not saved (non-fatal): {e}")
+
     @classmethod
     def _template_is_get_only(cls, yaml_path: str) -> bool:
+        """Cached front for _template_is_get_only_uncached, keyed by content."""
+        import hashlib
+        try:
+            with open(yaml_path, "rb") as fh:
+                content = fh.read()
+        except OSError:
+            return cls._template_is_get_only_uncached(yaml_path)
+        key = hashlib.sha256(content).hexdigest()
+        cached = cls._GET_ONLY_CACHE.get(key)
+        if cached is not None:
+            return cached
+        verdict = cls._template_is_get_only_uncached(yaml_path, content=content)
+        cls._GET_ONLY_CACHE[key] = verdict
+        cls._GET_ONLY_DIRTY = True
+        return verdict
+
+    @classmethod
+    def _template_is_get_only_uncached(cls, yaml_path: str, content: Optional[bytes] = None) -> bool:
         """True if every request block is a bodyless GET or HEAD. Parse errors return False."""
         try:
             import yaml
-            with open(yaml_path, "r") as fh:
-                doc = yaml.safe_load(fh)
+            if content is None:
+                with open(yaml_path, "rb") as fh:
+                    content = fh.read()
+            doc = yaml.safe_load(content.decode("utf-8"))
             if not isinstance(doc, dict):
                 return False
             # A non-HTTP protocol block must not fall through to True.
@@ -135,6 +226,7 @@ class NucleiScanner:
             )
             return template_paths
 
+        cls._load_get_only_disk_cache()
         out: List[str] = []
         dropped = 0
         for t in template_paths:
@@ -159,6 +251,7 @@ class NucleiScanner:
                 out.append(t)
         if dropped:
             logger.info(f"_filter_get_only_templates: dropped {dropped} non-GET/HEAD/body template(s) from the passive set")
+        cls._save_get_only_disk_cache()
         return out
 
     # Redirects resolved here through ssrf_guard (IP-pins every hop); nuclei runs

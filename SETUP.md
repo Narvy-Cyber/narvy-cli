@@ -337,22 +337,29 @@ app's third-party libraries against known CVEs and merges the results into
 the SAME report, tagged `SCA-<CVE id>` (e.g. `SCA-CVE-2021-0341`), right
 alongside the SAST findings. Data sources:
 
-- **Narvy's EU-hosted vulnerability database**, a mirror of
-  [OSV.dev](https://osv.dev) (OSV.dev data, including the GitHub Advisory
-  Database records it aggregates), for the CVE lookup. The dependency check sends package names and versions (never code, file paths or findings) to Narvy's EU-hosted vulnerability database. Set OSV_API_URL to use another OSV-compatible server.
-  Only the package name, ecosystem and resolved version of each dependency
-  are sent. `OSV_API_URL` takes a base URL (`/query` and `/querybatch` are
-  appended, e.g. `https://api.osv.dev/v1`) or the full `/query` URL used by
-  earlier releases; `OSV_BATCH_API_URL` overrides the batch URL. Results
-  are cached locally in `~/.narvy/osv_cache.db` (SQLite, 7-day TTL) so
-  re-scanning the same app, or scanning several apps that share common
-  libraries, doesn't re-query the network every time. A batch pre-filter
-  (`/querybatch`, at most 1000 dependencies per request, split in halves
-  when the server answers 413) checks which
-  dependencies have ANY known vuln before spending a full detail query on
-  each one. If the database is unreachable, rate-limits the machine, or
-  reports that its data is older than 48 hours, SCA is reported as
-  INCOMPLETE (and `--fail-on` exits 2), never as clean.
+- **The OSV database, local copy** ([OSV.dev data dumps](https://google.github.io/osv.dev/data/#data-dumps)).
+  For each ecosystem a scan needs, the CLI downloads
+  `https://osv-vulnerabilities.storage.googleapis.com/<ecosystem>/all.zip`
+  (the request names the ecosystem only), checks it (size, md5, zip
+  integrity), builds a SQLite file in `~/.cache/narvy/osv/` and matches
+  every dependency on this machine with the OSV.dev version ordering
+  (SemVer, PEP 440, Maven, RubyGems, Packagist, NuGet). No package name is
+  sent. The file is downloaded again when older than 24 hours
+  (`NARVY_OSV_MAX_AGE_HOURS`) or with `narvy db update`; a failed refresh
+  keeps the previous copy and the scan reports its age. `--offline` never
+  downloads: an ecosystem with no cached copy is reported not checked.
+  A copy older than 7 days is never used. A damaged file (sha256 checked
+  on each use, any read error) is moved aside as `<ecosystem>.db.corrupt`
+  and downloaded again, except with `--offline`. When no usable copy can be
+  had, SCA is reported as INCOMPLETE (and `--fail-on` exits 2), never as
+  clean. A refresh needs room for the old file, the zip and the new file
+  at once (about 820 MB for npm).
+- **`--osv-api`** (off by default): the network lookup of earlier releases.
+  Each dependency's name, ecosystem and version is sent to Narvy's
+  EU-hosted OSV mirror, or to `OSV_API_URL` (a base URL, `/query` and
+  `/querybatch` are appended, or the full `/query` URL;
+  `OSV_BATCH_API_URL` overrides the batch URL). Responses are cached in
+  `~/.narvy/osv_cache.db` (7 days).
 - **GitHub Advisory Database, direct** (iOS only, off by default). Every
   reviewed GitHub `swift` advisory is exported to OSV as `SwiftURL`, so the
   database above already carries them (checked against the full GitHub

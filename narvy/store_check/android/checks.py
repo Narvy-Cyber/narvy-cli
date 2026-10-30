@@ -559,6 +559,15 @@ def check_fgs(app: AndroidApp, as_of: dt.date) -> List[Result]:
     return out
 
 
+def _has_action(el: Element, action: str) -> bool:
+    for f in el.find_children("intent-filter"):
+        for a in f.find_children("action"):
+            n = a.attr("name")
+            if n is not None and n.kind == K_STRING and str(n.data) == action:
+                return True
+    return False
+
+
 REQ_PERMS = _t("Permissions that need a Play Console declaration",
                  "Permissions qui exigent une déclaration dans la Play Console")
 
@@ -596,6 +605,18 @@ def check_permission_declarations(app: AndroidApp, as_of: dt.date) -> Result:
                     groups.append("AccessibilityService API")
                 if P.ACCESSIBILITY_URL not in urls:
                     urls.append(P.ACCESSIBILITY_URL)
+            vpn = []
+            if p is not None and p.kind == K_STRING and str(p.data) == P.VPN_BIND:
+                vpn.append("android:permission=BIND_VPN_SERVICE")
+            if _has_action(s, P.VPN_ACTION):
+                vpn.append(f"intent-filter action {P.VPN_ACTION}")
+            if vpn:
+                ev.append(Evidence(app.manifest_path, f"<service android:name=\"{_name(s)}\">",
+                                   "VpnService: " + ", ".join(vpn)))
+                if "VpnService" not in groups:
+                    groups.append("VpnService")
+                if P.VPN_URL not in urls:
+                    urls.append(P.VPN_URL)
     if not ev:
         return make(cid, PASS, WARNING, REQ_PERMS, P.PERMISSIONS_POLICY_URL,
                     "No permission that requires a Play Console declaration form.",
@@ -756,6 +777,302 @@ def check_cleartext(app: AndroidApp, as_of: dt.date) -> Result:
                 title=_t("Cleartext HTTP not allowed", "HTTP en clair non autorisé"))
 
 
+# ---------------------------------------------------------------- policy changes of 2027-01-27
+# Four Google Play policy changes take effect on P.POLICY_2027_DATE. Before that
+# date a finding is worded "Required from <date>"; from that date it states the
+# requirement in force. None of them can be a blocker: what Google requires
+# (a declaration it approves, or a use it no longer allows) is not in the
+# binary. When the manifest settles the question, the check fails as a
+# warning; when the answer depends on how the app uses a permission or a
+# service, it is not determined.
+
+def _policy_titles(as_of: dt.date, en_before: str, fr_before: str, en_after: str, fr_after: str):
+    if as_of < P.POLICY_2027_DATE:
+        d = P.POLICY_2027_DATE.isoformat()
+        return _t(f"Required from {d}: {en_before}", f"Exigé à partir du {d} : {fr_before}")
+    return _t(en_after, fr_after)
+
+
+def _policy_when(as_of: dt.date) -> Tuple[str, str]:
+    d = P.POLICY_2027_DATE.isoformat()
+    if as_of < P.POLICY_2027_DATE:
+        return f"From {d}", f"À partir du {d}"
+    return f"Since {d}", f"Depuis le {d}"
+
+
+def _perm_elements(app: AndroidApp, name: str) -> List[Element]:
+    return [el for p, el in requested_permissions(app) if p == name]
+
+
+def _perm_evidence(app: AndroidApp, el: Element, name: str, extra: str = "") -> Evidence:
+    mx = el.attr("maxSdkVersion")
+    detail = f"<{el.tag}>" + (f"; maxSdkVersion={mx.as_text()}" if mx is not None else "") + (f"; {extra}" if extra else "")
+    return Evidence(app.manifest_path, name, detail)
+
+
+REQ_CONTACTS = _t("READ_CONTACTS is requested only with a Play Console declaration (target API 37+)",
+                  "READ_CONTACTS n'est demandée qu'avec une déclaration dans la Play Console (API cible 37+)")
+
+
+def check_contacts_permission(app: AndroidApp, as_of: dt.date) -> Result:
+    cid = "PLAY-CONTACTS-PERMISSION"
+    els = _perm_elements(app, P.CONTACTS_PERMISSION)
+    extra = [P.CONTACTS_PREVIEW_URL, P.CONTACT_PICKER_URL, P.POLICY_DEADLINES_URL]
+    if not els:
+        return make(cid, NOT_APPLICABLE, WARNING, REQ_CONTACTS, P.CONTACTS_POLICY_URL,
+                    "The app does not request android.permission.READ_CONTACTS.",
+                    "L'application ne demande pas android.permission.READ_CONTACTS.", extra_doc_urls=extra,
+                    title=_t("READ_CONTACTS not requested", "READ_CONTACTS non demandée"))
+    _min, target, t_ev = sdk_levels(app)
+    evid = [_perm_evidence(app, el, P.CONTACTS_PERMISSION) for el in els] + [Evidence(app.manifest_path, t_ev)]
+    need = P.CONTACTS_TARGET_SDK
+    if target is None:
+        return make(cid, NOT_DETERMINED, WARNING, REQ_CONTACTS, P.CONTACTS_POLICY_URL,
+                    f"The app requests READ_CONTACTS, but targetSdkVersion could not be resolved: the Contacts "
+                    f"Permissions policy applies to apps that target API {need} or higher.",
+                    f"L'application demande READ_CONTACTS, mais targetSdkVersion n'a pas pu être résolu : la règle "
+                    f"Google Play sur les contacts s'applique aux applications qui ciblent l'API {need} ou plus.",
+                    evid, extra,
+                    title=_t("Contacts Permissions policy not determined (targetSdkVersion unresolved)",
+                             "Règle sur les contacts non déterminée (targetSdkVersion non résolu)"))
+    en_when, fr_when = _policy_when(as_of)
+    if target < need:
+        return make(cid, NOT_APPLICABLE, WARNING, REQ_CONTACTS, P.CONTACTS_POLICY_URL,
+                    f"The app requests READ_CONTACTS and targets API {target}. {en_when}, Google Play's Contacts "
+                    f"Permissions policy applies to apps that target API {need} or higher: it will apply to this app "
+                    f"once it targets API {need}.",
+                    f"L'application demande READ_CONTACTS et cible l'API {target}. {fr_when}, la règle Google Play sur "
+                    f"les contacts s'applique aux applications qui ciblent l'API {need} ou plus : elle s'appliquera à "
+                    f"cette application dès qu'elle ciblera l'API {need}.",
+                    evid, extra,
+                    title=_t(f"Target API {target}: Contacts Permissions policy applies from target API {need}",
+                             f"API cible {target} : la règle sur les contacts s'applique à partir de l'API cible {need}"))
+    return make(cid, FAIL, WARNING, REQ_CONTACTS, P.CONTACTS_POLICY_URL,
+                f"The app requests READ_CONTACTS and targets API {target}. {en_when}, Google Play allows READ_CONTACTS "
+                f"in apps that target API {need}+ only when the Android Contact Picker cannot provide the core "
+                "feature, and requires a Play Console declaration that explains why. Whether the picker is enough "
+                "for this app, and whether the declaration was submitted, cannot be read from the binary. If the "
+                "app only needs contacts the user picks, use the Contact Picker and remove the permission.",
+                f"L'application demande READ_CONTACTS et cible l'API {target}. {fr_when}, Google Play n'autorise "
+                f"READ_CONTACTS dans les applications qui ciblent l'API {need}+ que si le sélecteur de contacts "
+                "d'Android (Contact Picker) ne permet pas d'assurer la fonction principale, et exige une déclaration "
+                "dans la Play Console qui en donne la raison. Le binaire ne dit pas si le sélecteur suffit à cette "
+                "application, ni si la déclaration a été envoyée. Si l'application n'a besoin que des contacts "
+                "choisis par l'utilisateur, utilisez le sélecteur de contacts et retirez la permission.",
+                evid, extra,
+                title=_policy_titles(
+                    as_of,
+                    f"Play Console declaration for READ_CONTACTS (target API {target})",
+                    f"déclaration Play Console pour READ_CONTACTS (API cible {target})",
+                    f"Play Console declaration needed for READ_CONTACTS (target API {target})",
+                    f"Déclaration Play Console exigée pour READ_CONTACTS (API cible {target})"))
+
+
+REQ_PRECISE_LOCATION = _t("Precise location (ACCESS_FINE_LOCATION) is limited to the location button or declared in Play Console",
+                          "La localisation précise (ACCESS_FINE_LOCATION) est limitée au bouton de localisation ou déclarée dans la Play Console")
+
+
+def check_precise_location(app: AndroidApp, as_of: dt.date) -> Result:
+    cid = "PLAY-PRECISE-LOCATION"
+    els = _perm_elements(app, P.FINE_LOCATION_PERMISSION)
+    extra = [P.LOCATION_BUTTON_URL, P.PERMISSIONS_POLICY_URL, P.POLICY_DEADLINES_URL]
+    if not els:
+        return make(cid, NOT_APPLICABLE, WARNING, REQ_PRECISE_LOCATION, P.LOCATION_POLICY_URL,
+                    "The app does not request android.permission.ACCESS_FINE_LOCATION.",
+                    "L'application ne demande pas android.permission.ACCESS_FINE_LOCATION.", extra_doc_urls=extra,
+                    title=_t("ACCESS_FINE_LOCATION not requested", "ACCESS_FINE_LOCATION non demandée"))
+    flagged, unflagged, unresolved = [], [], []
+    for el in els:
+        v = el.attr("usesPermissionFlags")
+        if v is None:
+            unflagged.append(_perm_evidence(app, el, P.FINE_LOCATION_PERMISSION, "no usesPermissionFlags"))
+            continue
+        flags, f_ev = resolve_int(app, v)
+        if flags is None:
+            unresolved.append(_perm_evidence(app, el, P.FINE_LOCATION_PERMISSION, f"usesPermissionFlags {f_ev}"))
+        elif flags & P.ONLY_FOR_LOCATION_BUTTON_FLAG:
+            flagged.append(_perm_evidence(app, el, P.FINE_LOCATION_PERMISSION,
+                                          f"usesPermissionFlags=0x{flags:x} (onlyForLocationButton)"))
+        else:
+            unflagged.append(_perm_evidence(app, el, P.FINE_LOCATION_PERMISSION,
+                                            f"usesPermissionFlags=0x{flags:x} (no onlyForLocationButton)"))
+    _min, target, t_ev = sdk_levels(app)
+    evid = flagged + unflagged + unresolved + [Evidence(app.manifest_path, t_ev)]
+    en_when, fr_when = _policy_when(as_of)
+    need = P.LOCATION_BUTTON_TARGET_SDK
+    if unflagged:
+        if target is not None and target >= need:
+            scope_en = (f"For apps that target API {need}+, precise location needed only for one-time, user-initiated "
+                        "actions (search nearby, sharing a location once, tagging, address autofill) must go through "
+                        "the location button, declared with android:usesPermissionFlags=\"onlyForLocationButton\". "
+                        "Whether this app's use is one-time or persistent cannot be read from the binary.")
+            scope_fr = (f"Pour les applications qui ciblent l'API {need}+, une localisation précise nécessaire seulement "
+                        "pour des actions ponctuelles lancées par l'utilisateur (recherche à proximité, partage unique "
+                        "d'une position, étiquetage, saisie d'adresse) doit passer par le bouton de localisation, "
+                        "déclaré avec android:usesPermissionFlags=\"onlyForLocationButton\". Le binaire ne dit pas si "
+                        "l'usage de cette application est ponctuel ou continu.")
+        else:
+            shown = "unresolved" if target is None else str(target)
+            scope_en = (f"The location button requirement for one-time uses applies once the app targets API {need} "
+                        f"(target API read: {shown}).")
+            scope_fr = (f"L'obligation du bouton de localisation pour les usages ponctuels s'appliquera dès que "
+                        f"l'application ciblera l'API {need} (API cible lue : {shown if target is not None else 'non résolue'}).")
+        return make(cid, FAIL, WARNING, REQ_PRECISE_LOCATION, P.LOCATION_POLICY_URL,
+                    f"The app requests ACCESS_FINE_LOCATION without the onlyForLocationButton flag. {en_when}, Google "
+                    "Play requires a Play Console declaration from every app that requests precise location, "
+                    "explaining why the location button or coarse location is not enough. " + scope_en,
+                    f"L'application demande ACCESS_FINE_LOCATION sans l'indicateur onlyForLocationButton. {fr_when}, "
+                    "Google Play exige de toute application qui demande la localisation précise une déclaration dans "
+                    "la Play Console expliquant pourquoi le bouton de localisation ou la localisation approximative "
+                    "ne suffisent pas. " + scope_fr,
+                    evid, extra,
+                    title=_policy_titles(
+                        as_of,
+                        "Play Console declaration for precise location (ACCESS_FINE_LOCATION)",
+                        "déclaration Play Console pour la localisation précise (ACCESS_FINE_LOCATION)",
+                        "Play Console declaration needed for precise location (ACCESS_FINE_LOCATION)",
+                        "Déclaration Play Console exigée pour la localisation précise (ACCESS_FINE_LOCATION)"))
+    if unresolved:
+        return make(cid, NOT_DETERMINED, WARNING, REQ_PRECISE_LOCATION, P.LOCATION_POLICY_URL,
+                    "android:usesPermissionFlags on ACCESS_FINE_LOCATION could not be resolved, so whether precise "
+                    "location is limited to the location button is unknown.",
+                    "android:usesPermissionFlags sur ACCESS_FINE_LOCATION n'a pas pu être résolu : on ne sait donc pas "
+                    "si la localisation précise est limitée au bouton de localisation.",
+                    evid, extra,
+                    title=_t("Precise location scope not determined (usesPermissionFlags unresolved)",
+                             "Portée de la localisation précise non déterminée (usesPermissionFlags non résolu)"))
+    return make(cid, PASS, WARNING, REQ_PRECISE_LOCATION, P.LOCATION_POLICY_URL,
+                "ACCESS_FINE_LOCATION carries the onlyForLocationButton flag: precise location is only obtained "
+                "through the location button, the minimum scope Google Play requires for one-time uses. Google's "
+                "location policy still subjects location permissions to its Play Console review.",
+                "ACCESS_FINE_LOCATION porte l'indicateur onlyForLocationButton : la localisation précise n'est obtenue "
+                "que par le bouton de localisation, la portée minimale exigée par Google Play pour les usages "
+                "ponctuels. Les règles de Google sur la localisation soumettent toujours les permissions de "
+                "localisation à son examen dans la Play Console.",
+                evid, extra,
+                title=_t("Precise location limited to the location button (onlyForLocationButton)",
+                         "Localisation précise limitée au bouton de localisation (onlyForLocationButton)"))
+
+
+REQ_FGS_GEOFENCING = _t("No foreground service is used for geofencing (Geofence API instead)",
+                        "Aucun service de premier plan n'est utilisé pour le geofencing (API Geofence à la place)")
+_LOCATION_PERMS = ("android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION",
+                   "android.permission.ACCESS_BACKGROUND_LOCATION")
+
+
+def check_fgs_geofencing(app: AndroidApp, as_of: dt.date) -> Result:
+    """Android 10 (API 29) requires foregroundServiceType="location" on a
+    foreground service that reads the location, so from target 29 the location
+    services are visible in the manifest. Below 29, or when a type is
+    unresolved, a foreground service could read the location without saying
+    so: not determined when the app holds both FOREGROUND_SERVICE and a
+    location permission."""
+    cid = "PLAY-FGS-GEOFENCING"
+    extra = [P.GEOFENCE_API_URL, P.FGS_PLAY_URL, P.POLICY_DEADLINES_URL]
+    a = application(app)
+    services = a.find_children("service") if a is not None else []
+    loc: List[Evidence] = []
+    unresolved: List[Evidence] = []
+    for s in services:
+        types, ev = _fgs_types(app, s)
+        if types is None:
+            unresolved.append(Evidence(app.manifest_path, f"<service android:name=\"{_name(s)}\">", ev))
+        elif "location" in types:
+            loc.append(Evidence(app.manifest_path, f"<service android:name=\"{_name(s)}\">", f"foregroundServiceType={ev}"))
+    perms = {p for p, _ in requested_permissions(app)}
+    has_fgs = "android.permission.FOREGROUND_SERVICE" in perms
+    loc_perms = [p for p in _LOCATION_PERMS if p in perms]
+    _min, target, t_ev = sdk_levels(app)
+    en_when, fr_when = _policy_when(as_of)
+    rule_en = (f"{en_when}, Google Play no longer accepts geofencing (triggering an action when the user enters or "
+               "leaves an area) as a use case for a foreground service; the Geofence API replaces it. ")
+    rule_fr = (f"{fr_when}, Google Play n'accepte plus le geofencing (déclencher une action quand l'utilisateur entre "
+               "dans une zone ou en sort) comme cas d'usage d'un service de premier plan ; l'API Geofence le remplace. ")
+    if loc:
+        n = len(loc)
+        return make(cid, NOT_DETERMINED, WARNING, REQ_FGS_GEOFENCING, P.FGS_GEOFENCING_URL,
+                    rule_en + _pl(n, "{n} service declares the location foreground service type",
+                                  "{n} services declare the location foreground service type") +
+                    _pl(n, ". Whether it is used for geofencing", ". Whether one of them is used for geofencing") +
+                    " cannot be read from the binary. If so, move that logic to the Geofence API and update the "
+                    "foreground service declaration in Play Console.",
+                    rule_fr + _pl(n, "{n} service déclare le type de service de premier plan location",
+                                  "{n} services déclarent le type de service de premier plan location") +
+                    _pl(n, ". Le binaire ne dit pas s'il sert au geofencing", ". Le binaire ne dit pas si l'un d'eux sert au geofencing") +
+                    ". Si c'est le cas, passez cette logique sur l'API Geofence et mettez à jour la déclaration des "
+                    "services de premier plan dans la Play Console.",
+                    loc + unresolved, extra,
+                    title=_policy_titles(
+                        as_of,
+                        _pl(n, "no geofencing in foreground services ({n} location service, use not determined)",
+                            "no geofencing in foreground services ({n} location services, use not determined)"),
+                        _pl(n, "pas de geofencing en service de premier plan ({n} service de localisation, usage non déterminé)",
+                            "pas de geofencing en service de premier plan ({n} services de localisation, usage non déterminé)"),
+                        _pl(n, "Geofencing in a foreground service not allowed ({n} location service, use not determined)",
+                            "Geofencing in a foreground service not allowed ({n} location services, use not determined)"),
+                        _pl(n, "Geofencing interdit en service de premier plan ({n} service de localisation, usage non déterminé)",
+                            "Geofencing interdit en service de premier plan ({n} services de localisation, usage non déterminé)")))
+    if has_fgs and loc_perms and (unresolved or target is None or target < 29):
+        why = (_pl(len(unresolved), "{n} foregroundServiceType value unresolved", "{n} foregroundServiceType values unresolved")
+               if unresolved else
+               ("targetSdkVersion unresolved" if target is None else f"target API {target} < 29"))
+        why_fr = (_pl(len(unresolved), "{n} valeur de foregroundServiceType non résolue", "{n} valeurs de foregroundServiceType non résolues")
+                  if unresolved else
+                  ("targetSdkVersion non résolu" if target is None else f"API cible {target} < 29"))
+        return make(cid, NOT_DETERMINED, WARNING, REQ_FGS_GEOFENCING, P.FGS_GEOFENCING_URL,
+                    rule_en + f"The app requests FOREGROUND_SERVICE and a location permission, and its location "
+                    f"foreground services cannot be listed from the manifest ({why}).",
+                    rule_fr + f"L'application demande FOREGROUND_SERVICE et une permission de localisation, et ses "
+                    f"services de premier plan de localisation ne peuvent pas être listés depuis le manifeste ({why_fr}).",
+                    [Evidence(app.manifest_path, p, "uses-permission") for p in ["android.permission.FOREGROUND_SERVICE"] + loc_perms]
+                    + unresolved + [Evidence(app.manifest_path, t_ev)], extra,
+                    title=_policy_titles(
+                        as_of,
+                        "no geofencing in foreground services (location services not determined)",
+                        "pas de geofencing en service de premier plan (services de localisation non déterminés)",
+                        "Geofencing in a foreground service not allowed (location services not determined)",
+                        "Geofencing interdit en service de premier plan (services de localisation non déterminés)"))
+    return make(cid, NOT_APPLICABLE, WARNING, REQ_FGS_GEOFENCING, P.FGS_GEOFENCING_URL,
+                "No service declares the location foreground service type.",
+                "Aucun service ne déclare le type de service de premier plan location.", extra_doc_urls=extra,
+                title=_t("No location foreground service", "Aucun service de premier plan de localisation"))
+
+
+REQ_CALL_LOG_VERIFICATION = _t("READ_CALL_LOG is not used for account verification by phone call",
+                               "READ_CALL_LOG n'est pas utilisée pour vérifier un compte par appel téléphonique")
+
+
+def check_call_log_verification(app: AndroidApp, as_of: dt.date) -> Result:
+    cid = "PLAY-CALL-LOG-VERIFICATION"
+    els = _perm_elements(app, P.CALL_LOG_PERMISSION)
+    extra = [P._SMS_CALLLOG_URL, P.POLICY_DEADLINES_URL]
+    if not els:
+        return make(cid, NOT_APPLICABLE, WARNING, REQ_CALL_LOG_VERIFICATION, P.CALL_LOG_VERIFICATION_URL,
+                    "The app does not request android.permission.READ_CALL_LOG.",
+                    "L'application ne demande pas android.permission.READ_CALL_LOG.", extra_doc_urls=extra,
+                    title=_t("READ_CALL_LOG not requested", "READ_CALL_LOG non demandée"))
+    en_when, fr_when = _policy_when(as_of)
+    return make(cid, NOT_DETERMINED, WARNING, REQ_CALL_LOG_VERIFICATION, P.CALL_LOG_VERIFICATION_URL,
+                f"The app requests READ_CALL_LOG. {en_when}, Google Play's SMS and Call Log policy no longer accepts "
+                "account verification by phone call as a use of READ_CALL_LOG; Google points to the Digital "
+                "Credentials API or the SMS Retriever API instead. What the app uses READ_CALL_LOG for cannot be "
+                "read from the binary. If it only verifies accounts by phone call, replace that flow and remove the "
+                "permission; other uses still need the existing SMS and Call Log declaration.",
+                f"L'application demande READ_CALL_LOG. {fr_when}, la règle Google Play sur les SMS et le journal "
+                "d'appels n'accepte plus la vérification de compte par appel téléphonique comme usage de "
+                "READ_CALL_LOG ; Google renvoie vers l'API Digital Credentials ou l'API SMS Retriever. Le binaire ne "
+                "dit pas à quoi sert READ_CALL_LOG dans l'application. Si elle ne sert qu'à vérifier des comptes par "
+                "appel, remplacez ce parcours et retirez la permission ; les autres usages restent soumis à la "
+                "déclaration SMS et journal d'appels existante.",
+                [_perm_evidence(app, el, P.CALL_LOG_PERMISSION) for el in els], extra,
+                title=_policy_titles(
+                    as_of,
+                    "READ_CALL_LOG not allowed for account verification by phone call (use not determined)",
+                    "READ_CALL_LOG interdite pour vérifier un compte par appel (usage non déterminé)",
+                    "READ_CALL_LOG not allowed for account verification by phone call (use not determined)",
+                    "READ_CALL_LOG interdite pour vérifier un compte par appel (usage non déterminé)"))
+
+
 def run_android_checks(app: AndroidApp, as_of: dt.date) -> List[Result]:
     results = [
         check_target_sdk(app, as_of),
@@ -768,6 +1085,10 @@ def run_android_checks(app: AndroidApp, as_of: dt.date) -> List[Result]:
         check_permission_declarations(app, as_of),
         check_debuggable(app, as_of),
         check_cleartext(app, as_of),
+        check_contacts_permission(app, as_of),
+        check_precise_location(app, as_of),
+        check_fgs_geofencing(app, as_of),
+        check_call_log_verification(app, as_of),
     ])
     return results
 

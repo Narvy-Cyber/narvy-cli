@@ -1,19 +1,48 @@
 # Narvy SAST for GitLab CI. Written by `narvy init-ci --gitlab`; edit freely.
-# Already have a .gitlab-ci.yml? Copy the narvy_sast job below into it instead of overwriting.
-# SARIF is kept as a plain artifact (not GitLab's SAST schema); --fail-on still blocks the MR.
+# Already have a .gitlab-ci.yml? Copy the narvy_sast and narvy_gate jobs below into it instead of overwriting.
+# gl-sast-report.json follows GitLab's SAST report schema and is declared under
+# artifacts:reports:sast: GitLab shows the findings in the merge request and the
+# pipeline Security tab (GitLab Ultimate; on Free and Premium it is a downloadable artifact).
+# GitLab reads a security report only from a job that succeeds, so narvy_sast
+# records the --fail-on exit code and narvy_gate fails the pipeline with it.
+# The dependency check downloads the OSV database (npm alone is about 220 MB).
+# GitLab caches only paths inside the project, so it lives in .narvy-osv/ (dot
+# folders are not scanned). GitLab has no date variable for a cache key: the key
+# is fixed and the CLI itself refreshes a copy older than 24 h, which this job
+# then saves back (when: always).
 stages:
   - test
 
 narvy_sast:
   stage: test
   image: python:3.11-slim
+  variables:
+    NARVY_OSV_DB_DIR: "$CI_PROJECT_DIR/.narvy-osv"
+  cache:
+    key: narvy-osv
+    paths:
+      - .narvy-osv/
+    when: always
   before_script:
     - pip install --upgrade pip
-    - pip install narvy-cli
+    - pip install "narvy-cli>=1.3.0"
   script:
-    - narvy scan . --output sarif --file narvy-results.sarif --fail-on high
+    - narvy scan . --output gitlab --file gl-sast-report.json --fail-on high || echo $? > narvy-exit-code
   artifacts:
-    when: always   # keep the SARIF even when --fail-on failed the pipeline
+    when: always
+    reports:
+      sast: gl-sast-report.json
     paths:
-      - narvy-results.sarif
+      - gl-sast-report.json
+      - narvy-exit-code
     expire_in: 1 week
+
+narvy_gate:
+  stage: .post
+  image: alpine:latest
+  needs:
+    - job: narvy_sast
+      artifacts: true
+  script:
+    - if [ -f narvy-exit-code ]; then exit "$(cat narvy-exit-code)"; fi
+    - echo "Nothing at or above the --fail-on threshold."
