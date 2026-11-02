@@ -273,3 +273,33 @@ def test_cmd_upload_all_passes_through_max_mem_and_force(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_scans_status_accepts_cancelled(monkeypatch):
+    """The SaaS marks a scan its user cancelled 'cancelled': `narvy scans
+    --status cancelled` parses and passes the value through."""
+    seen = {}
+
+    def _fake(args):
+        seen["status"] = args.status
+        return 0
+    monkeypatch.setattr(cli_main, "cmd_scans", _fake)
+    monkeypatch.setattr(sys, "argv", ["narvy", "scans", "--status", "cancelled"])
+    try:
+        cli_main.cli()
+    except SystemExit as e:
+        assert e.code in (0, None)
+    assert seen == {"status": "cancelled"}
+
+
+def test_cmd_scans_renders_a_cancelled_scan(monkeypatch):
+    buf = _capture_console(monkeypatch)
+    monkeypatch.setattr(cli_main.auth, "load_credentials",
+                        lambda: {"token": "t", "email": "a@b.com", "plan": "pro"})
+    scans = [{"scan_id": "abcdef12-0000", "app_name": "App", "platform": "android",
+              "analysis_type": "sast", "status": "cancelled", "vulnerabilities_found": 0,
+              "timestamp": "2020-01-01T00:00:00Z"}]
+    monkeypatch.setattr(cli_main.uploader, "list_scans",
+                        lambda token, limit=20, status=None: (200, {"scans": scans, "total": 1}))
+    cli_main.cmd_scans(_scans_args(status="cancelled"))
+    assert "cancelled" in buf.getvalue()

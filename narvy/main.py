@@ -841,7 +841,8 @@ def cmd_scans(args):
         scan_id = str(s.get("scan_id", "?"))
         status_val = str(s.get("status", "-"))
         status_style = {"done": "green", "failed": "red", "running": "yellow",
-                        "queued": "dim", "scheduled": "dim", "pending_sast": "yellow"}.get(status_val, "white")
+                        "queued": "dim", "scheduled": "dim", "pending_sast": "yellow",
+                        "cancelled": "dim"}.get(status_val, "white")
         table.add_row(
             scan_id[:8],
             rich_escape(str(s.get("app_name") or "-")),
@@ -3315,7 +3316,7 @@ def cli(prog=None):
 
     p_scans = sub.add_parser("scans", allow_abbrev=False, help="List recent scans on your Narvy account (requires `narvy login`)")
     p_scans.add_argument("--limit", type=_positive_int, default=20, help="Max number of scans to show (default: 20, must be >= 1)")
-    p_scans.add_argument("--status", choices=["queued", "running", "done", "failed", "pending_sast", "scheduled"],
+    p_scans.add_argument("--status", choices=["queued", "running", "done", "failed", "cancelled", "pending_sast", "scheduled"],
                          help="Filter by scan status")
     p_scans.add_argument("--format", choices=["text", "json"], default="text", help="Output format (default: text)")
     p_scans.set_defaults(func=cmd_scans)
