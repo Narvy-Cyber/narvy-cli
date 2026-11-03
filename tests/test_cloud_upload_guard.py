@@ -149,7 +149,30 @@ class _Creds:
         pass
 
 
-@pytest.mark.parametrize("status", [429, 404, 500, 503])
+@pytest.mark.parametrize("status", [404, 400])
+def test_gcp_404_is_a_service_not_in_use_not_a_gap(status, monkeypatch):
+    """Decision 2026-11-03: a 404 means the API / service is not enabled or
+    the resource does not exist, i.e. not in use: nothing to assess."""
+    pytest.importorskip("google.auth")
+    from narvy.cloud import gcp_scan
+    monkeypatch.setattr(gcp_scan.google.auth, "default", lambda scopes=None: (_Creds(), "demo"))
+    monkeypatch.setattr(gcp_scan.requests, "get",
+                        lambda url, headers=None, timeout=None: _Resp(status if "appengine" in url else 200))
+    cov = cli_main._cloud_coverage("gcp", gcp_scan.analyze_gcp_security())
+    assert cov == {"status": "complete", "checks_skipped": 0, "errors": []}
+
+
+def test_gcp_403_is_partial(monkeypatch):
+    pytest.importorskip("google.auth")
+    from narvy.cloud import gcp_scan
+    monkeypatch.setattr(gcp_scan.google.auth, "default", lambda scopes=None: (_Creds(), "demo"))
+    monkeypatch.setattr(gcp_scan.requests, "get",
+                        lambda url, headers=None, timeout=None: _Resp(403 if "storage" in url else 200))
+    cov = cli_main._cloud_coverage("gcp", gcp_scan.analyze_gcp_security())
+    assert cov["status"] == "partial" and any("permission denied" in e for e in cov["errors"])
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503])
 def test_gcp_no_answer_is_partial_never_clean(status, monkeypatch):
     pytest.importorskip("google.auth")
     from narvy.cloud import gcp_scan

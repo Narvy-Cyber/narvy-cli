@@ -69,11 +69,16 @@ def make_request(url, credentials, _scan_ctx=None):
     if response.status_code in (401, 403):
         logger.warning(f"Permission denied accessing {url}: HTTP {response.status_code}")
         _gap(_scan_ctx, 'denied_apis', url)
-    else:
-        # 429 (quota), 404 (API or resource not found), 5xx and any other
-        # status: the check did not run, so it is a coverage gap too.
+    elif response.status_code == 429 or response.status_code >= 500:
+        # Quota / server error: the check did not run, a coverage gap too.
         logger.warning(f"Error accessing {url}: HTTP {response.status_code}")
         _gap(_scan_ctx, 'failed_apis', f"{url} (HTTP {response.status_code})")
+    else:
+        # 404 (decision 2026-11-03): the API / service is not enabled or the
+        # resource does not exist, i.e. the service is not in use. Nothing
+        # there to assess, so not a gap. Other 4xx: same rule (only 401/403,
+        # 429, 5xx and network errors make a scan PARTIAL).
+        logger.info(f"Not in use: {url}: HTTP {response.status_code}")
 
     return None
 
