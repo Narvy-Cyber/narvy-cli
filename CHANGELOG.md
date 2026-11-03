@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coverage, never as clean; a 404 (service not enabled or not in use) is not
   a gap.
 - `cloud-scan --profile`: AWS named profile (SSO and assume-role profiles).
+- `scans --status cancelled`: lists scans their user cancelled on the
+  platform; shown dimmed in the table.
 
 ### Changed
 

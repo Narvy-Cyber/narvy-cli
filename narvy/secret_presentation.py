@@ -239,6 +239,78 @@ def mask_text(text: str, raw_values: Iterable[str] = ()) -> str:
     return out
 
 
+# rel48: the masking runs on DECODED strings (a JSON tree, before
+# json.dumps), where a backslash is a literal character of the value:
+# "token=abc\def" used to come out "token=••••••••\def" (the end of the
+# secret in clear). A backslash is now part of a URL / value, except one that
+# escapes a following quote (a JSON text embedded in a string value: the
+# masked value then never eats that escape, rel46 judge B1); an escaped
+# backslash pair stays one unit. The result is a Python string: json.dumps
+# of the tree is always valid JSON.
+_BS = r"(?:\\\\|\\(?![\"\\]))"   # \\ pair, or a lone \ not before " or \
+_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.\-]{1,15}://(?:[^\s'\"`<>\\]|" + _BS + r")+")
+# scheme://user:password@host, any scheme (the password is group 2).
+_URL_USERINFO_RE = re.compile(r"(?i)^([a-z][a-z0-9+.\-]*://[^\s:@/?#\\\"]*:)((?:[^\s@/?#\\\"]|"
+                              + _BS + r")+)(@)")
+# Query / fragment parameters whose VALUE is a credential.
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&;#](?:[A-Za-z0-9_.\-]*[_.\-])?"
+    r"(?:api[_\-]?key|apikey|key|access[_\-]?token|refresh[_\-]?token|id[_\-]?token|auth[_\-]?token|"
+    r"auth|token|secret|client[_\-]?secret|password|passwd|pass|pwd|sig|signature|session|sessionid|"
+    r"sid|jwt|private[_\-]?token|access[_\-]?key|secret[_\-]?key)=)((?:[^&#;\s'\"`<>\\]|" + _BS + r")+)")
+
+
+def mask_url_secrets(text: Any) -> Any:
+    """``text`` with the credentials of every URL it contains masked: the
+    password of ``scheme://user:password@host`` (user kept, as the results
+    page / PDF / SARIF show it: ``adm:••••••••``) and the value of credential
+    query parameters (``?api_key=••••••••``). Anything else unchanged;
+    idempotent; non-strings returned as they are.
+
+    rel46 (prod QA rel44): the JSON export shipped
+    ``https://adm:pw1234@api.acmeco.io`` five times (sample_locations,
+    detected_instances, instances) on an iOS "Hardcoded URLs" finding, which
+    is not a secret finding, so present_result never touched it."""
+    if not isinstance(text, str) or "://" not in text:
+        return text
+
+    def _one(m: "re.Match[str]") -> str:
+        u = m.group(0)
+        if "@" in u:
+            u = _URL_USERINFO_RE.sub(lambda c: c.group(1) + MASK_FILL + c.group(3)
+                                 if not _is_masked(c.group(2)) else c.group(0), u)
+        if "=" in u:
+            u = _QUERY_SECRET_RE.sub(lambda c: c.group(1) + MASK_FILL
+                                     if not _is_masked(c.group(2)) else c.group(0), u)
+        return u
+
+    return _URL_RE.sub(_one, text)
+
+
+def mask_url_secrets_tree(node: Any, depth: int = 0) -> Any:
+    """In place over a JSON tree (dicts / lists): every string value through
+    ``mask_url_secrets``. Returns ``node`` (a bare string: its masked copy)."""
+    if depth > 60:
+        return node
+    if isinstance(node, str):
+        return mask_url_secrets(node)
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if isinstance(v, str):
+                if "://" in v:
+                    node[k] = mask_url_secrets(v)
+            elif isinstance(v, (dict, list)):
+                mask_url_secrets_tree(v, depth + 1)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            if isinstance(v, str):
+                if "://" in v:
+                    node[i] = mask_url_secrets(v)
+            elif isinstance(v, (dict, list)):
+                mask_url_secrets_tree(v, depth + 1)
+    return node
+
+
 # ---------------------------------------------------------------------------
 # Is this a secret finding?
 # ---------------------------------------------------------------------------
@@ -585,14 +657,14 @@ def _wording(kind: str, provider: Optional[str], basis: str, confidence: str,
               else "correspondance de motif, non testé")
     title_en = (f"Potential secret: {lab_en} ({tag_en})" if lab_en
                 else f"Potential secret ({tag_en})")
-    title_fr = (f"Secret potentiel : {lab_fr} ({tag_fr})" if lab_fr
+    title_fr = (f"Secret potentiel : {lab_fr} ({tag_fr})" if lab_fr
                 else f"Secret potentiel ({tag_fr})")
     where = _location(f)
     art_en = _subject(f, "en")
     art_fr = _subject(f, "fr")
     if basis == "format":
         why_en = f"matches the published format of a {lab_en}"
-        why_fr = f"correspond au format publié suivant : {lab_fr}"
+        why_fr = f"correspond au format publié suivant : {lab_fr}"
         if provider == "github_token":
             why_en += " (checksum verified offline)"
             why_fr += " (somme de contrôle vérifiée hors ligne)"
@@ -606,9 +678,9 @@ def _wording(kind: str, provider: Optional[str], basis: str, confidence: str,
         why_en = "is assigned to a credential-like name, or looks like key material"
         why_fr = "est affectée à un nom évoquant un identifiant, ou ressemble à une clé"
     loc_en = f" at {where}" if where else ""
-    loc_fr = f" en {where}" if where else ""
+    loc_fr = f" dans {where}" if where else ""
     val_en = f" Value (masked): {masked}." if masked else ""
-    val_fr = f" Valeur (masquée) : {masked}." if masked else ""
+    val_fr = f" Valeur (masquée) : {masked}." if masked else ""
     conf_en = {"likely": "likely (the format is checked structurally)",
                "potential": "potential (no format check for this value)"}[confidence]
     conf_fr = {"likely": "probable (le format est vérifié structurellement)",
@@ -620,8 +692,8 @@ def _wording(kind: str, provider: Optional[str], basis: str, confidence: str,
     desc_en = (f"A value{loc_en} {why_en}.{val_en} Narvy did not test this value: it does not know "
                f"whether it is valid, active, revoked or restricted. Confidence: {conf_en}. If it is "
                f"a real credential, anyone who can read the {art_en} can read it too. {sev_en}")
-    desc_fr = (f"Une valeur{loc_fr} {why_fr}.{val_fr} Narvy n'a pas testé cette valeur : il ne sait "
-               f"pas si elle est valide, active, révoquée ou restreinte. Confiance : {conf_fr}. S'il "
+    desc_fr = (f"Une valeur{loc_fr} {why_fr}.{val_fr} Narvy n'a pas testé cette valeur : il ne sait "
+               f"pas si elle est valide, active, révoquée ou restreinte. Confiance : {conf_fr}. S'il "
                f"s'agit d'un véritable identifiant, toute personne pouvant lire le {art_fr} peut "
                f"aussi le lire. {sev_fr}")
     rem_en = ("Check whether this value is a real credential. If it is: remove it from the "
@@ -629,7 +701,7 @@ def _wording(kind: str, provider: Optional[str], basis: str, confidence: str,
               "from a protected store), then revoke it and issue a new one, because it may already "
               "have been copied. If it is not a credential (test value, identifier, public "
               "constant), mark the finding as a false positive.")
-    rem_fr = ("Vérifiez s'il s'agit d'un véritable identifiant. Si oui : retirez-le du "
+    rem_fr = ("Vérifiez s'il s'agit d'un véritable identifiant. Si oui : retirez-le du "
               f"{art_fr} (gardez-le côté serveur, dans un gestionnaire de secrets, ou injectez-le "
               "à la compilation depuis un stockage protégé), puis révoquez-le et émettez-en un "
               "nouveau, car il a pu être copié. Sinon (valeur de test, identifiant, constante "
@@ -639,22 +711,125 @@ def _wording(kind: str, provider: Optional[str], basis: str, confidence: str,
             "severity_rationale": sev_en, "severity_rationale_fr": sev_fr}
 
 
+_SUBJECTS = (("source code", "code source"), ("app package", "paquet de l'application"),
+             ("container image", "image de conteneur"), ("analysed files", "fichiers analysés"))
+_STORED_FR: Optional[Dict[str, str]] = None
+_STORED_RX: Optional[List[Tuple[Any, Dict[str, str], Dict[str, str], str]]] = None
+
+
+def _stored_tables() -> None:
+    """EN -> FR of every sentence this module stamps, built from the same
+    wording functions (one source): the fixed ones in a dict, the ones that
+    carry a location / masked value as regexes."""
+    global _STORED_FR, _STORED_RX
+    if _STORED_FR is not None:
+        return
+    fixed: Dict[str, str] = {}
+    labels = [(k, None) for k in _KIND_LABELS] + [("generic", p) for p in _PROVIDER_LABELS]
+    whys: Dict[str, str] = {}
+    confs: Dict[str, str] = {}
+    arts = {en: fr for en, fr in _SUBJECTS}
+    plat_for = {"source code": {"scan_mode": "source"}, "app package": {"platform": "android"},
+                "container image": {"platform": "container"}, "analysed files": {}}
+    for kind, prov in labels:
+        for basis in ("format", "pattern"):
+            for conf in ("likely", "potential"):
+                for art_en, f in plat_for.items():
+                    w = _wording(kind, prov, basis, conf, None, f)
+                    for k in ("title", "remediation", "severity_rationale"):
+                        fixed[w[k]] = w[k + "_fr"]
+                    # Decompose the description into its varying parts.
+                    d_en, d_fr = w["description"], w["description_fr"]
+                    why_en = d_en[len("A value "):d_en.index(". Narvy did not test")]
+                    why_fr = d_fr[len("Une valeur "):d_fr.index(". Narvy n'a pas testé")]
+                    whys[why_en] = why_fr
+                    c_en = d_en.split("Confidence: ", 1)[1].split(". If it is", 1)[0]
+                    c_fr = d_fr.split("Confiance : ", 1)[1].split(". S'il", 1)[0]
+                    confs[c_en] = c_fr
+    for prov in _PROVIDER_LABELS:
+        w = _public_wording(prov, None, {})
+        for k in ("title", "remediation", "severity_rationale"):
+            fixed[w[k]] = w[k + "_fr"]
+    w0 = _wording("generic", None, "pattern", "potential", None, {})
+    sev_en, sev_fr = w0["severity_rationale"], w0["severity_rationale_fr"]
+
+    def alt(d: Dict[str, str]) -> str:
+        return "|".join(re.escape(k) for k in sorted(d, key=len, reverse=True))
+
+    desc_rx = re.compile(
+        r"^A value(?: at (?P<where>.+?))? (?P<why>" + alt(whys) + r")\."
+        r"(?: Value \(masked\): (?P<masked>.+?)\.)? Narvy did not test this value: it does not "
+        r"know whether it is valid, active, revoked or restricted\. Confidence: (?P<conf>"
+        + alt(confs) + r")\. If it is a real credential, anyone who can read the (?P<art>"
+        + alt(arts) + r") can read it too\. " + re.escape(sev_en) + r"$", re.S)
+    desc_fr = ("Une valeur{loc} {why}.{val} Narvy n'a pas testé cette valeur : il ne sait pas si "
+               "elle est valide, active, révoquée ou restreinte. Confiance : {conf}. S'il s'agit "
+               "d'un véritable identifiant, toute personne pouvant lire le {art} peut aussi le "
+               "lire. " + sev_fr)
+    pub_labels = {en: fr for en, fr in _PROVIDER_LABELS.values()}
+    pub_rx = re.compile(
+        r"^A (?P<lab>" + alt(pub_labels) + r")(?: at (?P<where>.+?))? is designed to ship in "
+        r"client apps and web pages, so it is not reported as a secret\."
+        r"(?: Value \(masked\): (?P<masked>.+?)\.)? What protects it is its configuration on the "
+        r"provider side \(allowed apps, referrers, APIs, quotas\)\. Narvy did not test it and "
+        r"cannot see those restrictions\.$", re.S)
+    pub_fr = ("Une {lab}{loc} est conçue pour être livrée dans les applications et pages web "
+              "clientes : elle n'est donc pas signalée comme un secret.{val} Ce qui la protège est "
+              "sa configuration chez le fournisseur (applications, référents, API autorisés, "
+              "quotas). Narvy ne l'a pas testée et ne voit pas ces restrictions.")
+    _STORED_RX = [(desc_rx, {"why": whys, "conf": confs, "art": arts}, {}, desc_fr),
+                  (pub_rx, {"lab": pub_labels}, {}, pub_fr)]
+    _STORED_FR = fixed
+
+
+def stored_text_fr(text: Any) -> Optional[str]:
+    """French of a sentence this module wrote in English (title, description,
+    remediation, severity rationale), or None when ``text`` is not one.
+
+    A finding stored before ``*_fr`` keys existed, or a surface that only
+    kept the English column (vulnerability tracker rows, dashboard top
+    findings), still shows its French through this (2026-10-20, prod QA:
+    "Potential secret (pattern match, not tested)" stayed English in FR)."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        _stored_tables()
+        s = text.strip()
+        hit = (_STORED_FR or {}).get(s)
+        if hit is not None:
+            return hit
+        if not (s.startswith("A value") or s.startswith("A ")):
+            return None
+        for rx, maps, _unused, tpl in (_STORED_RX or []):
+            m = rx.match(s)
+            if not m:
+                continue
+            g = m.groupdict()
+            vals = {k: maps[k][g[k]] for k in maps}
+            vals["loc"] = f" dans {g['where']}" if g.get("where") else ""
+            vals["val"] = f" Valeur (masquée) : {g['masked']}." if g.get("masked") else ""
+            return tpl.format(**vals)
+    except Exception:  # noqa: BLE001 - presentation never raises
+        return None
+    return None
+
+
 def _public_wording(provider: str, masked: Optional[str], f: Dict[str, Any]) -> Dict[str, str]:
     lab_en, lab_fr = _PROVIDER_LABELS.get(provider, (provider, provider))
     where = _location(f)
     loc_en = f" at {where}" if where else ""
-    loc_fr = f" en {where}" if where else ""
+    loc_fr = f" dans {where}" if where else ""
     val_en = f" Value (masked): {masked}." if masked else ""
-    val_fr = f" Valeur (masquée) : {masked}." if masked else ""
+    val_fr = f" Valeur (masquée) : {masked}." if masked else ""
     return {
         "title": f"Public client key: {lab_en} (not a secret, check its restrictions)",
-        "title_fr": f"Clé client publique : {lab_fr} (pas un secret, vérifiez ses restrictions)",
+        "title_fr": f"Clé client publique : {lab_fr} (pas un secret, vérifiez ses restrictions)",
         "description": (f"A {lab_en}{loc_en} is designed to ship in client apps and web pages, so "
                         f"it is not reported as a secret.{val_en} What protects it is its "
                         "configuration on the provider side (allowed apps, referrers, APIs, "
                         "quotas). Narvy did not test it and cannot see those restrictions."),
         "description_fr": (f"Une {lab_fr}{loc_fr} est conçue pour être livrée dans les applications "
-                           f"et pages web clientes : elle n'est donc pas signalée comme un secret."
+                           f"et pages web clientes : elle n'est donc pas signalée comme un secret."
                            f"{val_fr} Ce qui la protège est sa configuration chez le fournisseur "
                            "(applications, référents, API autorisés, quotas). Narvy ne l'a pas "
                            "testée et ne voit pas ces restrictions."),
@@ -663,7 +838,7 @@ def _public_wording(provider: str, masked: Optional[str], f: Dict[str, Any]) -> 
         "remediation_fr": ("Dans la console du fournisseur, vérifiez que cette clé est limitée à "
                            "vos applications ou domaines et aux API nécessaires."),
         "severity_rationale": "Informational: public by design, not a secret.",
-        "severity_rationale_fr": "Informatif : publique par conception, pas un secret.",
+        "severity_rationale_fr": "Informatif : publique par conception, pas un secret.",
     }
 
 
