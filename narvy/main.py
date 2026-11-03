@@ -2963,33 +2963,11 @@ def cmd_host_audit(args):
     _exit_on_fail_on(findings, args.fail_on, coverage_gaps=coverage_gaps)
 
 
-def _cloud_flatten(report):
-    # 'passed_checks' is a list of dicts too and must be skipped by name.
-    skip_keys = {"timestamp", "passed_checks"}
-    findings = []
-    for category, items in report.items():
-        if category in skip_keys or not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            findings.append({
-                "category": category,
-                "severity": str(item.get("severity", "info")).lower(),
-                "title": item.get("Issue") or item.get("issue") or item.get("Description")
-                         or item.get("description") or f"{category} finding",
-                "recommendation": item.get("Recommendation") or item.get("recommendation", ""),
-                "resource": item.get("GroupId") or item.get("BucketName") or item.get("UserName")
-                            or item.get("FunctionName") or item.get("Region") or "",
-            })
-    return findings
-
-
 def _cloud_to_sarif(findings):
     results = [_sarif_result(
-        f["category"],
-        f["title"],
-        f["resource"] or f["category"],
+        f.get("cloud_rule_id") or f.get("rule_id") or f.get("category"),
+        f.get("title"),
+        f.get("location") or f.get("category"),
         f.get("severity"),
     ) for f in findings]
     return {
@@ -3001,6 +2979,58 @@ def _cloud_to_sarif(findings):
             "results": results,
         }],
     }
+
+
+def _cloud_coverage(provider, report):
+    """{status, checks_skipped, errors}: a check that could not run is a gap, never a pass."""
+    if provider == "gcp":
+        denied = list(report.get("denied_apis") or report.get("permission_warnings") or [])
+        return {"status": "partial" if denied else "complete",
+                "checks_skipped": len(denied),
+                "errors": [f"permission denied: {u}" for u in denied]}
+    cov = report.get("coverage") or {}
+    return {"status": cov.get("status") or "complete",
+            "checks_skipped": int(cov.get("checks_skipped") or 0),
+            "errors": list(cov.get("errors") or [])}
+
+
+def _cloud_passed_count(report):
+    passed = report.get("passed_checks")
+    if isinstance(passed, list):
+        return len(passed)
+    return passed if isinstance(passed, int) else 0
+
+
+def _submit_cloud_ingest(body):
+    """POST the cloud results to /api/v1/ingest. Exits with EXIT_ERROR on any failure."""
+    creds = auth.load_credentials()
+    if not creds:
+        console.print("[bold red]Not logged in.[/bold red] Run `narvy login` first, or drop --upload for a local-only scan.")
+        raise SystemExit(EXIT_ERROR)
+    console.print(
+        f"[cyan]Uploading {len(body['findings'])} finding(s) to "
+        f"{rich_escape(_server_and_account(creds))} (findings only, no credential)...[/cyan]"
+    )
+    status, data = uploader.ingest_body(creds["token"], body)
+    if status not in (200, 201):
+        asset_msg = _format_asset_limit_error(data) if status == 402 else None
+        if asset_msg:
+            console.print(f"[bold red]{asset_msg}[/bold red]")
+            raise SystemExit(EXIT_ERROR)
+        error_msg = data.get("error") or data if isinstance(data, dict) else data
+        console.print(f"[bold red]{_upload_failed_label(status)}[/bold red] {error_msg}")
+        if isinstance(data, dict) and data.get("message"):
+            console.print(f"[dim]{data['message']}[/dim]")
+        _print_upgrade_hint(status, data)
+        raise SystemExit(EXIT_ERROR)
+    console.print(f"[bold green]Results uploaded.[/bold green] scan_id={data.get('scan_id')}")
+    if data.get("dropped"):
+        console.print(f"[bold yellow]{data['dropped']} finding(s) were DROPPED server-side "
+                      "(malformed) - they are NOT in the dashboard.[/bold yellow]")
+    scan_url = _scan_dashboard_url(data)
+    if scan_url:
+        console.print(f"View this scan: [link={scan_url}]{scan_url}[/link]")
+    return data
 
 
 STORE_CHECK_EXIT_CODES_HELP = (
@@ -3023,84 +3053,123 @@ def cmd_store_check(args, parser):
 def cmd_cloud_scan(args):
     telemetry.note(surface="cloud")
     _reject_format_as_file(args.output_file)
+    provider = args.provider
     try:
-        from .cloud.aws_scan import analyze_aws_security
+        if provider == "gcp":
+            from .cloud.gcp_scan import analyze_gcp_security
+        else:
+            from .cloud.aws_scan import analyze_aws_security
     except ImportError:
+        lib = "google-auth" if provider == "gcp" else "boto3"
         console.print(
-            "[bold red]ERROR:[/bold red] the AWS cloud scanner needs boto3, which isn't "
+            f"[bold red]ERROR:[/bold red] the {provider.upper()} cloud scanner needs {lib}, which isn't "
             "installed (it's an opt-in extra to keep the base install light).\n"
-            "Run: [bold]pip install narvy-cli\\[cloud][/bold] (or `pip install boto3` "
+            "Run: [bold]pip install narvy-cli\\[cloud][/bold] (or `pip install boto3 google-auth` "
             "into the same environment)."
         )
         raise SystemExit(EXIT_ERROR)
+    from .cloud.normalize import normalize_report
+    from .cloud import upload as cloud_upload
+
+    if provider == "aws" and getattr(args, "profile", None):
+        # The AWS chain reads the profile itself (shared config, SSO, assume-role).
+        os.environ["AWS_PROFILE"] = args.profile
 
     if args.format == "text":
-        console.print(f"\n[bold]Narvy Cloud Scanner[/bold] (free, local, your own credentials)")
-        console.print(f"Provider: {args.provider}" + (f" | Region: {args.region}" if args.region else " | All regions"))
-        console.print("Using ambient credentials (aws configure / env vars / IAM role). Nothing is sent to Narvy.\n")
+        console.print("\n[bold]Narvy Cloud Scanner[/bold] (local, your own credentials)")
+        if provider == "aws":
+            where = f" | Region: {args.region}" if args.region else " | All regions"
+        else:
+            where = f" | Project: {args.project}" if args.project else " | Project: from gcloud"
+        console.print(f"Provider: {provider}{where}")
+        sent = "Only the findings are sent to Narvy (--upload)." if args.upload else "Nothing is sent to Narvy."
+        chain = "AWS" if provider == "aws" else "Google"
+        console.print(f"Credentials: standard {chain} credential chain. {sent}\n")
 
+    start = time.time()
     with scan_progress() as progress:
-        task = progress.add_task("[cyan]Scanning AWS account (can take a few minutes across all regions)...", total=None)
+        label = ("Scanning AWS account (can take a few minutes across all regions)..." if provider == "aws"
+                 else "Scanning GCP project...")
+        task = progress.add_task(f"[cyan]{label}", total=None)
         try:
-            # Empty dict: let boto3's own ambient credential chain resolve.
-            report = analyze_aws_security({}, region=args.region)
+            if provider == "gcp":
+                report = analyze_gcp_security(project_id=args.project)
+            else:
+                report = analyze_aws_security(region=args.region)
         except Exception as e:
             progress.stop()
             console.print(f"\n[bold red]ERROR: scan failed - {e}[/bold red]")
-            console.print("[dim]Check that AWS credentials are configured (aws configure / AWS_ACCESS_KEY_ID env var / IAM role).[/dim]")
+            hint = ("gcloud auth application-default login, or GOOGLE_APPLICATION_CREDENTIALS" if provider == "gcp"
+                    else "aws configure / aws sso login / AWS_PROFILE / env vars / instance role")
+            console.print(f"[dim]Check that credentials are configured ({hint}).[/dim]")
             raise SystemExit(EXIT_ERROR)
         progress.update(task, completed=1, description="[green]Scan complete.")
+    duration = time.time() - start
 
-    findings = _cloud_flatten(report)
-
-    coverage = report.get("coverage") or {}
-    coverage_partial = coverage.get("status") == "partial"
+    account_id = str((report.get("project_id") if provider == "gcp" else report.get("account_id")) or "")
+    findings = normalize_report(provider, report, account_id)
+    coverage = _cloud_coverage(provider, report)
+    coverage_partial = coverage["status"] == "partial"
     coverage_gaps = []
     if coverage_partial:
-        skipped = coverage.get("checks_skipped", 0)
         coverage_gaps.append(
-            f"{skipped} AWS analyzer(s) could not complete (e.g. AccessDenied / "
-            "throttling / a denied permission), so those services/regions were NOT "
+            f"{coverage['checks_skipped']} {provider.upper()} check(s) could not complete (e.g. "
+            "AccessDenied / throttling / a denied permission), so those services/regions were NOT "
             "assessed. 0 findings there means UNKNOWN, not clean. See coverage.errors "
             "in the JSON output and re-run with a role that can read them."
         )
 
     if args.format == "json":
-        output = json.dumps({"tool": "Narvy Cloud Scanner CLI", **report}, indent=2, default=str)
+        output = json.dumps({"tool": "Narvy Cloud Scanner CLI", "provider": provider,
+                             "account_id": account_id, **report,
+                             "coverage": coverage, "findings": findings}, indent=2, default=str)
     elif args.format == "sarif":
         sarif = _cloud_to_sarif(findings)
         sarif["runs"][0]["properties"] = {"coverage": coverage}
         output = json.dumps(sarif, indent=2)
     else:
+        target = (f" | {'Project' if provider == 'gcp' else 'Account'}: {account_id}" if account_id else "")
         lines = [
             "=" * 60, "NARVY CLOUD POSTURE RESULTS", "=" * 60, "",
-            f"Provider: {args.provider}",
+            f"Provider: {provider}{target}",
             f"Total Findings: {len(findings)}", "",
         ]
         by_sev = {}
         for f in findings:
-            by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
-        for sev in ["critical", "high", "medium", "low", "info"]:
+            sev = str(f["severity"]).lower()
+            by_sev[sev] = by_sev.get(sev, 0) + 1
+        for sev in ["critical", "high", "medium", "low", "info", "undetermined"]:
             if by_sev.get(sev):
                 lines.append(f"  {sev.upper()}: {by_sev[sev]}")
         lines.append("")
         if coverage_partial:
             lines.append(
-                f"Coverage: PARTIAL - {coverage.get('checks_skipped', 0)} analyzer(s) "
+                f"Coverage: PARTIAL - {coverage['checks_skipped']} check(s) "
                 "could not complete (AccessDenied / throttling / denied permission). "
                 "Those services/regions were NOT assessed; 0 findings there is UNKNOWN, "
                 "not clean:")
-            for err in coverage.get("errors", []):
+            for err in coverage["errors"]:
                 lines.append(f"  - {err}")
             lines.append("")
         for f in findings:
-            lines.append(f"[{f['severity'].upper()}] ({f['category']}) {f['title']}")
+            lines.append(f"[{str(f['severity']).upper()}] ({f['category']}) {f['title']}")
         if not findings:
             lines.append("No issues found." if not coverage_partial
                          else "No issues found among the services that COULD be assessed (see coverage note above).")
         output = "\n".join(lines)
 
     _write_or_print(output, args.output_file)
+
+    if args.upload:
+        try:
+            body = cloud_upload.build_body(provider, account_id, findings, coverage=coverage,
+                                           scan_seconds=duration,
+                                           checks_passed=_cloud_passed_count(report))
+        except cloud_upload.CredentialInPayload as e:
+            console.print(f"[bold red]Upload refused: {e}.[/bold red]")
+            raise SystemExit(EXIT_ERROR)
+        _submit_cloud_ingest(body)
+
     _exit_on_fail_on(findings, args.fail_on, coverage_gaps=coverage_gaps)
 
 
@@ -3399,15 +3468,18 @@ def cli(prog=None):
     p_host.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "any"], help=FAIL_ON_HELP)
     p_host.set_defaults(func=cmd_host_audit)
 
-    p_cloud = sub.add_parser("cloud-scan", allow_abbrev=False, epilog=EXIT_CODES_HELP, formatter_class=argparse.RawDescriptionHelpFormatter, help="Cloud posture scan using your local AWS credentials (aws configure, env vars or IAM role)")
-    p_cloud.add_argument("--provider", choices=["aws"], default="aws", help="Cloud provider (GCP/Azure not yet in the CLI)")
-    p_cloud.add_argument("--region", help="Specific region to scan (default: all regions)")
+    p_cloud = sub.add_parser("cloud-scan", allow_abbrev=False, epilog=EXIT_CODES_HELP, formatter_class=argparse.RawDescriptionHelpFormatter, help="Cloud posture scan of an AWS account or GCP project with your own credentials (standard credential chain)")
+    p_cloud.add_argument("--provider", choices=["aws", "gcp"], default="aws", help="Cloud provider (default: aws)")
+    p_cloud.add_argument("--region", help="AWS: one region to scan (default: all enabled regions)")
+    p_cloud.add_argument("--profile", help="AWS: named profile from ~/.aws/config (SSO and assume-role profiles work)")
+    p_cloud.add_argument("--project", help="GCP: project id (default: the gcloud / ADC project)")
     p_cloud.add_argument("--output", "-o", "--format", dest="format", choices=["text", "json", "sarif"],
                          default="text", type=str.lower,
                          help="Output format: text (default), json or sarif. Consistent with `scan`: -o = format.")
     p_cloud.add_argument("--file", "-f", "--output-file", dest="output_file", default=None,
                          help="Write output to this path ('-' = stdout, the default). Consistent with `scan`: -f = file.")
     p_cloud.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "any"], help=FAIL_ON_HELP)
+    p_cloud.add_argument("--upload", action="store_true", help="Send the findings (never a credential) to your Narvy dashboard after the scan. Needs `narvy login`.")
     p_cloud.set_defaults(func=cmd_cloud_scan)
 
     p_store = sub.add_parser(

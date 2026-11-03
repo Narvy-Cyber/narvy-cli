@@ -81,6 +81,20 @@ def ingest_results(token, app_name, platform, scan_mode, findings, version=None)
     return _json_or_error(r)
 
 
+def ingest_body(token, body):
+    """POST a prepared ingest body (narvy.cloud.upload.build_body) to /api/v1/ingest."""
+    try:
+        r = requests.post(
+            f"{API_BASE}/api/v1/ingest",
+            headers={"X-API-Token": token, "Content-Type": "application/json"},
+            json=body,
+            timeout=120,
+        )
+    except requests.exceptions.RequestException as e:
+        return _network_error(e)
+    return _json_or_error(r)
+
+
 def list_scans(token, limit=20, offset=0, status=None):
     """List recent scans on the caller's account via GET /api/v1/scans."""
     params = {"limit": limit, "offset": offset}

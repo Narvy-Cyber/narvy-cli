@@ -45,7 +45,7 @@ Changelog = "https://github.com/Narvy-Cyber/narvy-cli/blob/main/CHANGELOG.md"
 # binary analyzer falls back to LIEF-only symbols.
 ios-full = ["icdump"]
 # boto3 is ~35MB of transitive weight, so cloud-scan is opt-in.
-cloud = ["boto3"]
+cloud = ["boto3", "google-auth"]
 # Ed25519 signing of SBOMs (narvy sbom --sign-key, narvy verify-sbom).
 sign = ["cryptography"]
 

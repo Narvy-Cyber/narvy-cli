@@ -9,7 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 1.2.2 was not published on its own; its changes ship in 1.3.0.
 
+### Added
+
+- `cloud-scan --upload`: sends the findings and the scan metadata (provider,
+  account or project id, coverage status and count) to your Narvy dashboard.
+  Never a credential: the body is built from an allow-list of finding
+  fields, and an upload that would carry a credential value from the
+  environment, an AWS access key id or a private key is refused.
+- `cloud-scan --provider gcp`: GCP project posture checks with Application
+  Default Credentials (`--project`, else the gcloud project). APIs that
+  answer permission denied are reported as PARTIAL coverage.
+- `cloud-scan --profile`: AWS named profile (SSO and assume-role profiles).
+
 ### Changed
+
+- `cloud-scan` runs the same AWS checks and severities as the Narvy
+  platform (one fixed severity per check, with its reference); the JSON
+  output adds `provider`, `account_id` and `findings`.
 
 - Dependency check (SCA): dependencies are matched locally against the
   public OSV database. No package name or version is sent. For each

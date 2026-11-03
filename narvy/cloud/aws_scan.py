@@ -1,13 +1,19 @@
-"""AWS posture checks (security groups, IAM, storage, logging) across enabled regions."""
+"""AWS posture checks (security groups, IAM, storage, logging) across enabled regions.
 
+Same checks as the Narvy platform's analyzer (src/cloud/aws/aws_security_analyzer.py
+in the SaaS repo). Credentials come from the standard AWS chain only (profile,
+env vars, SSO, instance role): the CLI never takes a key as an argument and
+never sends one anywhere.
+"""
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnectionError
 import json
 from datetime import datetime
 import time
-import os
 
 import logging
+
+from .rule_severity import stamp_items as _stamp_rule_severity
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +24,27 @@ class CustomJSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
+# ---------------------------------------------------------------------------
+# Severity model (2026-06-15 precision overhaul)
+#
+# Before this change the analyzer emitted ZERO explicit severities; the route
+# layer derived "critical" by substring-matching the word "critical" anywhere
+# in the finding (the CloudWatch nag "monitor critical metrics" => 16 fake
+# criticals). Every finding now carries an explicit `severity` so the count is
+# derived from a real field, not a substring.
+#
+# Severity vocabulary matches CloudFinding.severity CHECK constraint:
+#   critical | high | medium | low | info
+# ---------------------------------------------------------------------------
 SEV_CRITICAL = 'critical'
 SEV_HIGH = 'high'
 SEV_MEDIUM = 'medium'
 SEV_LOW = 'low'
 SEV_INFO = 'info'
 
-# Web ports are deliberately absent: world-open is their normal configuration.
+# Ports that are dangerous when reachable from 0.0.0.0/0. Admin/remote-access
+# and database/cache ports. Web ports (80/443) are intentionally NOT here —
+# being open to the world is the normal, expected configuration for them.
 SENSITIVE_PORTS = {
     22: ('SSH', SEV_CRITICAL),
     3389: ('RDP', SEV_CRITICAL),
@@ -47,15 +67,18 @@ SENSITIVE_PORTS = {
     9000: ('Misc admin', SEV_MEDIUM),
 }
 
-WEB_PORTS = {80, 443, 8080, 8443}
+# Web ports that are normal when world-open => INFO (visibility, not a vuln).
+# The EC2.18 authorized ports (src/cloud/rule_severity): 8080 is on the EC2.19
+# high-risk list and 8443 is not authorized, so neither is "normal" here.
+WEB_PORTS = {80, 443}
 
 _SEV_ORDER = {SEV_CRITICAL: 4, SEV_HIGH: 3, SEV_MEDIUM: 2, SEV_LOW: 1, SEV_INFO: 0}
 
 
 def _port_range(rule):
-    """Return (from_port, to_port) for an IpPermission rule."""
+    """Return (from_port, to_port) for an IpPermission rule, handling 'all'."""
     proto = rule.get('IpProtocol')
-    if proto == '-1':
+    if proto == '-1':  # all protocols / all ports
         return (0, 65535)
     fp = rule.get('FromPort')
     tp = rule.get('ToPort')
@@ -69,7 +92,14 @@ def _port_range(rule):
 
 
 def _classify_open_rule(from_port, to_port):
-    """Given a port range open to 0.0.0.0/0, return (severity, label)."""
+    """
+    Given a port range open to 0.0.0.0/0, return (severity, label).
+
+    - A range covering a sensitive port => that port's severity.
+    - A wide-open range (0-65535 / all) => CRITICAL (exposes everything).
+    - Only web ports => INFO.
+    - Anything else => MEDIUM (some non-web service exposed).
+    """
     span = to_port - from_port
     if from_port == 0 and to_port == 65535:
         return (SEV_CRITICAL, 'ALL ports (0-65535)')
@@ -92,7 +122,14 @@ def _classify_open_rule(from_port, to_port):
     return (SEV_MEDIUM, f'port {from_port}-{to_port}')
 
 def _boto3_client(service, endpoint_url=None, **kwargs):
-    """boto3.client wrapper threading an optional endpoint_url override."""
+    """
+    Thin wrapper around boto3.client that threads endpoint_url through every
+    call.  When endpoint_url is None the call is identical to a plain
+    boto3.client() invocation — no behavioural change for production.
+    When endpoint_url is set (LocalStack / moto server-mode / tests) every
+    boto3 client created inside this module will hit that endpoint instead of
+    the real AWS API.
+    """
     if endpoint_url is not None:
         kwargs['endpoint_url'] = endpoint_url
     return boto3.client(service, **kwargs)
@@ -108,7 +145,16 @@ def get_all_regions(endpoint_url=None):
     return [region['RegionName'] for region in response['Regions']]
 
 def analyze_security_groups(region, endpoint_url=None):
-    """Flag security-group rules exposing ports to 0.0.0.0/0, one finding per rule."""
+    """
+    Flag security-group rules that expose ports to 0.0.0.0/0, severity-graded
+    by *which* port is exposed.
+
+    Port 80/443 open to the world is the normal config for a web server => INFO,
+    not a vuln. Reserve HIGH/CRITICAL for admin/db/cache ports (22/3389/3306/
+    6379/27017/5432/...) and all-ports rules. We emit ONE finding per
+    (security-group, rule) — not one per group — and never `break`, so a group
+    that opens both SSH and Postgres to the world produces both findings.
+    """
     ec2 = _boto3_client('ec2', endpoint_url=endpoint_url, region_name=region)
     response = ec2.describe_security_groups()
     vulnerable_groups = []
@@ -180,33 +226,44 @@ def analyze_s3_buckets(endpoint_url=None):
     return vulnerable_buckets
 
 def _has_console_access(iam, user_name):
-    """True iff the IAM user has a console login profile."""
+    """True iff the IAM user has a console login profile (a password).
+
+    Access-key-only users are service accounts — MFA is meaningless for them
+    (MFA gates the console password, not programmatic API keys). Flagging them
+    for 'no MFA' is a false positive the audit explicitly called out.
+    """
     try:
         iam.get_login_profile(UserName=user_name)
         return True
     except ClientError as e:
         if e.response['Error']['Code'] == 'NoSuchEntity':
             return False
-        # Any other error: assume console user rather than drop a real human.
+        # On any other error, be conservative and treat as console user so we
+        # don't silently drop a real human; the MFA finding stays MEDIUM.
         logger.error(f"login-profile check failed for {user_name}: {e}")
         return True
 
 
 def analyze_iam_users(endpoint_url=None):
-    """Flag missing MFA, for console users only: MFA does not apply to API keys."""
+    """
+    Flag MFA only for users with CONSOLE access. Service accounts
+    (access-key-only, no login profile) are skipped — MFA does not apply to
+    programmatic keys, so flagging them was a guaranteed false positive.
+    """
     iam = _boto3_client('iam', endpoint_url=endpoint_url)
     response = iam.list_users()
     users_without_mfa = []
 
     for user in response['Users']:
         if not _has_console_access(iam, user['UserName']):
-            continue
+            continue  # service account — MFA not applicable
         mfa_devices = iam.list_mfa_devices(UserName=user['UserName'])
         if not mfa_devices['MFADevices']:
             users_without_mfa.append({
                 'UserName': user['UserName'],
                 'UserId': user['UserId'],
                 'CreateDate': user['CreateDate'].isoformat(),
+                'rule_id': 'aws.iam.console_user_no_mfa',
                 'severity': SEV_MEDIUM,
                 'Issue': f"Console user {user['UserName']} has no MFA device",
                 'Recommendation': "Enable Multi-Factor Authentication (MFA) for this console user to enhance account security."
@@ -222,7 +279,13 @@ def _as_list(value):
 
 
 def _statement_is_wildcard_admin(stmt):
-    """Returns (is_admin, has_action_wildcard, has_resource_wildcard)."""
+    """
+    True iff an Allow statement grants Action:* AND Resource:* (admin-equivalent),
+    parsed from the actual policy document — not guessed by policy name or by a
+    naive substring match on the serialized JSON.
+
+    Returns (is_admin, has_action_wildcard, has_resource_wildcard).
+    """
     if not isinstance(stmt, dict):
         return (False, False, False)
     if stmt.get('Effect') != 'Allow':
@@ -237,7 +300,14 @@ def _statement_is_wildcard_admin(stmt):
 
 
 def analyze_iam_policies(endpoint_url=None):
-    """Flag customer-managed policies whose statements grant wildcard access."""
+    """
+    Parse each customer-managed policy document and flag statements that grant
+    Action:* on Resource:* (admin-equivalent) — the real over-permission. Old
+    code matched the substrings '"Effect": "Allow"' and '"Resource": "*"'
+    anywhere in the serialized JSON, which fired on unrelated statements in the
+    same document (false positive). Severity HIGH for full admin wildcard,
+    MEDIUM for Resource:* with a service-scoped action wildcard.
+    """
     iam = _boto3_client('iam', endpoint_url=endpoint_url)
     policies = iam.list_policies(Scope='Local')['Policies']
     risky_policies = []
@@ -255,21 +325,24 @@ def analyze_iam_policies(endpoint_url=None):
             except (ValueError, TypeError):
                 continue
 
-        worst = None
+        worst = None  # (severity, reason, rule id: src/cloud/rule_severity)
         for stmt in _as_list(document.get('Statement')):
             is_admin, action_wild, resource_wild = _statement_is_wildcard_admin(stmt)
             if is_admin:
-                worst = (SEV_HIGH, 'Action:* on Resource:* (full admin)')
+                worst = (SEV_HIGH, 'Action:* on Resource:* (full admin)',
+                         'aws.iam.policy_full_admin')
                 break
             if action_wild and resource_wild:
                 if worst is None:
-                    worst = (SEV_MEDIUM, 'service-wide Action wildcard on Resource:*')
+                    worst = (SEV_MEDIUM, 'service-wide Action wildcard on Resource:*',
+                             'aws.iam.policy_service_wildcard')
 
         if worst is not None:
             risky_policies.append({
                 'PolicyName': policy['PolicyName'],
                 'PolicyId': policy['PolicyId'],
                 'Arn': policy['Arn'],
+                'rule_id': worst[2],
                 'severity': worst[0],
                 'Issue': f'Over-permissive policy: {worst[1]}',
                 'Recommendation': "Restrict this policy: replace Action:*/Resource:* with the specific actions and resource ARNs the workload needs (least privilege)."
@@ -278,13 +351,20 @@ def analyze_iam_policies(endpoint_url=None):
     return risky_policies
 
 def analyze_vpc_configuration(region, endpoint_url=None):
-    """Report non-default VPCs with an internet-gateway default route, as INFO."""
+    """
+    A public route (igw-route 0.0.0.0/0) is the DEFINITION of a public subnet —
+    every default VPC has one, and it is required for any internet-facing
+    workload. On its own it is NOT a vulnerability (the audit found 16 of these,
+    all noise). We therefore SUPPRESS the default-VPC public-route findings and
+    only surface a NON-default VPC whose route table sends all traffic to an IGW
+    as INFO (informational visibility, never a flagged vuln).
+    """
     ec2 = _boto3_client('ec2', endpoint_url=endpoint_url, region_name=region)
     vpcs = ec2.describe_vpcs()['Vpcs']
     findings = []
 
     for vpc in vpcs:
-        # Every default VPC ships an IGW public route, so it carries no signal.
+        # Default VPCs ALWAYS have an igw public route — pure AWS default, drop it.
         if vpc.get('IsDefault'):
             continue
         route_tables = ec2.describe_route_tables(
@@ -363,7 +443,7 @@ def analyze_ecs_clusters(region, endpoint_url=None):
                     'ClusterArn': cluster_arn,
                     'TaskArn': task_arn,
                     'Issue': 'Task using host network mode',
-                    'Recommendation': 'Host network mode gives the task direct access to the host network namespace (host loopback, host-bound ports), bypassing the per-task elastic network interface and security group that awsvpc mode provides. Switch to awsvpc mode so this task gets its own isolated network interface.'
+                    'Recommendation': 'Use awsvpc network mode for better security isolation between containers.'
                 })
 
     return vulnerable_clusters
@@ -385,7 +465,7 @@ def analyze_elastic_beanstalk(region, endpoint_url=None):
                     'EnvironmentName': env['EnvironmentName'],
                     'ApplicationName': env['ApplicationName'],
                     'Issue': 'No Security Group Specified',
-                    'Recommendation': 'With no security group attached, this environment falls back to whatever AWS assigns by default (typically the VPC default security group), not one scoped to this application\'s actual ports. Attach a security group that allows only the ports this environment actually needs.'
+                    'Recommendation': 'Specify a security group for better network security control.'
                 })
             elif setting['OptionName'] == 'SSLCertificateId' and setting['Value'] == '':
                 vulnerable_environments.append({
@@ -410,15 +490,15 @@ def analyze_api_gateway(region, endpoint_url=None):
                     'ApiName': api['name'],
                     'StageName': stage['stageName'],
                     'Issue': 'Data Tracing Disabled',
-                    'Recommendation': 'Without X-Ray tracing, a misbehaving or compromised backend integration leaves no per-request trace during an incident - there is no way to distinguish normal latency from a request that reached an unexpected downstream resource.'
+                    'Recommendation': 'Enable data tracing for better monitoring and debugging capabilities.'
                 })
-
+            
             if not stage.get('clientCertificateId'):
                 vulnerable_apis.append({
                     'ApiName': api['name'],
                     'StageName': stage['stageName'],
                     'Issue': 'No Client-Side SSL Certificate',
-                    'Recommendation': 'Without a client-side certificate, the backend integration cannot cryptographically verify a request actually came through this API Gateway stage, rather than a direct call to the backend that bypasses Gateway-level throttling and auth.'
+                    'Recommendation': 'Configure a client-side SSL certificate for enhanced security.'
                 })
 
     return vulnerable_apis
@@ -441,7 +521,7 @@ def analyze_dynamodb(region, endpoint_url=None):
             vulnerable_tables.append({
                 'TableName': table_name,
                 'Issue': 'DynamoDB Streams Not Enabled',
-                'Recommendation': 'Without Streams enabled, there is no change-data-capture record of item-level writes - an unauthorized modification or delete leaves no trail to reconstruct after the fact.'
+                'Recommendation': 'Consider enabling DynamoDB Streams for better auditing and event-driven architectures.'
             })
 
     return vulnerable_tables
@@ -452,11 +532,14 @@ def analyze_eks(region, endpoint_url=None):
 
     for cluster_name in clusters:
         cluster = eks.describe_cluster(name=cluster_name)['cluster']
-        if not cluster['resourcesVpcConfig'].get('endpointPublicAccess'):
+        # EKS.1 fails when the endpoint is publicly accessible. The check used
+        # to fire on the opposite (public access OFF, the compliant setup).
+        if cluster['resourcesVpcConfig'].get('endpointPublicAccess'):
             vulnerable_clusters.append({
                 'ClusterName': cluster_name,
-                'Issue': 'No public access endpoint',
-                'Recommendation': 'Consider enabling public access endpoint with restricted access for better management.'
+                'Issue': 'Cluster endpoint is publicly accessible',
+                'Recommendation': ('Disable public access to the cluster endpoint, or restrict '
+                                   'it to known CIDR ranges and use the private endpoint.')
             })
         if not cluster.get('encryptionConfig'):
             vulnerable_clusters.append({
@@ -589,6 +672,7 @@ def check_cis_compliance(endpoint_url=None):
     iam = _boto3_client('iam', endpoint_url=endpoint_url)
     compliance_issues = []
 
+    # Check 1.1: Avoid the use of the "root" account
     root_user = iam.get_account_summary()
     if root_user['SummaryMap']['AccountAccessKeysPresent'] > 0:
         compliance_issues.append({
@@ -600,6 +684,7 @@ def check_cis_compliance(endpoint_url=None):
                                'unrevocable account-wide access and cannot be scoped.')
         })
 
+    # Check 1.2: Ensure multi-factor authentication (MFA) is enabled for all IAM users that have a console password
     users = iam.list_users()['Users']
     for user in users:
         try:
@@ -617,9 +702,10 @@ def check_cis_compliance(endpoint_url=None):
             if e.response['Error']['Code'] != 'NoSuchEntity':
                 logger.error(f"Error checking MFA for user {user['UserName']}: {str(e)}")
 
+    # Check 1.3: Ensure credentials unused for 90 days or greater are disabled
     try:
         credential_report = None
-        for _ in range(5):
+        for _ in range(5):  # Try up to 5 times
             try:
                 credential_report = iam.get_credential_report()['Content']
                 break
@@ -627,7 +713,7 @@ def check_cis_compliance(endpoint_url=None):
                 if e.response['Error']['Code'] == 'ReportNotPresent':
                     logger.error("Credential report not found. Generating new report...")
                     iam.generate_credential_report()
-                    time.sleep(10)
+                    time.sleep(10)  # Wait for 10 seconds before trying again
                 else:
                     raise
 
@@ -636,13 +722,14 @@ def check_cis_compliance(endpoint_url=None):
             return compliance_issues
 
         credential_report = credential_report.decode('utf-8').split('\n')
-        for row in credential_report[1:]:
+        for row in credential_report[1:]:  # Skip header
             user_data = row.split(',')
-            if len(user_data) < 5:
+            if len(user_data) < 5:  # Ensure we have enough data
                 continue
             if user_data[3] == 'true' and user_data[4] != 'N/A' and user_data[4] != 'no_information':
-                # Credential-report timestamps come either Z-suffixed or with
-                # an explicit +00:00 offset; normalize both.
+                # AWS credential-report timestamps come Z-suffixed
+                # (2026-06-15T16:54:14+00:00 OR ...Z). Normalize both so the
+                # CIS 1.3 unused-creds check doesn't silently abort the loop.
                 _ts = user_data[4].strip().replace('Z', '+00:00')
                 try:
                     last_used = datetime.fromisoformat(_ts)
@@ -670,7 +757,7 @@ def analyze_kms(region, endpoint_url=None):
 
     for key in keys:
         key_info = kms.describe_key(KeyId=key['KeyId'])['KeyMetadata']
-        if not key_info.get('KeyManager') == 'AWS':
+        if not key_info.get('KeyManager') == 'AWS':  # Only check customer-managed keys
             if not key_info.get('Enabled'):
                 vulnerable_keys.append({
                     'KeyId': key['KeyId'],
@@ -681,7 +768,7 @@ def analyze_kms(region, endpoint_url=None):
                 vulnerable_keys.append({
                     'KeyId': key['KeyId'],
                     'Issue': 'Key rotation not enabled',
-                    'Recommendation': 'Without rotation, the same key material stays in use indefinitely - anyone who obtains the key (via a leaked grant, an over-permissioned IAM policy, or a past compromise) retains decrypt capability forever. Automatic rotation limits how much data any single key version protects.'
+                    'Recommendation': 'Enable automatic key rotation for enhanced security.'
                 })
 
     return vulnerable_keys
@@ -765,37 +852,51 @@ def analyze_cloudwatch(region, endpoint_url=None):
     return issues
 
 def _compute_passed_checks(report_lists):
-    """Build the list of account-level controls that produced no finding."""
+    """
+    Build the list of controls that PASSED, so the report shows "X passed / Y
+    failed" instead of a broken-looking "0 passed". A control passes when its
+    analyzer ran and produced no finding for that control.
+
+    `report_lists` is the dict of category -> finding list. We derive passes
+    for the account-level controls where 'no finding' is a meaningful PASS
+    (not just 'nothing of this resource type exists').
+    """
     passed = []
 
     def _passed(control, detail):
         passed.append({'control': control, 'status': 'pass', 'detail': detail})
 
+    # CIS root-account-access-keys: pass if no CIS 1.1 finding present.
     cis = report_lists.get('cis_compliance') or []
     if not any(c.get('CheckId') == 'CIS 1.1' for c in cis if isinstance(c, dict)):
-        _passed('CIS 1.1 - root account has no access keys',
+        _passed('CIS 1.1 — root account has no access keys',
                 'No access keys on the root account.')
     if not any(c.get('CheckId') == 'CIS 1.2' for c in cis if isinstance(c, dict)):
-        _passed('CIS 1.2 - all console users have MFA',
+        _passed('CIS 1.2 — all console users have MFA',
                 'No console user is missing MFA.')
 
+    # CloudTrail enabled: pass if cloudtrail list has no "No CloudTrail" finding.
     ct = report_lists.get('cloudtrail') or []
     if not any('No CloudTrail' in str(c.get('Issue', '')) for c in ct if isinstance(c, dict)):
         _passed('CloudTrail enabled', 'At least one CloudTrail trail is configured.')
 
+    # AWS Config enabled.
     cfg = report_lists.get('config') or []
     if not any('not enabled' in str(c.get('Issue', '')).lower() for c in cfg if isinstance(c, dict)):
         _passed('AWS Config enabled', 'A configuration recorder is present.')
 
+    # No public S3 buckets.
     if not (report_lists.get('s3_buckets') or []):
         _passed('No public S3 buckets', 'No bucket grants public AllUsers access.')
 
+    # No admin/db ports open to the world (only INFO web-port findings allowed).
     sgs = report_lists.get('ec2_security_groups') or []
     if not any(isinstance(s, dict) and s.get('severity') in (SEV_CRITICAL, SEV_HIGH)
                for s in sgs):
         _passed('No sensitive ports open to 0.0.0.0/0',
                 'No SSH/RDP/DB/cache port exposed to the internet.')
 
+    # No publicly-accessible RDS.
     rds = report_lists.get('rds_instances') or []
     if not any('Publicly' in str(r.get('Issue', '')) for r in rds if isinstance(r, dict)):
         _passed('No publicly-accessible RDS instances',
@@ -865,64 +966,74 @@ def generate_report(vulnerable_groups, vulnerable_buckets, users_without_mfa, ri
             'config_issues': len(config_issues),
             'cloudtrail_issues': len(cloudtrail_issues),
             'cloudwatch_issues': len(cloudwatch_issues)
-        }
+        },
+        # NOTE: renamed from 'general_recommendations' -> '_general_recommendations'.
+        # The route layer's get_all_findings() extends from every list value in
+        # the report, so these 18 generic boilerplate strings were being counted
+        # as 18 "findings" (and matched 'critical'/'high' substrings, inflating
+        # severity counts). The leading underscore + skip-list in the renderer
+        # keeps them as an appendix WITHOUT counting them as findings.
+        '_general_recommendations': [
+            "Regularly review and update your security configurations.",
+            "Implement the principle of least privilege for all resources and users.",
+            "Enable AWS CloudTrail in all regions to maintain an audit log of actions taken in your AWS account.",
+            "Use AWS Config to continuously monitor and record your AWS resource configurations.",
+            "Implement a regular schedule for security assessments and penetration testing.",
+            "Ensure all sensitive data is encrypted at rest and in transit.",
+            "Regularly review and rotate access keys and credentials.",
+            "Implement robust monitoring and alerting mechanisms across all services.",
+            "Use AWS Security Hub to get a comprehensive view of your security posture.",
+            "Regularly review and act on GuardDuty findings.",
+            "Implement and maintain WAF rules to protect against common web exploits.",
+            "Use VPC endpoints and PrivateLink to minimize exposure of services to the public internet.",
+            "Implement a comprehensive key management strategy using AWS KMS.",
+            "Regularly audit and review all IAM users, roles, and permissions.",
+            "Use AWS Organizations for centralized management of multiple accounts if applicable.",
+            "Ensure compliance with CIS AWS Foundations Benchmark.",
+            "Regularly review CloudWatch logs and alarms for security-related events.",
+            "Implement and maintain proper log retention policies."
+        ]
     }
 
-    category_default_sev = {
-        'ec2_security_groups': SEV_MEDIUM,
-        's3_buckets': SEV_CRITICAL,
-        'iam_users': SEV_MEDIUM,
-        'iam_policies': SEV_MEDIUM,
-        'vpc_configuration': SEV_INFO,
-        'rds_instances': SEV_MEDIUM,
-        'lambda_functions': SEV_LOW,
-        'ecs_clusters': SEV_LOW,
-        'elastic_beanstalk': SEV_LOW,
-        'api_gateway': SEV_LOW,
-        'dynamodb': SEV_LOW,
-        'cloudfront': SEV_LOW,
-        'guardduty': SEV_HIGH,
-        'waf': SEV_LOW,
-        'eks_clusters': SEV_MEDIUM,
-        'redshift_clusters': SEV_MEDIUM,
-        'secrets_manager': SEV_LOW,
-        'sqs_queues': SEV_HIGH,
-        'sns_topics': SEV_HIGH,
-        'glue_jobs': SEV_LOW,
-        'emr_clusters': SEV_LOW,
-        'cis_compliance': SEV_MEDIUM,
-        'kms_keys': SEV_MEDIUM,
-        'config': SEV_MEDIUM,
-        'cloudtrail': SEV_HIGH,
-        'cloudwatch': SEV_INFO,
-    }
+    # ------------------------------------------------------------------
+    # Severity from the ONE rule table (src/cloud/rule_severity, 2026-11-03):
+    # every finding gets the stable rule id of its check and the table's
+    # severity (the table follows AWS Security Hub FSBP / CIS; where no
+    # published control exists, the severity the emitter set is kept). An
+    # item no rule covers keeps the severity it has, none if it has none
+    # (undetermined, logged), never a per-category default.
+    # ------------------------------------------------------------------
+    _stamp_rule_severity((k, v) for k, v in report.items()
+                         if k not in ('summary', '_general_recommendations'))
     severity_counts = {SEV_CRITICAL: 0, SEV_HIGH: 0, SEV_MEDIUM: 0,
                        SEV_LOW: 0, SEV_INFO: 0}
-    for category, default_sev in category_default_sev.items():
-        items = report.get(category) or []
-        if not isinstance(items, list):
+    total = 0
+    for category, items in report.items():
+        if category in ('summary', '_general_recommendations') or not isinstance(items, list):
             continue
         for item in items:
             if not isinstance(item, dict):
                 continue
+            total += 1
             sev = str(item.get('severity', '')).lower()
-            if sev not in severity_counts:
-                sev = default_sev
-                item['severity'] = sev
-            severity_counts[sev] += 1
+            if sev in severity_counts:
+                severity_counts[sev] += 1
 
     report['severity_summary'] = severity_counts
-    report['total_findings'] = sum(severity_counts.values())
+    report['total_findings'] = total
 
+    # Fix #4: record controls that PASSED so the report shows "X passed / Y
+    # failed" instead of a broken-looking "0 passed".
     report['passed_checks'] = _compute_passed_checks(report)
 
     return report
 
 def analyze_waf(region, endpoint_url=None):
     waf_regional = _boto3_client('waf-regional', endpoint_url=endpoint_url, region_name=region)
-    waf_global = _boto3_client('waf', endpoint_url=endpoint_url, region_name='us-east-1')  # WAF global lives only in us-east-1
+    waf_global = _boto3_client('waf', endpoint_url=endpoint_url, region_name='us-east-1')  # WAF global est toujours dans us-east-1
     issues = []
 
+    # Analyse WAF régional
     try:
         regional_web_acls = waf_regional.list_web_acls()['WebACLs']
         for acl in regional_web_acls:
@@ -942,6 +1053,7 @@ def analyze_waf(region, endpoint_url=None):
         else:
             logger.error(f"Error accessing regional WAF in {region}: {str(e)}")
 
+    # Analyse WAF global (CloudFront)
     try:
         global_web_acls = waf_global.list_web_acls()['WebACLs']
         for acl in global_web_acls:
@@ -978,7 +1090,7 @@ def analyze_cloudfront(endpoint_url=None):
                 'DistributionId': dist['Id'],
                 'DomainName': dist['DomainName'],
                 'Issue': 'No Web ACL associated',
-                'Recommendation': 'With no Web ACL, this distribution has no layer-7 filtering in front of it - common exploit patterns (SQLi/XSS payloads, known bad IPs, rate-abuse) reach the origin unfiltered. Associate a WAF Web ACL to filter these before they hit the origin.'
+                'Recommendation': 'Associate a Web ACL with this distribution for enhanced security.'
             })
 
     return vulnerable_distributions
@@ -994,23 +1106,36 @@ def analyze_guardduty(region, endpoint_url=None):
             issues.append({
                 'DetectorId': detector_id,
                 'Issue': 'GuardDuty Disabled',
-                'Recommendation': 'With GuardDuty disabled, this region has no automated detection for compromised credentials, reconnaissance, or known-malicious IP/domain activity against this account - an active intrusion would go unnoticed until it surfaces some other way. Enable GuardDuty in this region.'
+                'Recommendation': 'Enable GuardDuty for enhanced threat detection.'
             })
         
-        findings = gd.list_findings(DetectorId=detector_id, FindingCriteria={'Criterion': {'severity': {'Gte': 7}}})
+        # GuardDuty severity levels: Critical 9.0-10.0, High 7.0-8.9
+        # (src/cloud/rule_severity): one finding per band, its own rule.
+        critical = gd.list_findings(DetectorId=detector_id,
+                                    FindingCriteria={'Criterion': {'severity': {'Gte': 9}}})
+        if critical['FindingIds']:
+            issues.append({
+                'DetectorId': detector_id,
+                'rule_id': 'aws.guardduty.critical_severity_findings',
+                'Issue': f"{len(critical['FindingIds'])} Critical Severity Findings",
+                'Recommendation': 'Investigate and address critical severity GuardDuty findings.'
+            })
+        findings = gd.list_findings(DetectorId=detector_id,
+                                    FindingCriteria={'Criterion': {'severity': {'Gte': 7, 'Lt': 9}}})
         if findings['FindingIds']:
             issues.append({
                 'DetectorId': detector_id,
+                'rule_id': 'aws.guardduty.high_severity_findings',
                 'Issue': f"{len(findings['FindingIds'])} High Severity Findings",
                 'Recommendation': 'Investigate and address high severity GuardDuty findings.'
             })
 
     return issues
 def _verify_credentials(endpoint_url=None):
-    """Raise immediately if boto3 cannot authenticate at all."""
+    """The account id of the caller; raises immediately if boto3 cannot authenticate."""
     sts = _boto3_client('sts', endpoint_url=endpoint_url, region_name='us-east-1')
     try:
-        sts.get_caller_identity()
+        return sts.get_caller_identity().get("Account") or ""
     except NoCredentialsError as e:
         raise RuntimeError(
             "No AWS credentials found (checked ~/.aws/credentials, env vars, "
@@ -1029,149 +1154,128 @@ def _verify_credentials(endpoint_url=None):
         ) from e
 
 
-def analyze_aws_security(credentials, region=None, endpoint_url=None):
-    """Run every posture check and return the report; credentials={} or None uses boto3's ambient chain."""
-    original_env = {}
-    env_keys = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']
-    for key in env_keys:
-        original_env[key] = os.environ.get(key)
+def analyze_aws_security(credentials=None, region=None, endpoint_url=None):
+    """Run every posture check with the standard AWS credential chain and return the report."""
+    if credentials:
+        raise ValueError("the CLI reads AWS credentials from the standard AWS chain only; "
+                         "keys are never passed in")
+    logger.info("Starting AWS Security Analysis (programmatic)...")
 
-    has_explicit_creds = bool(credentials and credentials.get('aws_access_key_id'))
+    # Deliberately not wrapped: an auth failure must propagate instead of
+    # letting the per-check handlers below report an empty, clean scan.
+    account_id = _verify_credentials(endpoint_url=endpoint_url)
+
+    # Analyzers that couldn't finish (AccessDenied, throttling), so a blind scan
+    # shows up as a coverage gap instead of a clean pass.
+    coverage_errors = []
+
+    def _collect(dest, label, fn):
+        try:
+            dest.extend(fn())
+        except Exception as e:
+            coverage_errors.append(f"{label}: {e}")
+            logger.error(f"Error analyzing {label}: {e}")
+
+    all_vulnerable_groups = []
+    all_vulnerable_vpcs = []
+    all_vulnerable_rds = []
+    all_vulnerable_lambdas = []
+    all_vulnerable_ecs = []
+    all_vulnerable_eb = []
+    all_vulnerable_apis = []
+    all_vulnerable_dynamodb = []
+    all_gd_issues = []
+    all_vulnerable_eks = []
+    all_vulnerable_redshift = []
+    all_vulnerable_secrets = []
+    all_vulnerable_sqs = []
+    all_vulnerable_sns = []
+    all_vulnerable_glue_jobs = []
+    all_vulnerable_emr_clusters = []
+    all_vulnerable_kms_keys = []
+    all_config_issues = []
+    all_cloudtrail_issues = []
+    all_cloudwatch_issues = []
+    all_waf_issues = []
 
     try:
-        # Only set env vars when credentials are passed explicitly: writing
-        # empty strings would clobber an ambient aws configure credential.
-        if has_explicit_creds:
-            os.environ['AWS_ACCESS_KEY_ID'] = credentials.get('aws_access_key_id', '')
-            os.environ['AWS_SECRET_ACCESS_KEY'] = credentials.get('aws_secret_access_key', '')
-            if 'aws_session_token' in credentials:
-                os.environ['AWS_SESSION_TOKEN'] = credentials['aws_session_token']
+        if region:
+            regions = [region]
+        else:
+            regions = get_all_regions(endpoint_url=endpoint_url)
+        logger.info(f"Scanning {len(regions)} region(s)")
+    except Exception as e:
+        logger.error(f"Error getting regions: {str(e)}")
+        coverage_errors.append(f"region enumeration (ec2:DescribeRegions): {e}")
+        regions = []
 
-        logger.info("Starting AWS Security Analysis (programmatic)...")
+    # Each analyzer is isolated: one AccessDenied must not skip its siblings for the region.
+    for reg in regions:
+        logger.info(f"Analyzing region: {reg}")
+        _collect(all_vulnerable_groups, f"{reg}/ec2_security_groups", lambda r=reg: analyze_security_groups(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_vpcs, f"{reg}/vpc_configuration", lambda r=reg: analyze_vpc_configuration(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_rds, f"{reg}/rds_instances", lambda r=reg: analyze_rds_instances(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_lambdas, f"{reg}/lambda_functions", lambda r=reg: analyze_lambda_functions(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_ecs, f"{reg}/ecs_clusters", lambda r=reg: analyze_ecs_clusters(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_eb, f"{reg}/elastic_beanstalk", lambda r=reg: analyze_elastic_beanstalk(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_apis, f"{reg}/api_gateway", lambda r=reg: analyze_api_gateway(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_dynamodb, f"{reg}/dynamodb", lambda r=reg: analyze_dynamodb(r, endpoint_url=endpoint_url))
+        _collect(all_gd_issues, f"{reg}/guardduty", lambda r=reg: analyze_guardduty(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_eks, f"{reg}/eks_clusters", lambda r=reg: analyze_eks(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_redshift, f"{reg}/redshift_clusters", lambda r=reg: analyze_redshift(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_secrets, f"{reg}/secrets_manager", lambda r=reg: analyze_secrets_manager(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_sqs, f"{reg}/sqs_queues", lambda r=reg: analyze_sqs(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_sns, f"{reg}/sns_topics", lambda r=reg: analyze_sns(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_glue_jobs, f"{reg}/glue_jobs", lambda r=reg: analyze_glue(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_emr_clusters, f"{reg}/emr_clusters", lambda r=reg: analyze_emr(r, endpoint_url=endpoint_url))
+        _collect(all_vulnerable_kms_keys, f"{reg}/kms_keys", lambda r=reg: analyze_kms(r, endpoint_url=endpoint_url))
+        _collect(all_waf_issues, f"{reg}/waf", lambda r=reg: analyze_waf(r, endpoint_url=endpoint_url))
 
-        # Deliberately not wrapped: an auth failure must propagate instead of
-        # letting the per-check handlers below report an empty, clean scan.
-        _verify_credentials(endpoint_url=endpoint_url)
+    # Account-scoped checks: run once against the primary region only.
+    primary_region = regions[0] if regions else (region or 'us-east-1')
+    _collect(all_cloudtrail_issues, "cloudtrail", lambda: analyze_cloudtrail(primary_region, endpoint_url=endpoint_url))
+    _collect(all_config_issues, "config", lambda: analyze_config(primary_region, endpoint_url=endpoint_url))
+    _collect(all_cloudwatch_issues, "cloudwatch", lambda: analyze_cloudwatch(primary_region, endpoint_url=endpoint_url))
 
-        # Analyzers that couldn't finish (AccessDenied, throttling), so a blind scan
-        # shows up as a coverage gap instead of a clean pass.
-        coverage_errors = []
+    vulnerable_buckets = []
+    logger.info("Analyzing S3 Buckets...")
+    _collect(vulnerable_buckets, "s3_buckets", lambda: analyze_s3_buckets(endpoint_url=endpoint_url))
 
-        def _collect(dest, label, fn):
-            try:
-                dest.extend(fn())
-            except Exception as e:
-                coverage_errors.append(f"{label}: {e}")
-                logger.error(f"Error analyzing {label}: {e}")
+    users_without_mfa = []
+    logger.info("Analyzing IAM Users for MFA...")
+    _collect(users_without_mfa, "iam_users", lambda: analyze_iam_users(endpoint_url=endpoint_url))
 
-        all_vulnerable_groups = []
-        all_vulnerable_vpcs = []
-        all_vulnerable_rds = []
-        all_vulnerable_lambdas = []
-        all_vulnerable_ecs = []
-        all_vulnerable_eb = []
-        all_vulnerable_apis = []
-        all_vulnerable_dynamodb = []
-        all_gd_issues = []
-        all_vulnerable_eks = []
-        all_vulnerable_redshift = []
-        all_vulnerable_secrets = []
-        all_vulnerable_sqs = []
-        all_vulnerable_sns = []
-        all_vulnerable_glue_jobs = []
-        all_vulnerable_emr_clusters = []
-        all_vulnerable_kms_keys = []
-        all_config_issues = []
-        all_cloudtrail_issues = []
-        all_cloudwatch_issues = []
-        all_waf_issues = []
+    risky_policies = []
+    logger.info("Analyzing IAM Policies...")
+    _collect(risky_policies, "iam_policies", lambda: analyze_iam_policies(endpoint_url=endpoint_url))
 
-        try:
-            if region:
-                regions = [region]
-            else:
-                regions = get_all_regions(endpoint_url=endpoint_url)
-            logger.info(f"Scanning {len(regions)} region(s)")
-        except Exception as e:
-            logger.error(f"Error getting regions: {str(e)}")
-            coverage_errors.append(f"region enumeration (ec2:DescribeRegions): {e}")
-            regions = []
+    vulnerable_cf = []
+    logger.info("Analyzing CloudFront Distributions...")
+    _collect(vulnerable_cf, "cloudfront", lambda: analyze_cloudfront(endpoint_url=endpoint_url))
 
-        # Each analyzer is isolated: one AccessDenied must not skip its siblings for the region.
-        for reg in regions:
-            logger.info(f"Analyzing region: {reg}")
-            _collect(all_vulnerable_groups, f"{reg}/ec2_security_groups", lambda r=reg: analyze_security_groups(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_vpcs, f"{reg}/vpc_configuration", lambda r=reg: analyze_vpc_configuration(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_rds, f"{reg}/rds_instances", lambda r=reg: analyze_rds_instances(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_lambdas, f"{reg}/lambda_functions", lambda r=reg: analyze_lambda_functions(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_ecs, f"{reg}/ecs_clusters", lambda r=reg: analyze_ecs_clusters(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_eb, f"{reg}/elastic_beanstalk", lambda r=reg: analyze_elastic_beanstalk(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_apis, f"{reg}/api_gateway", lambda r=reg: analyze_api_gateway(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_dynamodb, f"{reg}/dynamodb", lambda r=reg: analyze_dynamodb(r, endpoint_url=endpoint_url))
-            _collect(all_gd_issues, f"{reg}/guardduty", lambda r=reg: analyze_guardduty(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_eks, f"{reg}/eks_clusters", lambda r=reg: analyze_eks(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_redshift, f"{reg}/redshift_clusters", lambda r=reg: analyze_redshift(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_secrets, f"{reg}/secrets_manager", lambda r=reg: analyze_secrets_manager(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_sqs, f"{reg}/sqs_queues", lambda r=reg: analyze_sqs(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_sns, f"{reg}/sns_topics", lambda r=reg: analyze_sns(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_glue_jobs, f"{reg}/glue_jobs", lambda r=reg: analyze_glue(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_emr_clusters, f"{reg}/emr_clusters", lambda r=reg: analyze_emr(r, endpoint_url=endpoint_url))
-            _collect(all_vulnerable_kms_keys, f"{reg}/kms_keys", lambda r=reg: analyze_kms(r, endpoint_url=endpoint_url))
-            _collect(all_waf_issues, f"{reg}/waf", lambda r=reg: analyze_waf(r, endpoint_url=endpoint_url))
+    compliance_issues = []
+    logger.info("Checking CIS Compliance...")
+    _collect(compliance_issues, "cis_compliance", lambda: check_cis_compliance(endpoint_url=endpoint_url))
 
-        # Account-scoped checks: run once against the primary region only.
-        primary_region = regions[0] if regions else (region or 'us-east-1')
-        _collect(all_cloudtrail_issues, "cloudtrail", lambda: analyze_cloudtrail(primary_region, endpoint_url=endpoint_url))
-        _collect(all_config_issues, "config", lambda: analyze_config(primary_region, endpoint_url=endpoint_url))
-        _collect(all_cloudwatch_issues, "cloudwatch", lambda: analyze_cloudwatch(primary_region, endpoint_url=endpoint_url))
+    logger.info("Generating report")
+    report = generate_report(
+        all_vulnerable_groups, vulnerable_buckets, users_without_mfa, risky_policies,
+        all_vulnerable_vpcs, all_vulnerable_rds, all_vulnerable_lambdas, all_vulnerable_ecs,
+        all_vulnerable_eb, all_vulnerable_apis, all_vulnerable_dynamodb, vulnerable_cf,
+        all_gd_issues, all_waf_issues, all_vulnerable_eks, all_vulnerable_redshift,
+        all_vulnerable_secrets, all_vulnerable_sqs, all_vulnerable_sns,
+        all_vulnerable_glue_jobs, all_vulnerable_emr_clusters, compliance_issues,
+        all_vulnerable_kms_keys, all_config_issues, all_cloudtrail_issues, all_cloudwatch_issues
+    )
 
-        vulnerable_buckets = []
-        logger.info("Analyzing S3 Buckets...")
-        _collect(vulnerable_buckets, "s3_buckets", lambda: analyze_s3_buckets(endpoint_url=endpoint_url))
+    # Coverage: a scan that could not read some services/regions is NOT a clean 0.
+    report["account_id"] = account_id
+    report["coverage"] = {
+        "status": "partial" if coverage_errors else "complete",
+        "regions_scanned": len(regions),
+        "checks_skipped": len(coverage_errors),
+        "errors": coverage_errors,
+    }
 
-        users_without_mfa = []
-        logger.info("Analyzing IAM Users for MFA...")
-        _collect(users_without_mfa, "iam_users", lambda: analyze_iam_users(endpoint_url=endpoint_url))
-
-        risky_policies = []
-        logger.info("Analyzing IAM Policies...")
-        _collect(risky_policies, "iam_policies", lambda: analyze_iam_policies(endpoint_url=endpoint_url))
-
-        vulnerable_cf = []
-        logger.info("Analyzing CloudFront Distributions...")
-        _collect(vulnerable_cf, "cloudfront", lambda: analyze_cloudfront(endpoint_url=endpoint_url))
-
-        compliance_issues = []
-        logger.info("Checking CIS Compliance...")
-        _collect(compliance_issues, "cis_compliance", lambda: check_cis_compliance(endpoint_url=endpoint_url))
-
-        logger.info("Generating report")
-        report = generate_report(
-            all_vulnerable_groups, vulnerable_buckets, users_without_mfa, risky_policies,
-            all_vulnerable_vpcs, all_vulnerable_rds, all_vulnerable_lambdas, all_vulnerable_ecs,
-            all_vulnerable_eb, all_vulnerable_apis, all_vulnerable_dynamodb, vulnerable_cf,
-            all_gd_issues, all_waf_issues, all_vulnerable_eks, all_vulnerable_redshift,
-            all_vulnerable_secrets, all_vulnerable_sqs, all_vulnerable_sns,
-            all_vulnerable_glue_jobs, all_vulnerable_emr_clusters, compliance_issues,
-            all_vulnerable_kms_keys, all_config_issues, all_cloudtrail_issues, all_cloudwatch_issues
-        )
-
-        # Coverage: a scan that could not read some services/regions is NOT a clean 0.
-        report["coverage"] = {
-            "status": "partial" if coverage_errors else "complete",
-            "regions_scanned": len(regions),
-            "checks_skipped": len(coverage_errors),
-            "errors": coverage_errors,
-        }
-
-        logger.info("AWS security analysis complete")
-        return report
-
-    finally:
-        for key in env_keys:
-            if original_env[key] is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = original_env[key]
-
-
+    logger.info("AWS security analysis complete")
+    return report

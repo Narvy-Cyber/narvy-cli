@@ -121,7 +121,7 @@ tested against the service they belong to.
 Three other commands work on targets you own, without an app file:
 `web-scan` (Nuclei scan of a live URL, passive unless `--active`),
 `host-audit` (over your SSH access, with Lynis as the hardening baseline) and
-`cloud-scan` (AWS posture, with your own credentials).
+`cloud-scan` (AWS or GCP posture, with your own credentials).
 
 ## What leaves your machine
 
@@ -166,7 +166,7 @@ Optional extras:
 
 ```bash
 pip install 'narvy-cli[ios-full]'  # full Obj-C introspection for iOS binary scans
-pip install 'narvy-cli[cloud]'     # boto3, needed for cloud-scan
+pip install 'narvy-cli[cloud]'     # boto3 + google-auth, needed for cloud-scan
 ```
 
 ### Windows
@@ -256,8 +256,12 @@ narvy web-scan https://example.com
 # Agentless host hardening audit over your own SSH access
 narvy host-audit example.com --user deploy
 
-# AWS account posture check using your own aws configure / env vars / IAM role
-narvy cloud-scan
+# AWS account posture check with the standard AWS credential chain
+# (profile, env vars, SSO, instance role); --upload sends the findings only
+narvy cloud-scan --profile prod --upload
+
+# GCP project posture check with Application Default Credentials
+narvy cloud-scan --provider gcp --project my-project
 
 # List recent scans on your Narvy account (requires `narvy login`)
 narvy scans
