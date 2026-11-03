@@ -14,11 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `cloud-scan --upload`: sends the findings and the scan metadata (provider,
   account or project id, coverage status and count) to your Narvy dashboard.
   Never a credential: the body is built from an allow-list of finding
-  fields, and an upload that would carry a credential value from the
-  environment, an AWS access key id or a private key is refused.
+  fields, and an upload is refused when any of its text carries a secret of
+  the credentials the scan used (AWS key id, secret and session token from
+  the boto3 chain, profile and SSO included; Google access and refresh
+  token), a credential environment variable value, or a credential shape
+  (AWS key id, private key, `ya29.`, `GOCSPX-`, `1//`).
 - `cloud-scan --provider gcp`: GCP project posture checks with Application
-  Default Credentials (`--project`, else the gcloud project). APIs that
-  answer permission denied are reported as PARTIAL coverage.
+  Default Credentials (`--project`, else the gcloud project). A check whose
+  API answers permission denied, 429, 404, 5xx or nothing is reported as
+  PARTIAL coverage, never as clean.
 - `cloud-scan --profile`: AWS named profile (SSO and assume-role profiles).
 
 ### Changed

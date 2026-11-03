@@ -2985,9 +2985,11 @@ def _cloud_coverage(provider, report):
     """{status, checks_skipped, errors}: a check that could not run is a gap, never a pass."""
     if provider == "gcp":
         denied = list(report.get("denied_apis") or report.get("permission_warnings") or [])
-        return {"status": "partial" if denied else "complete",
-                "checks_skipped": len(denied),
-                "errors": [f"permission denied: {u}" for u in denied]}
+        failed = list(report.get("failed_apis") or [])
+        errors = [f"permission denied: {u}" for u in denied] + [f"no answer: {u}" for u in failed]
+        return {"status": "partial" if errors else "complete",
+                "checks_skipped": len(errors),
+                "errors": errors}
     cov = report.get("coverage") or {}
     return {"status": cov.get("status") or "complete",
             "checks_skipped": int(cov.get("checks_skipped") or 0),
@@ -3164,7 +3166,8 @@ def cmd_cloud_scan(args):
         try:
             body = cloud_upload.build_body(provider, account_id, findings, coverage=coverage,
                                            scan_seconds=duration,
-                                           checks_passed=_cloud_passed_count(report))
+                                           checks_passed=_cloud_passed_count(report),
+                                           secrets=cloud_upload.provider_secrets(provider))
         except cloud_upload.CredentialInPayload as e:
             console.print(f"[bold red]Upload refused: {e}.[/bold red]")
             raise SystemExit(EXIT_ERROR)

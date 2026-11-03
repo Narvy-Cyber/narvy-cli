@@ -22,6 +22,10 @@ _PERMISSION_DENIED_THRESHOLD = 0.5
 
 #Fonctionne sur un projet et sur la base des creds obtenus à modifier dans credentials_path
 
+# The credentials object of the last scan, read by narvy.cloud.upload to make
+# sure none of its secrets reaches an upload. Never written to a report.
+last_credentials = None
+
 _SCOPES = ["https://www.googleapis.com/auth/cloud-platform.read-only"]
 
 
@@ -50,22 +54,35 @@ def make_request(url, credentials, _scan_ctx=None):
         _scan_ctx['total_calls'] = _scan_ctx.get('total_calls', 0) + 1
 
     headers = {"Authorization": f"Bearer {credentials.token}"}
-    response = requests.get(url, headers=headers, timeout=30)
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+    except requests.exceptions.RequestException as e:
+        # No answer: those resources were not assessed (a gap, never clean).
+        logger.warning(f"Error accessing {url}: {type(e).__name__}")
+        _gap(_scan_ctx, 'failed_apis', f"{url} ({type(e).__name__})")
+        return None
     if response.status_code == 200:
         return response.json()
 
-    # 401 / 403 = permission denied or auth failure — track separately so we
-    # can surface an "incomplete scan" warning instead of a silent clean result.
+    # 401 / 403 = permission denied or auth failure: tracked apart so the
+    # scan says "incomplete" instead of a silent clean result.
     if response.status_code in (401, 403):
         logger.warning(f"Permission denied accessing {url}: HTTP {response.status_code}")
-        if _scan_ctx is not None:
-            _scan_ctx.setdefault('denied_apis', [])
-            _scan_ctx['denied_apis'].append(url)
+        _gap(_scan_ctx, 'denied_apis', url)
     else:
-        logger.warning(f"Error accessing {url}: HTTP {response.status_code} {response.text[:200]}")
+        # 429 (quota), 404 (API or resource not found), 5xx and any other
+        # status: the check did not run, so it is a coverage gap too.
+        logger.warning(f"Error accessing {url}: HTTP {response.status_code}")
+        _gap(_scan_ctx, 'failed_apis', f"{url} (HTTP {response.status_code})")
 
     return None
-    
+
+
+def _gap(ctx, key, entry):
+    if ctx is not None:
+        ctx.setdefault(key, []).append(entry)
+
+
 def analyze_iam_policies(credentials, project_id, _scan_ctx=None):
     url = f"https://iam.googleapis.com/v1/projects/{project_id}/roles"
     data = make_request(url, credentials, _scan_ctx=_scan_ctx)
@@ -377,7 +394,9 @@ def analyze_gcp_security(project_id=None):
     Auth errors propagate. A report may carry 'scan_incomplete: True' and
     'denied_apis' when the identity lacks permissions: never a clean result.
     """
+    global last_credentials
     credentials, adc_project = get_credentials()
+    last_credentials = credentials
     project_id = project_id or adc_project
     if not project_id:
         raise ValueError("no GCP project: pass --project or set one with "
@@ -385,7 +404,7 @@ def analyze_gcp_security(project_id=None):
 
     # Shared scan context: tracks total API calls and any permission-denied hits
     # so we can surface an "incomplete" warning instead of a silent clean result.
-    _scan_ctx = {'total_calls': 0, 'denied_apis': []}
+    _scan_ctx = {'total_calls': 0, 'denied_apis': [], 'failed_apis': []}
 
     all_vulnerabilities = {
         'iam_roles': analyze_iam_policies(credentials, project_id, _scan_ctx=_scan_ctx),
@@ -440,4 +459,7 @@ def analyze_gcp_security(project_id=None):
             f"Results may be missing coverage for: {', '.join(denied_apis)}"
         )
 
+    # Calls that got no usable answer (429 / 404 / 5xx / network): those
+    # checks did not run, the result is PARTIAL whatever their count.
+    report['failed_apis'] = list(_scan_ctx.get('failed_apis') or [])
     return report
