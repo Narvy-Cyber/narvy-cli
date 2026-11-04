@@ -7,6 +7,7 @@ never sends one anywhere.
 """
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, EndpointConnectionError
+import contextvars
 import json
 from datetime import datetime
 import time
@@ -16,6 +17,19 @@ import logging
 from .rule_severity import stamp_items as _stamp_rule_severity
 
 logger = logging.getLogger(__name__)
+
+# Checks that errored inside an analyzer which keeps going (one bucket, one
+# user, one WAF scope). analyze_aws_security reads them into coverage, so a
+# check that did not run is a gap, never a pass.
+_partial_errors = contextvars.ContextVar("narvy_aws_partial_errors", default=None)
+
+
+def _note_skip(label, err):
+    """Record that `label` could not be checked (coverage becomes partial)."""
+    logger.error(f"{label}: {err}")
+    sink = _partial_errors.get()
+    if sink is not None:
+        sink.append(f"{label}: {err}")
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -221,7 +235,7 @@ def analyze_s3_buckets(endpoint_url=None):
                     })
                     break
         except ClientError as e:
-            logger.error(f"Error checking ACL for bucket {bucket['Name']}: {str(e)}")
+            _note_skip(f"s3_buckets/{bucket['Name']} acl", e)
     
     return vulnerable_buckets
 
@@ -239,8 +253,9 @@ def _has_console_access(iam, user_name):
         if e.response['Error']['Code'] == 'NoSuchEntity':
             return False
         # On any other error, be conservative and treat as console user so we
-        # don't silently drop a real human; the MFA finding stays MEDIUM.
-        logger.error(f"login-profile check failed for {user_name}: {e}")
+        # don't silently drop a real human; the MFA finding stays MEDIUM. The
+        # check is still a gap: console access was not read.
+        _note_skip(f"iam_users/{user_name} login profile", e)
         return True
 
 
@@ -700,7 +715,7 @@ def check_cis_compliance(endpoint_url=None):
                 })
         except ClientError as e:
             if e.response['Error']['Code'] != 'NoSuchEntity':
-                logger.error(f"Error checking MFA for user {user['UserName']}: {str(e)}")
+                _note_skip(f"cis_compliance/CIS 1.2 {user['UserName']}", e)
 
     # Check 1.3: Ensure credentials unused for 90 days or greater are disabled
     try:
@@ -718,7 +733,8 @@ def check_cis_compliance(endpoint_url=None):
                     raise
 
         if credential_report is None:
-            logger.error("Failed to generate or retrieve credential report after multiple attempts.")
+            _note_skip("cis_compliance/CIS 1.3 credential report",
+                       "not generated after 5 attempts")
             return compliance_issues
 
         credential_report = credential_report.decode('utf-8').split('\n')
@@ -746,7 +762,7 @@ def check_cis_compliance(endpoint_url=None):
                     })
 
     except Exception as e:
-        logger.error(f"Error processing credential report: {str(e)}")
+        _note_skip("cis_compliance/CIS 1.3 credential report", e)
 
     return compliance_issues
 
@@ -1048,10 +1064,7 @@ def analyze_waf(region, endpoint_url=None):
                     'Recommendation': 'Add rules to the regional Web ACL to protect against common web exploits.'
                 })
     except ClientError as e:
-        if e.response['Error']['Code'] == 'AccessDeniedException':
-            logger.error(f"No access to WAF in region {region}. Skipping.")
-        else:
-            logger.error(f"Error accessing regional WAF in {region}: {str(e)}")
+        _note_skip(f"{region}/waf_regional", e)
 
     # Analyse WAF global (CloudFront)
     try:
@@ -1067,7 +1080,7 @@ def analyze_waf(region, endpoint_url=None):
                     'Recommendation': 'Add rules to the global Web ACL to protect against common web exploits.'
                 })
     except ClientError as e:
-        logger.error(f"Error accessing global WAF: {str(e)}")
+        _note_skip("waf_global", e)
 
     return issues
 
@@ -1168,6 +1181,32 @@ def analyze_aws_security(credentials=None, region=None, endpoint_url=None):
     # Analyzers that couldn't finish (AccessDenied, throttling), so a blind scan
     # shows up as a coverage gap instead of a clean pass.
     coverage_errors = []
+    partial_errors = []
+    partial_token = _partial_errors.set(partial_errors)
+    try:
+        report, regions = _run_aws_checks(region, endpoint_url, coverage_errors)
+    finally:
+        _partial_errors.reset(partial_token)
+    # The global WAF scope is read once per region: one gap, not N.
+    for err in partial_errors:
+        if err not in coverage_errors:
+            coverage_errors.append(err)
+
+    # Coverage: a scan that could not read some services/regions is NOT a clean 0.
+    report["account_id"] = account_id
+    report["coverage"] = {
+        "status": "partial" if coverage_errors else "complete",
+        "regions_scanned": len(regions),
+        "checks_skipped": len(coverage_errors),
+        "errors": coverage_errors,
+    }
+
+    logger.info("AWS security analysis complete")
+    return report
+
+
+def _run_aws_checks(region, endpoint_url, coverage_errors):
+    """(report, regions): every analyzer, each isolated; failures go to coverage_errors."""
 
     def _collect(dest, label, fn):
         try:
@@ -1268,14 +1307,4 @@ def analyze_aws_security(credentials=None, region=None, endpoint_url=None):
         all_vulnerable_kms_keys, all_config_issues, all_cloudtrail_issues, all_cloudwatch_issues
     )
 
-    # Coverage: a scan that could not read some services/regions is NOT a clean 0.
-    report["account_id"] = account_id
-    report["coverage"] = {
-        "status": "partial" if coverage_errors else "complete",
-        "regions_scanned": len(regions),
-        "checks_skipped": len(coverage_errors),
-        "errors": coverage_errors,
-    }
-
-    logger.info("AWS security analysis complete")
-    return report
+    return report, regions
