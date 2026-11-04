@@ -807,10 +807,18 @@ def _require_valid_token():
         console.print("[bold red]Not logged in.[/bold red] Run `narvy login` first, or set NARVY_TOKEN.")
         raise SystemExit(EXIT_ERROR)
     status, data = uploader.whoami(creds["token"])
-    if status in (401, 403):
+    if status == 401:
         source = "NARVY_TOKEN" if auth.token_from_env() else "The stored token"
-        console.print(f"[bold red]{source} was rejected by {uploader.server_host()} (HTTP {status}).[/bold red] "
+        console.print(f"[bold red]{source} was rejected by {uploader.server_host()} (HTTP 401).[/bold red] "
                       "Run `narvy login` with a current token (narvy.io > Profile > API Credentials).")
+        raise SystemExit(EXIT_ERROR)
+    if status == 403:
+        # The token is valid; the account cannot use the API (subscription, plan).
+        d = data if isinstance(data, dict) else {}
+        reason = d.get("message") or d.get("error") or "the account cannot upload with its current plan"
+        console.print(f"[bold red]Upload refused by {uploader.server_host()} (HTTP 403):[/bold red] "
+                      f"{rich_escape(str(reason))}")
+        _print_upgrade_hint(403, d)
         raise SystemExit(EXIT_ERROR)
     if not status:
         console.print(f"[bold red]{_upload_failed_label(status)}[/bold red] {(data or {}).get('error')}")
@@ -1646,8 +1654,10 @@ def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, packa
     app_name = os.path.basename(os.path.abspath(target_path))
     app_name = re.sub(r"\.(zip|apk|aab|ipa|xapk|apkm|apks)$", "", app_name, flags=re.IGNORECASE) or app_name
 
-    from narvy.repo_identity import git_identity
+    from narvy.repo_identity import git_identity, repo_name
     git_remote, git_branch = (None, None) if app else git_identity(target_path)
+    # A checkout root with a remote: the repo name, not the runner's clone dir.
+    app_name = repo_name(git_remote) or app_name
     tried = ([f"app {app}"] if app else
              (["git remote"] if git_remote else []) + [f'name "{app_name}"'])
 

@@ -10,6 +10,9 @@
   never printed with --upload.
 """
 import argparse
+import os
+import shutil
+import subprocess
 import io
 import zipfile
 
@@ -121,8 +124,26 @@ def test_upload_rejected_token_exits_4_before_the_scan(monkeypatch, tmp_path, st
         cli_main.cmd_scan(_scan_args(target, upload=True))
     assert e.value.code == cli_main.EXIT_ERROR == 4
     assert ran == [], "the scan ran before the token was checked"
-    if status:
-        assert f"HTTP {status}" in buf.getvalue() and "narvy login" in buf.getvalue()
+    out = buf.getvalue()
+    if status == 401:
+        assert "HTTP 401" in out and "rejected" in out and "narvy login" in out
+    if status == 403:
+        assert "HTTP 403" in out and "forbidden" in out and "rejected" not in out
+
+
+def test_403_subscription_shows_the_server_message_not_token_rejected(monkeypatch, tmp_path):
+    buf = _console(monkeypatch)
+    target, ran = _stub_scan(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli_main.auth, "load_credentials", lambda: {"token": "t"})
+    monkeypatch.setattr(cli_main.uploader, "whoami", lambda t: (403, {
+        "error": "Subscription expired",
+        "message": "Your subscription has expired. Please renew to continue using the API."}))
+    with pytest.raises(SystemExit) as e:
+        cli_main.cmd_scan(_scan_args(target, upload=True))
+    out = " ".join(buf.getvalue().split())
+    assert e.value.code == 4 and ran == []
+    assert "Your subscription has expired" in out and "rejected" not in out
+    assert "narvy.io/pricing" in out
 
 
 def test_upload_not_logged_in_exits_4_before_the_scan(monkeypatch, tmp_path):
@@ -203,3 +224,62 @@ def test_token_expansion_adds_upload_only_when_set(tmp_path):
     empty = subprocess.run([sh, "-c", cmd], env={"NARVY_TOKEN": "", "PATH": "/usr/bin:/bin"},
                            capture_output=True, text=True).stdout
     assert with_token == "narvy|scan|.|--upload|" and empty == "narvy|scan|.|"
+
+
+# --------------------------------------------------------------- CI clone dirs
+
+@pytest.mark.parametrize("clone_dir,remote,expected", [
+    ("opt/atlassian/pipelines/agent/build", "https://x-token-auth:SECRET@bitbucket.org/acme/payments-api.git",
+     "payments-api"),                                                    # Bitbucket
+    ("home/vsts/work/1/s", "https://acme@dev.azure.com/acme/shop/_git/shop-web", "shop-web"),  # Azure
+    ("home/circleci/project", "git@github.com:acme/mobile-app.git", "mobile-app"),            # CircleCI
+])
+def test_ci_clone_dir_uploads_under_the_repo_name(monkeypatch, tmp_path, clone_dir, remote, expected):
+    if not shutil.which("git"):
+        pytest.skip("git not installed")
+    _console(monkeypatch)
+    repo = tmp_path / clone_dir
+    repo.mkdir(parents=True)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", remote], check=True, env=env)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli_main.auth, "load_credentials", lambda: {"token": "t", "plan": "titan"})
+    sent = {}
+    monkeypatch.setattr(cli_main.uploader, "ingest_results",
+                        lambda token, **kw: sent.update(kw) or (201, {"scan_id": "s"}))
+    cli_main._submit_results_ingest([], "web-source", ".")
+    assert sent["app_name"] == expected
+    assert "SECRET" not in str(sent)
+
+
+def test_checkout_without_remote_keeps_the_directory_name(monkeypatch, tmp_path):
+    _console(monkeypatch)
+    repo = tmp_path / "shop-api"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli_main.auth, "load_credentials", lambda: {"token": "t"})
+    monkeypatch.setattr(repo_identity, "git_identity", lambda p: (None, "main"))
+    sent = {}
+    monkeypatch.setattr(cli_main.uploader, "ingest_results",
+                        lambda token, **kw: sent.update(kw) or (201, {"scan_id": "s"}))
+    cli_main._submit_results_ingest([], "web-source", ".")
+    assert sent["app_name"] == "shop-api"
+
+
+@pytest.mark.parametrize("remote,name", [
+    ("https://github.com/acme/api.git", "api"), ("https://github.com/acme/api/", "api"),
+    ("git@gitlab.com:group/sub/tool.git", "tool"), ("https://dev.azure.com/o/p/_git/web", "web"),
+    ("", None), (None, None),
+])
+def test_repo_name(remote, name):
+    assert repo_identity.repo_name(remote) == name
+
+
+@pytest.mark.parametrize("remote", [
+    "C:/Users/dev/repos/shop", "C:\\Users\\dev\\repos\\shop", "c:/x", "D:", "\\\\server\\share\\repo",
+    "file:///home/dev/shop.git", "file://host/srv/shop.git", "/srv/git/shop.git", "../shop",
+    "./shop", "~/repos/shop",
+])
+def test_local_path_remotes_are_never_sent(remote):
+    assert repo_identity.strip_credentials(remote) is None

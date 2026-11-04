@@ -8,7 +8,7 @@ checkout; the server matches on the remote, then on the name with and without
 the archive suffix (-main, -master, -<branch>, -<sha>). `--app` overrides all
 of it.
 
-Only the remote URL (credentials removed) and the branch name are read; no
+Only the remote URL (credentials removed, local paths never) and the branch name are read; no
 other git data, and never any code.
 """
 import os
@@ -37,6 +37,8 @@ def _git(cwd: str, *args: str) -> Optional[str]:
 
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
+_NETWORK_SCHEMES = ("https", "http", "ssh", "git", "git+ssh", "ssh+git")
+_LOCAL_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[A-Za-z]:$|[\\/.~])")
 
 
 def strip_credentials(url: Optional[str]) -> Optional[str]:
@@ -55,6 +57,12 @@ def strip_credentials(url: Optional[str]) -> Optional[str]:
     m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$", raw)
     if m:
         scheme, raw = m.group(1).lower(), m.group(2)
+        # file:// (and any non-network scheme) names a path on this machine.
+        if scheme not in _NETWORK_SCHEMES:
+            return None
+    elif _LOCAL_PATH_RE.match(raw):
+        # C:/..., C:\..., \\server\share, /srv/..., ./..., ../..., ~/...: a local path.
+        return None
     if "@" in raw:
         raw = raw.rsplit("@", 1)[1]
     if scheme:
@@ -73,6 +81,21 @@ def strip_credentials(url: Optional[str]) -> Optional[str]:
     if bare:
         return f"{bare.group(1)}/{bare.group(2)}"
     return None
+
+
+def repo_name(remote: Optional[str]) -> Optional[str]:
+    """The repository name of a remote (last path segment, without .git), or None.
+
+    A CI clone lives in a directory named by the runner, not after the repo
+    (Bitbucket .../build, Azure .../s, CircleCI ~/project), so the folder name
+    would file every repository under one app."""
+    raw = str(remote or "").strip().rstrip("/")
+    if not raw:
+        return None
+    last = re.split(r"[/:]", raw)[-1]
+    if last.lower().endswith(".git"):
+        last = last[:-4]
+    return last if last and last not in (".", "..") else None
 
 
 def git_identity(target_path: str) -> Tuple[Optional[str], Optional[str]]:

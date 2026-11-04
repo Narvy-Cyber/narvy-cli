@@ -44,6 +44,8 @@ jobs:
         # SARIF is written before the --fail-on gate, so the Security tab fills even on a failing build.
         # With a NARVY_TOKEN repository secret (narvy.io > Profile > API Credentials), --upload also
         # sends the findings (never code) to your Narvy dashboard. Without it, the scan stays local.
+        # --upload needs a paid plan (Starter and up): on Community it fails the build (exit 4, HTTP 403),
+        # so set NARVY_TOKEN only on a paid account.
         # Secrets are not passed to pull requests from forks: those runs stay local.
         env:
           NARVY_TOKEN: ${{ secrets.NARVY_TOKEN }}

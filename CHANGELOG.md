@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scans`: App ID column.
 - `scan app.apk|app.aab|app.ipa --upload` sends the package name from the
   decoded manifest, or CFBundleIdentifier from Info.plist, as `package_id`,
-  so the platform files the results under the app a web upload of the same
-  binary created. Source scans send no `package_id`.
+  so the server can match the results to an app with the same package id.
+  Source scans send no `package_id`.
 - Dependency findings (SCA) carry `version_source`: `lockfile`,
   `declared_exact` (exact pin in a manifest) or `declared_range` (lower bound
   of a range such as `^0.4.0` in package.json, composer.json or Cargo.toml).
@@ -27,16 +27,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NARVY_API_TOKEN` is read as an alias of `NARVY_TOKEN` (used when
   `NARVY_TOKEN` is not set).
 - `init-ci` templates (GitHub, GitLab, Bitbucket): the scan adds `--upload`
-  when a `NARVY_TOKEN` secret or variable is set. The Bitbucket template
+  when a `NARVY_TOKEN` secret or variable is set. The comments say that
+  `--upload` needs a paid plan. The Bitbucket template
   now caches the OSV database.
 
 ### Fixed
 
 - `scan . --upload` sent "." as the app name; it now sends the directory
   name. The SBOM and CBOM component name had the same issue.
+- `scan --upload` from the root of a git checkout with a remote sends the
+  repository name (last path segment of the remote, without `.git`) as the
+  app name, not the clone directory: Bitbucket (`build`), Azure Pipelines
+  (`s`) and CircleCI (`project`) sent the same name for every repository.
+- A local-path remote (`C:/...`, `\\server\...`, `/srv/...`) or a `file://`
+  remote is no longer sent as `git_remote`.
 - `scan --upload` checks the token before the scan: a rejected token
-  (401/403), a missing login or an unreachable server exits 4 before
-  scanning instead of after.
+  (401), an account the server refuses (403, with the server's reason,
+  for example an expired subscription), a missing login or an unreachable
+  server exits 4 before scanning instead of after.
 - After a local scan, a logged-in user is told to add `--upload`, not to
   run `narvy login`.
 

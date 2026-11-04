@@ -3,7 +3,8 @@
 # SARIF is kept as a build artifact (not Code Insights); --fail-on still fails the build.
 # With a secured NARVY_TOKEN repository variable (narvy.io > Profile > API Credentials),
 # --upload also sends the findings (never code) to your Narvy dashboard. Without it,
-# the scan stays local.
+# the scan stays local. --upload needs a paid plan (Starter and up): on Community it
+# fails the build (exit 4, HTTP 403), so set NARVY_TOKEN only on a paid account.
 # The dependency check downloads the OSV database (npm alone is about 220 MB) into
 # ~/.cache/narvy/osv, cached as narvy-osv. Bitbucket keeps a cache 7 days and does not
 # replace it before then, and saves it only when the step succeeds: the CLI downloads a newer copy when the cached one is older

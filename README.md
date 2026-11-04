@@ -134,6 +134,8 @@ Three other commands work on targets you own, without an app file:
 | JRE and jadx downloads | first APK scan, only if Java 11+ or jadx is missing | api.adoptium.net, github.com |
 | One anonymous usage event per command (fields listed in [Telemetry](#telemetry)) | every command except `store-check` and `telemetry`, on by default | narvy.io |
 | Findings, never code or binary | only with `--upload` (needs `narvy login` or `NARVY_TOKEN`) | your Narvy account |
+| With the findings: the app name (the repository name from the git remote, else the folder or file name), the git remote URL with any user, password or token removed (the host is kept), and the branch, when the scanned folder is the root of a git checkout; a local-path or `file://` remote is never sent | only with `scan --upload`, unless `--app` is given | your Narvy account |
+| With the findings of an APK, AAB or IPA: its package id (manifest package or CFBundleIdentifier) | only with `scan --upload` | your Narvy account |
 
 `scan --offline` sends nothing: no database or tool download, no usage
 event, no GitHub advisory lookup. If jadx or Java is missing for an APK scan,

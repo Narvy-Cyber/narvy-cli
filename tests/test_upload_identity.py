@@ -174,10 +174,12 @@ def test_submit_sends_folder_name_remote_and_app(monkeypatch, tmp_path):
     target = tmp_path / "microservices-demo-main"
     target.mkdir()
     cli_main._submit_results_ingest([], "web-source", str(target))
-    assert calls[-1]["app_name"] == "microservices-demo-main"
+    # A checkout with a remote is named after the repository, not the folder.
+    assert calls[-1]["app_name"] == "b"
     assert calls[-1]["git_remote"] == "https://github.com/a/b.git" and calls[-1]["app"] is None
     cli_main._submit_results_ingest([], "web-source", str(target), app="microservices-demo")
     assert calls[-1]["app"] == "microservices-demo" and calls[-1]["git_remote"] is None
+    assert calls[-1]["app_name"] == "microservices-demo-main"
 
 
 def test_submit_402_exit_4_with_the_tried_names(monkeypatch, tmp_path, capsys):
