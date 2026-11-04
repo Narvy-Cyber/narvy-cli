@@ -730,15 +730,48 @@ def _print_upgrade_hint(status, data):
         console.print(f"[dim]Plans and upgrade: {url}[/dim]")
 
 
-def _format_asset_limit_error(data):
-    """Readable message for a 402 asset_limit_exceeded response, else None."""
+def _on_free_tier():
+    """True when the user is on the free tier: not logged in, or logged in on
+    the free / community plan. A token without a known plan (NARVY_TOKEN
+    alone in CI) is not assumed free: the "free rule set" / "paid plan"
+    wording is for free users only (persona QA 2026-11-04: a Pro user was told
+    checks were "not in the free rule set")."""
+    try:
+        creds = auth.load_credentials()
+    except Exception:  # noqa: BLE001 - unreadable credentials file: logged out
+        creds = None
+    if not creds or not creds.get("token"):
+        return True
+    return str(creds.get("plan") or "").strip().lower() in ("free", "community")
+
+
+def _format_asset_limit_error(data, tried=None):
+    """Readable message for a 402 asset_limit_exceeded response, else None.
+
+    ``tried``: what this upload was matched on (the server's list when it
+    sends one, else what the CLI sent), so the user sees WHICH app it looked
+    for and how to target an existing one (persona QA 2026-11-04: a GitHub
+    archive folder "x-main" did not match the app "x", exit 4, no hint)."""
     if not isinstance(data, dict) or data.get("error") != "asset_limit_exceeded":
         return None
     upgrade_url = _absolute_url(data.get("upgrade_url") or "/pricing")
-    return (
-        "You have reached your asset limit. Free a slot or upgrade at "
-        f"{upgrade_url}."
-    )
+    if tried is None:
+        # Binary upload / cloud ingest: no --app on those commands.
+        return (
+            "You have reached your asset limit. Free a slot or upgrade at "
+            f"{upgrade_url}."
+        )
+    cur, cap = data.get("current"), data.get("max")
+    count = f" ({cur}/{cap})" if cur is not None and cap is not None else ""
+    tried = data.get("tried") or tried or []
+    lines = [f"Asset limit reached{count}: this scan matched no app on your account, "
+             "so it would add a new one."]
+    if tried:
+        lines.append("Looked for: " + ", ".join(str(t) for t in tried) + ".")
+    lines.append("To add it to an existing app, rerun with --app <name or app ID> "
+                 "(`narvy scans` shows app IDs).")
+    lines.append(f"To add a new app, free a slot or upgrade at {upgrade_url}.")
+    return "\n".join(lines)
 
 
 def _preflight_output_writable(out_file):
@@ -832,6 +865,7 @@ def cmd_scans(args):
     table = Table(title=f"Recent scans on {rich_escape(_server_and_account(creds))}")
     table.add_column("Scan ID", style="dim")
     table.add_column("App")
+    table.add_column("App ID", justify="right")
     table.add_column("Platform")
     table.add_column("Type")
     table.add_column("Status")
@@ -846,6 +880,7 @@ def cmd_scans(args):
         table.add_row(
             scan_id[:8],
             rich_escape(str(s.get("app_name") or "-")),
+            str(s.get("app_id") if s.get("app_id") is not None else "-"),
             str(s.get("platform", "-")),
             str(s.get("analysis_type", "-")),
             f"[{status_style}]{status_val}[/{status_style}]",
@@ -1070,8 +1105,12 @@ def _sca_result_line(stats, noun="dependencies"):
         return (f"[dim]SCA: {checked} unique {noun} found; the vulnerability lookup failed "
                 f"for some or all of them, so their CVE status is UNKNOWN (see the SCA note "
                 f"at the end).[/dim]")
-    return (f"[dim]SCA: checked {checked} unique {noun}, found {stats.get('cves_found', 0)} "
-            f"known CVE(s) across {stats.get('vulnerable_dependencies', 0)} "
+    # One count and one label with the end-of-scan sentence ("matched N known
+    # advisory(ies)"): distinct advisory ids, not package-version hits (a run
+    # printed "127 CVE(s)" here and "109 advisories" at the end).
+    found = stats.get("advisories_found", stats.get("cves_found", 0))
+    return (f"[dim]SCA: checked {checked} unique {noun}, found {found} "
+            f"known advisory(ies) across {stats.get('vulnerable_dependencies', 0)} "
             f"{'framework(s)' if noun.startswith('embedded') else 'dependency(ies)'}.[/dim]")
 
 
@@ -1322,7 +1361,7 @@ def _run_web_source_scan(source_dir):
             f"({web_source_analyzer.SUPPORTED_LANGUAGES_LABEL})...",
             total=None,
         )
-        result = web_source_analyzer.analyze_source(source_dir)
+        result = web_source_analyzer.analyze_source(source_dir, free_tier=_on_free_tier())
         progress.update(task, completed=1, description="[green]Analysis Complete." if (isinstance(result, dict) and result.get("ok")) else "[red]Analysis failed.")
 
     if not result["ok"]:
@@ -1530,8 +1569,9 @@ def _upload_failed_label(status):
     return f"Upload to {uploader.server_host()} failed ({f'HTTP {status}' if status else 'no response'}):"
 
 
-def _submit_results_ingest(all_findings, scan_mode, target_path):
-    """POST results to /api/v1/ingest. Exits with EXIT_ERROR on any failure."""
+def _submit_results_ingest(all_findings, scan_mode, target_path, app=None):
+    """POST results to /api/v1/ingest. Exits with EXIT_ERROR on any failure.
+    ``app``: --app (name or app ID) of an existing app to file the scan under."""
     creds = auth.load_credentials()
     if not creds:
         console.print("[bold red]Not logged in.[/bold red] Run `narvy login` first, or drop --upload for a local-only scan.")
@@ -1541,6 +1581,11 @@ def _submit_results_ingest(all_findings, scan_mode, target_path):
     app_name = os.path.basename(os.path.normpath(target_path))
     app_name = re.sub(r"\.(zip|apk|aab|ipa|xapk|apkm|apks)$", "", app_name, flags=re.IGNORECASE) or app_name
 
+    from narvy.repo_identity import git_identity
+    git_remote, git_branch = (None, None) if app else git_identity(target_path)
+    tried = ([f"app {app}"] if app else
+             ([f"git remote {git_remote}"] if git_remote else []) + [f'name "{app_name}"'])
+
     console.print(
         f"[cyan]Uploading {len(all_findings)} finding(s) to {rich_escape(_server_and_account(creds))} "
         f"for server-side curation...[/cyan]"
@@ -1549,16 +1594,26 @@ def _submit_results_ingest(all_findings, scan_mode, target_path):
         status, data = uploader.ingest_results(
             creds["token"], app_name=app_name, platform=platform,
             scan_mode=_ingest_scan_mode_label(scan_mode), findings=all_findings,
+            app=app, git_remote=git_remote, git_branch=git_branch,
         )
     except Exception as e:
         console.print(f"[bold red]Upload to {uploader.server_host()} failed:[/bold red] {e}")
         raise SystemExit(EXIT_ERROR)
 
     if status not in (200, 201):
-        asset_msg = _format_asset_limit_error(data) if status == 402 else None
+        asset_msg = _format_asset_limit_error(data, tried=tried) if status == 402 else None
         if asset_msg:
-            console.print(f"[bold red]{asset_msg}[/bold red]")
+            console.print(f"[bold red]{rich_escape(asset_msg)}[/bold red]")
             raise SystemExit(EXIT_ERROR)
+        if status == 404 and isinstance(data, dict) and data.get("error") == "app_not_found":
+            console.print(f"[bold red]--app {rich_escape(str(app))}: no such app on your account.[/bold red] "
+                          "`narvy scans` shows your apps and their IDs.")
+            raise SystemExit(EXIT_BAD_TARGET)
+        if status == 409 and isinstance(data, dict) and data.get("error") == "app_ambiguous":
+            ids = ", ".join(f"{c.get('app_id')} ({c.get('name')})" for c in data.get("candidates") or [])
+            console.print(f"[bold red]--app {rich_escape(str(app))} matches several apps:[/bold red] "
+                          f"{rich_escape(ids)}. Pass the app ID instead.")
+            raise SystemExit(EXIT_BAD_TARGET)
         error_msg = data.get("error") or data if isinstance(data, dict) else data
         console.print(f"[bold red]{_upload_failed_label(status)}[/bold red] {error_msg}")
         if isinstance(data, dict) and data.get("message"):
@@ -1575,6 +1630,11 @@ def _submit_results_ingest(all_findings, scan_mode, target_path):
     dropped = data.get("dropped", 0)
 
     console.print(f"[bold green]Results uploaded.[/bold green] scan_id={scan_id}")
+    _matched = {"app": "--app", "git_remote": "its git remote", "name": "its name",
+                "normalized_name": "its repository name"}.get(data.get("app_matched_by"))
+    if data.get("app_id") is not None:
+        console.print(f"[dim]App ID {data.get('app_id')}"
+                      f"{f' (matched on {_matched})' if _matched else ' (new app)'}.[/dim]")
     console.print(
         f"[dim]CLI detected {received} -> Narvy cloud curated: {total_detected} distinct "
         f"after dedup, {actionable} actionable, {hidden} hidden by default view.[/dim]"
@@ -1595,7 +1655,7 @@ def _submit_results_ingest(all_findings, scan_mode, target_path):
     return data
 
 
-def _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta=None):
+def _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta=None, app=None):
     """Upload each scanned surface under its own platform (nested iOS goes up as iOS source)."""
     by_root: Dict[str, List[Dict[str, Any]]] = {}
     main: List[Dict[str, Any]] = []
@@ -1613,7 +1673,8 @@ def _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta=N
     for s in (scan_meta or {}).get("surfaces", [])[1:]:
         if s.get("mode") == "ios-source" and s.get("status") != "failed":
             by_root.setdefault(s["path"], [])
-    _submit_results_ingest(main, scan_mode, target_path)
+    # --app targets the scanned project; a nested iOS project keeps its own app.
+    _submit_results_ingest(main, scan_mode, target_path, app=app)
     for root, findings in by_root.items():
         console.print(f"[dim]iOS project in {rich_escape(root)}/:[/dim]")
         _submit_results_ingest(findings, "ios-source", os.path.join(target_path, root))
@@ -1985,6 +2046,15 @@ def cmd_scan(args):
     scan_started = time.time()
     own_reports.SKIPPED.clear()
     own_reports.set_output_path(None)
+    if getattr(args, "app", None) is not None:
+        args.app = str(args.app).strip()
+        if not args.app:
+            console.print("[bold red]Error:[/bold red] --app needs an app name or app ID.")
+            raise SystemExit(EXIT_BAD_TARGET)
+        if not args.upload or getattr(args, "upload_binary", False):
+            console.print("[bold red]Error:[/bold red] --app applies to --upload (results "
+                          "upload) only.")
+            raise SystemExit(EXIT_BAD_TARGET)
     if getattr(args, "upload_binary", False):
         args.upload = True
     if not os.path.exists(target_path):
@@ -2247,12 +2317,13 @@ def cmd_scan(args):
         if getattr(args, "cbom", None):
             _write_cbom(target_path, args.cbom)
 
-    _premium_note = web_source_analyzer.premium_checks_note(premium_counts)
+    _premium_note = web_source_analyzer.premium_checks_note(premium_counts, free_tier=_on_free_tier())
     if _premium_note:
         console.print(f"\n[dim]{rich_escape(_premium_note)}[/dim]")
 
     if args.upload and not getattr(args, "upload_binary", False):
-        _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta)
+        _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta,
+                                   app=getattr(args, "app", None))
     elif args.upload:
         # Legacy --upload-binary: POST the binary and let the server re-scan it.
         # upload_scan() opens the path in binary mode, so refuse a directory.
@@ -3345,6 +3416,7 @@ def cli(prog=None):
     p_scan.add_argument("--file", "-f", default=None, help="Output file for --output sarif/json/gitlab (default: narvy-results.sarif, narvy-results.json or gl-sast-report.json). Ignored for console output.")
     p_scan.add_argument("--upload", action="store_true", help="Send the findings (never your code or binary) to your Narvy dashboard after the scan. Needs `narvy login` and a paid plan.")
     p_scan.add_argument("--upload-binary", action="store_true", help="Upload the binary itself (.apk/.aab/.ipa) for a server-side scan instead of the results. Implies --upload.")
+    p_scan.add_argument("--app", metavar="NAME_OR_ID", help="With --upload: add the results to this existing app (name or app ID, see `narvy scans`) instead of matching it by git remote or folder name.")
     p_scan.add_argument("--confirm-upload", action="store_true",
                         help="Don't prompt when the server flags the file as suspicious (warn only, never a hard refuse). For CI.")
     p_scan.add_argument("--no-group", action="store_true",

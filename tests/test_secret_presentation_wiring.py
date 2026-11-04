@@ -298,7 +298,7 @@ def test_upload_payload_is_masked_and_keeps_fingerprint_basis(fake_web_scan, mon
     _capture_console(monkeypatch)
     sent = {}
 
-    def fake_ingest(token, app_name, platform, scan_mode, findings, version=None):
+    def fake_ingest(token, app_name, platform, scan_mode, findings, version=None, **_identity):
         sent["body"] = json.dumps({"findings": findings})
         return 201, {"scan_id": "s1"}
 

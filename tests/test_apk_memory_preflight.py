@@ -582,11 +582,11 @@ def test_sca_line_does_not_say_zero_cves_when_the_lookup_failed():
     from narvy import main as cli_main
     ok = cli_main._sca_result_line({"unique_dependencies_checked": 5, "cves_found": 0,
                                     "vulnerable_dependencies": 0})
-    assert "found 0 known CVE(s)" in ok
+    assert "found 0 known advisory(ies)" in ok
     bad = cli_main._sca_result_line({"unique_dependencies_checked": 5, "cves_found": 0,
                                      "vulnerable_dependencies": 0, "osv_unreachable": True},
                                     "embedded framework(s)")
-    assert "0 known CVE" not in bad and "UNKNOWN" in bad and "5 unique embedded framework(s)" in bad
+    assert "0 known advisory" not in bad and "0 known CVE" not in bad and "UNKNOWN" in bad and "5 unique embedded framework(s)" in bad
 
 
 def test_reported_113_windows_case_end_to_end_through_the_windows_memory_reading(monkeypatch):

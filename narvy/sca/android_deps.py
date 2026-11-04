@@ -344,5 +344,6 @@ def scan(apk_path: str, osv_client: OSVClient = None) -> Tuple[List[Dict[str, An
             vulnerable_coords.add(dep.maven_name)
 
     stats["vulnerable_dependencies"] = len(vulnerable_coords)
+    stats["advisories_found"] = len({f["rule_id"] for f in findings})
     stats.update(coverage_after(client, cov_before))
     return findings, rule_defs, stats

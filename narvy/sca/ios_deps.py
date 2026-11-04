@@ -595,6 +595,7 @@ def _scan_deps(deps: List[_IOSDep], osv_client: Optional[OSVClient] = None) -> T
         "total_dependencies_detected": len(deps),
         "unique_dependencies_checked": len(unique_deps),
         "cves_found": len(findings),
+        "advisories_found": len({f["rule_id"] for f in findings}),
         "vulnerable_dependencies": len(vulnerable_names),
         "github_queries_made": gh_budget.queries_made,
         "github_rate_limited": gh_budget.exhausted,

@@ -105,11 +105,20 @@ def detect_premium_frameworks(source_dir: str, max_depth: int = 3) -> Dict[str, 
     return {k: PREMIUM_CHECKS[k][1] for k in sorted(found)}
 
 
-def premium_checks_note(counts: Dict[str, int]) -> Optional[str]:
+def premium_checks_note(counts: Dict[str, int], free_tier: bool = True) -> Optional[str]:
+    """What the scan did not run. "free rule set" / "paid plan" only for a
+    user on the free tier (or not logged in): a paying user is told where
+    those checks run instead (they are not in the CLI either way)."""
     if not counts:
         return None
     total = sum(counts.values())
     names = ", ".join(PREMIUM_CHECKS[k][0] for k in counts)
+    if not free_tier:
+        return (
+            f"{total} additional framework check(s) for {names} are not in the CLI "
+            "rule set; they run when this project is scanned on narvy.io "
+            "(server-side source scan)."
+        )
     return (
         f"{total} additional framework check(s) for {names} are not in the free "
         "rule set; they run when this project is scanned on a Narvy paid plan "
@@ -158,6 +167,18 @@ _LOW_COVERAGE_STACKS: Dict[str, str] = {
         "dependency CVEs only. The C# code rules (SQL injection, command "
         "injection, path traversal, XXE, unsafe deserialization, weak "
         "crypto, web.config checks) run on Narvy paid plans."
+    ),
+}
+
+# The same notes for a user who is NOT on the free tier: no "free rule set" /
+# "paid plans" wording to someone who pays (persona QA 2026-11-04).
+_LOW_COVERAGE_STACKS_PAID: Dict[str, str] = {
+    "csharp": (
+        "C#/.NET: the CLI rule set covers hardcoded secrets and NuGet "
+        "dependency CVEs only. The C# code rules (SQL injection, command "
+        "injection, path traversal, XXE, unsafe deserialization, weak "
+        "crypto, web.config checks) run when this project is scanned on "
+        "narvy.io (server-side source scan)."
     ),
 }
 
@@ -1140,8 +1161,10 @@ def _count_scanned_files(source_dir: str, ported_stacks: Set[str]) -> int:
     return _count_density(source_dir, tuple(exts))
 
 
-def analyze_source(source_dir: str) -> Dict[str, Any]:
-    """Run web/backend source-mode SAST over source_dir, read-only."""
+def analyze_source(source_dir: str, free_tier: bool = True) -> Dict[str, Any]:
+    """Run web/backend source-mode SAST over source_dir, read-only.
+    ``free_tier``: the user is on the free tier (or not logged in); picks the
+    wording of the coverage notes only, never what runs."""
     empty_stats = {
         "stacks_detected": [], "stacks_unsupported": [], "files_scanned": 0,
     }
@@ -1173,7 +1196,10 @@ def analyze_source(source_dir: str) -> Dict[str, Any]:
 
     for stack in sorted(ported_stacks):
         if stack in _LOW_COVERAGE_STACKS:
-            notes.append(f"LIMITED COVERAGE: {_LOW_COVERAGE_STACKS[stack]}")
+            text = _LOW_COVERAGE_STACKS[stack]
+            if not free_tier:
+                text = _LOW_COVERAGE_STACKS_PAID.get(stack, text)
+            notes.append(f"LIMITED COVERAGE: {text}")
 
     if not ported_stacks:
         notes.append(

@@ -60,8 +60,13 @@ def upload_scan(apk_path, token, platform="android", analysis_type="sast", confi
     return _json_or_error(r)
 
 
-def ingest_results(token, app_name, platform, scan_mode, findings, version=None):
-    """POST this scan's findings to /api/v1/ingest (no binary leaves this machine)."""
+def ingest_results(token, app_name, platform, scan_mode, findings, version=None,
+                   app=None, git_remote=None, git_branch=None):
+    """POST this scan's findings to /api/v1/ingest (no binary leaves this machine).
+
+    The app is matched server-side on ``app`` (--app: name or app ID) if
+    given, else the git remote, else ``app_name`` with and without a GitHub
+    archive suffix. Fields left None are not sent."""
     body = {
         "app_name": app_name,
         "platform": platform,
@@ -69,6 +74,9 @@ def ingest_results(token, app_name, platform, scan_mode, findings, version=None)
         "version": version,
         "findings": findings,
     }
+    for key, val in (("app", app), ("git_remote", git_remote), ("git_branch", git_branch)):
+        if val:
+            body[key] = val
     try:
         r = requests.post(
             f"{API_BASE}/api/v1/ingest",

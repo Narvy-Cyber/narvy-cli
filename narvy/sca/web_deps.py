@@ -1231,5 +1231,8 @@ def scan(source_dir: str, osv_client: OSVClient = None) -> Tuple[List[Dict[str, 
                 vulnerable_coords.add(f"{dep.ecosystem}:{dep.name}")
 
     stats["vulnerable_dependencies"] = len(vulnerable_coords)
+    # Distinct advisories (one CVE / GHSA id counted once however many
+    # package versions it hits): the number the scan summary reports too.
+    stats["advisories_found"] = len({f["rule_id"] for f in findings})
     stats.update(coverage_after(client, cov_before))
     return findings, rule_defs, stats

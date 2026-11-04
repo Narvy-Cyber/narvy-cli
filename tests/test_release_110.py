@@ -113,7 +113,7 @@ def test_cmd_scan_merges_nested_ios_findings(monkeypatch, tmp_path):
 def test_upload_splits_surfaces(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(cli_main, "_submit_results_ingest",
-                        lambda f, mode, path: calls.append((mode, os.path.basename(path),
+                        lambda f, mode, path, app=None: calls.append((mode, os.path.basename(path),
                                                             [x["file_path"] for x in f])))
     findings = [{"file_path": "server/a.php"},
                 {"file_path": os.path.join("App", "V.swift"), "_surface_root": "App"}]
