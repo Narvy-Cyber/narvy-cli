@@ -12,7 +12,7 @@
 # then saves back (when: always).
 # With a masked NARVY_TOKEN CI/CD variable (narvy.io > Profile > API Credentials),
 # --upload also sends the findings (never code) to your Narvy dashboard. Without
-# it, the scan stays local. --upload needs a paid plan (Starter and up): on
+# it, the scan stays local. --upload needs a paid plan (Solo and up): on
 # Community it fails the pipeline (exit 4, HTTP 403), so set NARVY_TOKEN only on
 # a paid account.
 stages:

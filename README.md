@@ -303,7 +303,7 @@ thread), then the scan fails with the numbers. `--force` runs exactly
 send its results (the findings, never your code or binary) to your account,
 where they are de-duplicated, false-positive filtered and kept in the
 dashboard history; the CLI prints a direct link to the scan. This needs a
-paid plan (Starter and up) and is never on by default. `narvy upload-all
+paid plan (Solo and up) and is never on by default. `narvy upload-all
 <directory>` does the same for every binary target found in a folder in one
 command. `narvy scans` lists recent scans on your account from the terminal.
 

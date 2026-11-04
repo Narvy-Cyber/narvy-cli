@@ -897,7 +897,7 @@ def cmd_scans(args):
         console.print(
             "[bold yellow]No scans found on your account yet.[/bold yellow] "
             "Run `narvy scan <path>` to scan locally. Submitting results here "
-            "with `--upload` needs a paid plan (Starter and up)."
+            "with `--upload` needs a paid plan (Solo and up)."
         )
         return
 
