@@ -31,11 +31,6 @@ _EXTRA_SKIP_DIR_NAMES = frozenset({"node_modules", ".git"})
 # Suffix match: Xcode names test folders <TargetName>Tests / <TargetName>UITests.
 _TEST_DIR_SUFFIXES = ("Tests", "UITests")
 
-_SEMGREP_SEVERITY_MAP = {
-    "ERROR": "CRITICAL",
-    "WARNING": "HIGH",
-    "INFO": "MEDIUM",
-}
 
 
 def _is_test_dir_name(name: str) -> bool:
@@ -107,7 +102,7 @@ def _load_swift_semgrep_rule_defs() -> List[Dict[str, Any]]:
         defs.append({
             "id": rule["id"],
             "name": rule.get("message", rule["id"])[:120],
-            "severity": _SEMGREP_SEVERITY_MAP.get(rule.get("severity", "INFO"), "MEDIUM"),
+            "severity": semgrep_engine.map_severity(rule.get("severity")),
             "details": {
                 "cwe": meta.get("cwe", ""),
                 "masvs": meta.get("masvs", ""),
@@ -202,7 +197,7 @@ def _run_swift_semgrep(source_dir: str,
         ):
             continue
 
-        severity = _SEMGREP_SEVERITY_MAP.get(extra.get("severity", "INFO"), "MEDIUM")
+        severity = semgrep_engine.map_severity(extra.get("severity"))
         message = extra.get("message", "")
 
         # Downgrade trust-all-certs when guarded by a per-request opt-in flag.

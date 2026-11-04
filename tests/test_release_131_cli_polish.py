@@ -283,3 +283,24 @@ def test_repo_name(remote, name):
 ])
 def test_local_path_remotes_are_never_sent(remote):
     assert repo_identity.strip_credentials(remote) is None
+
+
+# --------------------------------------------------------------- severity mapping
+
+@pytest.mark.parametrize("raw,mapped", [
+    ("ERROR", "HIGH"), ("WARNING", "MEDIUM"), ("INFO", "LOW"), ("error", "HIGH"),
+    (None, "LOW"), ("", "LOW"), ("BOGUS", "MEDIUM"),
+])
+def test_semgrep_severity_matches_the_platform(raw, mapped):
+    from narvy import semgrep_engine
+    assert semgrep_engine.map_severity(raw) == mapped
+
+
+def test_no_semgrep_path_maps_error_to_critical():
+    import inspect
+    from narvy import semgrep_engine
+    from narvy.ios import source_analyzer as ios_src
+    from narvy.web import source_analyzer as web_src
+    assert "CRITICAL" not in semgrep_engine.SEVERITY_MAP.values()
+    for mod in (ios_src, web_src):
+        assert "_SEMGREP_SEVERITY_MAP" not in inspect.getsource(mod)

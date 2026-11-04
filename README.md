@@ -77,15 +77,15 @@ Found 19 potential issues:
 │   HIGH   │ Hardcoded Cryptographic IV           │ sources/com/android/insecurebankv2/… │              26, 34 │    2 │   MEDIUM   │
 │          │ (indirect)                           │                                      │                     │      │            │
 │   HIGH   │ Application Data Backup is Enabled   │ resources/AndroidManifest.xml        │                  33 │    1 │    HIGH    │
-│   HIGH   │ Logging a value that looks like a    │ sources/com/android/insecurebankv2/… │                 117 │    1 │   MEDIUM   │
+│  MEDIUM  │ Write to Unscoped External Storage   │ sources/com/android/insecurebankv2/… │            163, 181 │    2 │    LOW     │
+│  MEDIUM  │ Write to Unscoped External Storage   │ sources/com/android/insecurebankv2/… │              25, 29 │    2 │    LOW     │
+│  MEDIUM  │ Logging a value that looks like a    │ sources/com/android/insecurebankv2/… │                 117 │    1 │   MEDIUM   │
 │          │ credential/token/secret - readable   │                                      │                     │      │            │
 │          │ via adb/crash reporters on many      │                                      │                     │      │            │
 │          │ devices.                             │                                      │                     │      │            │
-│   HIGH   │ JavaScript enabled in WebView - can  │ sources/com/android/insecurebankv2/… │                  30 │    1 │   MEDIUM   │
+│  MEDIUM  │ JavaScript enabled in WebView - can  │ sources/com/android/insecurebankv2/… │                  30 │    1 │   MEDIUM   │
 │          │ enable XSS if untrusted content is   │                                      │                     │      │            │
 │          │ loaded.                              │                                      │                     │      │            │
-│  MEDIUM  │ Write to Unscoped External Storage   │ sources/com/android/insecurebankv2/… │            163, 181 │    2 │    LOW     │
-│  MEDIUM  │ Write to Unscoped External Storage   │ sources/com/android/insecurebankv2/… │              25, 29 │    2 │    LOW     │
 └──────────┴──────────────────────────────────────┴──────────────────────────────────────┴─────────────────────┴──────┴────────────┘
 Scanned the decompiled app with 48 local rules (28 pattern, 2 taint, 18 structural); 9 of them produced findings.
 ```

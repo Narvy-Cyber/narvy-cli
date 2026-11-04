@@ -140,7 +140,7 @@ def test_web_source_scan_finds_real_command_injection_and_secret():
     assert "child-process-exec-concat" in rule_ids, (
         f"command-injection-shaped exec() call not flagged - got {rule_ids}"
     )
-    assert severities_by_rule.get("child-process-exec-concat") == "CRITICAL"
+    assert severities_by_rule.get("child-process-exec-concat") == "HIGH"  # semgrep ERROR -> HIGH, same mapping as narvy.io
     assert "aws-access-key-id" in rule_ids or "generic-high-entropy-assignment" in rule_ids, (
         f"hardcoded AWS-shaped secret not flagged - got {rule_ids}"
     )

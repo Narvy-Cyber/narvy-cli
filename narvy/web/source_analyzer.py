@@ -661,7 +661,7 @@ def _load_rule_defs_from_yml(path: str) -> List[Dict[str, Any]]:
         defs.append({
             "id": rule["id"],
             "name": rule.get("message", rule["id"])[:120],
-            "severity": semgrep_engine.SEVERITY_MAP.get(rule.get("severity", "INFO"), "MEDIUM"),
+            "severity": semgrep_engine.map_severity(rule.get("severity")),
             "details": {
                 "cwe": meta.get("cwe", ""),
                 "masvs": meta.get("masvs", ""),
@@ -773,7 +773,7 @@ def _parse_semgrep_data(data: Dict[str, Any], source_dir: str,
             "rule_id": check_id,
             "file_path": rel_path,
             "name": extra.get("message", r.get("check_id", ""))[:120],
-            "severity": semgrep_engine.SEVERITY_MAP.get(extra.get("severity", "INFO"), "MEDIUM"),
+            "severity": semgrep_engine.map_severity(extra.get("severity")),
             "line": line_no,
             "details": {
                 "cwe": meta.get("cwe", ""),

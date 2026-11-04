@@ -25,11 +25,19 @@ _EXCLUDE_ARGS = []
 for _p in THIRD_PARTY_PREFIXES:
     _EXCLUDE_ARGS += ['--exclude', f"**/{_p.replace('.', '/').rstrip('/')}/**"]
 
+# Same mapping as narvy.io (src/core/source_project_analyzer.py): ERROR -> High,
+# WARNING -> Medium, INFO -> Low, anything else -> Medium. The platform has no
+# per-rule override, so neither does the CLI.
 SEVERITY_MAP = {
-    'ERROR': 'CRITICAL',
-    'WARNING': 'HIGH',
-    'INFO': 'MEDIUM',
+    'ERROR': 'HIGH',
+    'WARNING': 'MEDIUM',
+    'INFO': 'LOW',
 }
+
+
+def map_severity(raw) -> str:
+    """A semgrep rule / result severity as a Narvy severity (case-insensitive)."""
+    return SEVERITY_MAP.get(str(raw or 'INFO').strip().upper(), 'MEDIUM')
 
 # Whole-run timeout scales with tree size; a timeout is recorded in LAST_RUN.
 SEMGREP_BASE_TIMEOUT_SEC = 600
@@ -225,7 +233,7 @@ def load_rule_defs(rules_path: str = RULES_PATH) -> List[Dict[str, Any]]:
         defs.append({
             'id': rule['id'],
             'name': rule.get('message', rule['id'])[:120],
-            'severity': SEVERITY_MAP.get(rule.get('severity', 'INFO'), 'MEDIUM'),
+            'severity': map_severity(rule.get('severity')),
             'details': {
                 'cwe': meta.get('cwe', ''),
                 'masvs': meta.get('masvs', ''),
@@ -438,7 +446,7 @@ def run_semgrep(source_dir: str, timeout: Optional[int] = None,
             'rule_id': check_id,
             'file_path': rel_path,
             'name': extra.get('message', r.get('check_id', ''))[:120],
-            'severity': SEVERITY_MAP.get(extra.get('severity', 'INFO'), 'MEDIUM'),
+            'severity': map_severity(extra.get('severity')),
             'line': r.get('start', {}).get('line', 1),
             'details': {
                 'cwe': meta.get('cwe', ''),

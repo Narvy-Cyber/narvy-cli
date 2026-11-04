@@ -60,6 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Code findings use the same severity mapping as narvy.io: a Semgrep rule
+  of severity ERROR is reported HIGH (was CRITICAL), WARNING is MEDIUM (was
+  HIGH), INFO is LOW (was MEDIUM). A `--fail-on` threshold therefore trips
+  on fewer structural findings than in 1.3.0. Pattern rules and SCA keep
+  their own severities.
 - `login`, `scans` and the upload line show the plan by its public name
   (`Pro`, not `titan`).
 - SETUP.md: PyPI install (`pipx install narvy-cli`), `narvy-cli[...]`

@@ -252,7 +252,7 @@ def test_semgrep_credential_rule_regraded_by_value():
     cred = {f["line"]: f for f in out if f["rule_id"] == "android-hardcoded-credential-java"}
     assert 3 not in cred and 4 not in cred
     assert cred[5]["severity"] == "MEDIUM"
-    assert cred[6]["severity"] == "CRITICAL"
+    assert cred[6]["severity"] == "HIGH"  # rule severity ERROR -> HIGH (narvy.io mapping), kept by value
 
 
 def test_ios_binary_credential_string_regraded():
