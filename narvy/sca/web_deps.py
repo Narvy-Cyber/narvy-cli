@@ -27,6 +27,52 @@ class _WebDep:
     version: str
     ecosystem: str
     source: str
+    # "" = the class of `source` (version_source_for). A manifest parser sets
+    # it per spec: "declared_exact" for an exact pin, "declared_range" for a
+    # range reduced to its lower bound.
+    version_source: str = ""
+
+
+# version_source, as the Narvy platform's lockfile parser tags a dependency:
+#   lockfile        resolved version (what is installed)
+#   declared_exact  exact pin in a manifest
+#   declared_range  lower bound of a declared range (the installed version
+#                   may be newer)
+VERSION_SOURCE_LOCKFILE = "lockfile"
+VERSION_SOURCE_DECLARED_EXACT = "declared_exact"
+VERSION_SOURCE_DECLARED_RANGE = "declared_range"
+
+_LOCKFILE_SOURCES = frozenset({
+    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock", "pipfile.lock",
+    "composer.lock", "gemfile.lock", "cargo.lock", "go.sum", "podfile.lock",
+    "package.resolved", "packages.lock.json",
+})
+# Manifests the CLI reads exact versions only from (ranges are skipped).
+_EXACT_ONLY_SOURCES = frozenset({
+    "requirements.txt", "gemfile", "go.mod", "pom.xml", "build.gradle", "build.gradle.kts",
+    "libs.versions.toml", "packages.config",
+})
+_EXACT_ONLY_SUFFIXES = (".csproj", ".fsproj", ".vbproj", ".props", ".targets")
+# Manifests whose ranges are reduced to their lower bound: the parser tags
+# each dependency; an untagged one is a range.
+_RANGE_SOURCES = frozenset({"package.json", "composer.json", "cargo.toml"})
+
+_FULL_SEMVER_RE = re.compile(r'^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?$')
+
+
+def version_source_for(source: str, tagged: str = "") -> Optional[str]:
+    """version_source of a dependency read from `source` (a path), None when
+    the file is none of the known lockfiles / manifests."""
+    if tagged:
+        return tagged
+    base = os.path.basename(str(source or "").replace("\\", "/")).lower()
+    if base in _LOCKFILE_SOURCES:
+        return VERSION_SOURCE_LOCKFILE
+    if base in _EXACT_ONLY_SOURCES or base.endswith(_EXACT_ONLY_SUFFIXES):
+        return VERSION_SOURCE_DECLARED_EXACT
+    if base in _RANGE_SOURCES:
+        return VERSION_SOURCE_DECLARED_RANGE
+    return None
 
 
 _NPM_RANGE_PREFIX_RE = re.compile(r'^[\^~><=\s]+')
@@ -35,6 +81,16 @@ _NPM_NONREGISTRY_RE = re.compile(r'^(file:|link:|git\+|git:|github:|workspace:|h
 
 def _strip_npm_range(spec: str) -> Optional[str]:
     """Exact version from a package.json range specifier, or None if not pinnable."""
+    got = _npm_declared(spec)
+    return got[0] if got else None
+
+
+def _npm_declared(spec: str) -> Optional[Tuple[str, str]]:
+    """(version, version_source) for a package.json spec, None if not pinnable.
+
+    declared_exact only for a bare full semver ("1.2.3"); an operator
+    ("^1.2.3", "~1.2.3", ">=1.2.3") or a partial / x-range ("1.2", "1.x") is
+    declared_range, as on the platform."""
     spec = (spec or "").strip()
     if not spec or spec in ("*", "latest"):
         return None
@@ -45,7 +101,8 @@ def _strip_npm_range(spec: str) -> Optional[str]:
     cleaned = _NPM_RANGE_PREFIX_RE.sub("", spec).strip()
     if not cleaned or not re.match(r'^\d', cleaned):
         return None
-    return cleaned
+    exact = cleaned == spec and _FULL_SEMVER_RE.match(cleaned)
+    return cleaned, (VERSION_SOURCE_DECLARED_EXACT if exact else VERSION_SOURCE_DECLARED_RANGE)
 
 
 def _parse_package_lock(path: str) -> List[_WebDep]:
@@ -92,9 +149,9 @@ def _parse_package_json(path: str) -> List[_WebDep]:
         if not isinstance(section, dict):
             continue
         for name, spec in section.items():
-            version = _strip_npm_range(str(spec))
-            if version:
-                deps.append(_WebDep(name, version, "npm", "package.json"))
+            got = _npm_declared(str(spec))
+            if got:
+                deps.append(_WebDep(name, got[0], "npm", "package.json", got[1]))
     return deps
 
 
@@ -319,6 +376,12 @@ _PHP_RANGE_PREFIX_RE = re.compile(r'^[\^~><=\s]+')
 
 
 def _strip_php_range(spec: str) -> Optional[str]:
+    got = _php_declared(spec)
+    return got[0] if got else None
+
+
+def _php_declared(spec: str) -> Optional[Tuple[str, str]]:
+    """(version, version_source) for a composer.json spec, None if not pinnable."""
     spec = (spec or "").strip()
     if not spec or spec in ("*", "dev-master", "dev-main"):
         return None
@@ -329,7 +392,8 @@ def _strip_php_range(spec: str) -> Optional[str]:
     cleaned = _PHP_RANGE_PREFIX_RE.sub("", spec).strip()
     if not cleaned or not re.match(r'^\d', cleaned):
         return None
-    return cleaned
+    exact = cleaned == spec and _FULL_SEMVER_RE.match(cleaned)
+    return cleaned, (VERSION_SOURCE_DECLARED_EXACT if exact else VERSION_SOURCE_DECLARED_RANGE)
 
 
 def _parse_composer_lock(path: str) -> List[_WebDep]:
@@ -365,9 +429,9 @@ def _parse_composer_json(path: str) -> List[_WebDep]:
         for name, spec in section.items():
             if name == "php" or name.startswith("ext-"):
                 continue
-            version = _strip_php_range(str(spec))
-            if version:
-                deps.append(_WebDep(name, version, "Packagist", "composer.json"))
+            got = _php_declared(str(spec))
+            if got:
+                deps.append(_WebDep(name, got[0], "Packagist", "composer.json", got[1]))
     return deps
 
 
@@ -541,6 +605,15 @@ _CARGO_RANGE_PREFIX_RE = re.compile(r'^[\^~><=\s]+')
 
 
 def _strip_cargo_range(spec: str) -> Optional[str]:
+    got = _cargo_declared(spec)
+    return got[0] if got else None
+
+
+def _cargo_declared(spec: str) -> Optional[Tuple[str, str]]:
+    """(version, version_source) for a Cargo.toml requirement.
+
+    A bare Cargo version ("1.2.3") is a caret requirement (^1.2.3), so it is a
+    range; only "=1.2.3" pins one version."""
     spec = (spec or "").strip()
     if not spec or spec == "*":
         return None
@@ -549,7 +622,9 @@ def _strip_cargo_range(spec: str) -> Optional[str]:
     cleaned = _CARGO_RANGE_PREFIX_RE.sub("", spec).strip()
     if not cleaned or not re.match(r'^\d', cleaned):
         return None
-    return cleaned
+    exact = (spec.startswith("=") and _CARGO_RANGE_PREFIX_RE.sub("", spec[1:]) == spec[1:].strip()
+             and _FULL_SEMVER_RE.match(cleaned))
+    return cleaned, (VERSION_SOURCE_DECLARED_EXACT if exact else VERSION_SOURCE_DECLARED_RANGE)
 
 
 def _parse_cargo_toml(path: str) -> List[_WebDep]:
@@ -571,9 +646,9 @@ def _parse_cargo_toml(path: str) -> List[_WebDep]:
             continue
         m = _CARGO_TOML_SIMPLE_DEP_RE.match(line)
         if m:
-            version = _strip_cargo_range(m.group(2))
-            if version:
-                deps.append(_WebDep(m.group(1), version, "crates.io", "Cargo.toml"))
+            got = _cargo_declared(m.group(2))
+            if got:
+                deps.append(_WebDep(m.group(1), got[0], "crates.io", "Cargo.toml", got[1]))
             continue
         m = _CARGO_TOML_TABLE_DEP_RE.match(line)
         if m:
@@ -582,9 +657,9 @@ def _parse_cargo_toml(path: str) -> List[_WebDep]:
                 continue
             vm = _CARGO_TOML_TABLE_VERSION_RE.search(body)
             if vm:
-                version = _strip_cargo_range(vm.group(1))
-                if version:
-                    deps.append(_WebDep(m.group(1), version, "crates.io", "Cargo.toml"))
+                got = _cargo_declared(vm.group(1))
+                if got:
+                    deps.append(_WebDep(m.group(1), got[0], "crates.io", "Cargo.toml", got[1]))
     return deps
 
 
@@ -1038,9 +1113,16 @@ def _dedupe(deps: List[_WebDep]) -> List[_WebDep]:
         if (dep.ecosystem, dep.name) in resolved_names and not _is_resolved(dep):
             continue
         key = (dep.ecosystem, dep.name, dep.version)
-        if key not in best:
+        # Same package@version from two manifests: the stronger version proof
+        # is kept (an exact pin over a range floor).
+        if key not in best or (_VERSION_SOURCE_RANK.get(version_source_for(dep.source, dep.version_source), 0)
+                               > _VERSION_SOURCE_RANK.get(version_source_for(best[key].source, best[key].version_source), 0)):
             best[key] = dep
     return list(best.values())
+
+
+_VERSION_SOURCE_RANK = {VERSION_SOURCE_DECLARED_RANGE: 1, VERSION_SOURCE_DECLARED_EXACT: 2,
+                        VERSION_SOURCE_LOCKFILE: 3}
 
 
 def _finding_from_osv(dep: _WebDep, osv_finding_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -1063,7 +1145,11 @@ def _finding_from_osv(dep: _WebDep, osv_finding_dict: Dict[str, Any]) -> Dict[st
     )
 
     rule_id = f"SCA-{cve_id}"
-    return {
+    version_source = version_source_for(dep.source, dep.version_source)
+    if version_source == VERSION_SOURCE_DECLARED_RANGE:
+        description += (f" {dep.version} is the lower bound of the range declared in {dep.source}; "
+                        f"the installed version may be newer.")
+    finding = {
         "rule_id": rule_id,
         "file_path": dep.source,
         "name": f"{cve_id}: {dep.name}@{dep.version} (vulnerable dependency)",
@@ -1085,6 +1171,12 @@ def _finding_from_osv(dep: _WebDep, osv_finding_dict: Dict[str, Any]) -> Dict[st
             "ecosystem": dep.ecosystem,
         },
     }
+    if version_source:
+        # Top level too: the platform keeps the short scalar fields of a large
+        # finding, never its nested dicts.
+        finding["version_source"] = version_source
+        finding["sca"]["version_source"] = version_source
+    return finding
 
 
 def _rule_def_from_finding(finding: Dict[str, Any]) -> Dict[str, Any]:

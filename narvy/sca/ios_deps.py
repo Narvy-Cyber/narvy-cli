@@ -432,7 +432,7 @@ def _finding_from_cve(dep: _IOSDep, cve_dict: Dict[str, Any], source_label: str)
     )
 
     rule_id = f"SCA-{cve_id}"
-    return {
+    finding = {
         "rule_id": rule_id,
         "file_path": dep.name,
         "name": f"{cve_id}: {dep.name}@{dep.version} (vulnerable dependency)",
@@ -455,6 +455,12 @@ def _finding_from_cve(dep: _IOSDep, cve_dict: Dict[str, Any], source_label: str)
             "cve_source": source_label,
         },
     }
+    # Podfile.lock / Package.resolved give the resolved version; a version
+    # read from a framework binary has no version_source (as on the platform).
+    if dep.source in ("podfile.lock", "package.resolved"):
+        finding["version_source"] = "lockfile"
+        finding["sca"]["version_source"] = "lockfile"
+    return finding
 
 
 def _rule_def_from_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
