@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .osv_client import MAX_DEPENDENCIES_PER_SCAN, OSVClient, coverage_after, coverage_before, get_default_client
@@ -1099,20 +1099,38 @@ def _is_resolved(dep: _WebDep) -> bool:
     return os.path.basename(dep.source.replace("\\", "/")) in _RESOLVED_SOURCES
 
 
-def _dedupe(deps: List[_WebDep]) -> List[_WebDep]:
-    """One entry per (ecosystem, name, version).
+def _source_dir(dep: _WebDep) -> str:
+    """The manifest's directory, relative to the scan root ('' = the root)."""
+    return os.path.dirname(dep.source.replace("\\", "/"))
 
-    A lockfile often holds several versions of one package (lodash 4.17.21 at
-    the top, 4.17.4 nested under an old dependency); every one is checked. A
-    manifest-only version is dropped when a lockfile resolves that package,
-    since the manifest range floor is not what is installed.
+
+def _rel_ancestors(rel_dir: str) -> List[str]:
+    """'a/b' -> ['a/b', 'a', '']."""
+    out = [rel_dir]
+    while rel_dir:
+        rel_dir = os.path.dirname(rel_dir)
+        out.append(rel_dir)
+    return out
+
+
+def _dedupe(deps: List[_WebDep]) -> List[_WebDep]:
+    """One entry per (ecosystem, name, version) and manifest directory.
+
+    A monorepo with the same package@version in package.json and
+    backend/package.json reports both: the platform keys dependency rows by
+    manifest. A lockfile often holds several versions of one package (lodash
+    4.17.21 at the top, 4.17.4 nested under an old dependency); every one is
+    checked. A manifest-only version is dropped when a lockfile in the same
+    directory or a parent one (a workspace root) resolves that package, since
+    the manifest range floor is not what is installed.
     """
-    resolved_names = {(d.ecosystem, d.name) for d in deps if _is_resolved(d)}
-    best: Dict[Tuple[str, str, str], _WebDep] = {}
+    resolved = {(d.ecosystem, _source_dir(d), d.name) for d in deps if _is_resolved(d)}
+    best: Dict[Tuple[str, str, str, str], _WebDep] = {}
     for dep in deps:
-        if (dep.ecosystem, dep.name) in resolved_names and not _is_resolved(dep):
+        if not _is_resolved(dep) and any(
+                (dep.ecosystem, a, dep.name) in resolved for a in _rel_ancestors(_source_dir(dep))):
             continue
-        key = (dep.ecosystem, dep.name, dep.version)
+        key = (dep.ecosystem, dep.name, dep.version, _source_dir(dep))
         # Same package@version from two manifests: the stronger version proof
         # is kept (an exact pin over a range floor).
         if key not in best or (_VERSION_SOURCE_RANK.get(version_source_for(dep.source, dep.version_source), 0)
@@ -1202,8 +1220,29 @@ def _collect_recursive(root_path: str, filenames, collector) -> List[_WebDep]:
         dirs.add(root_path)
     out: List[_WebDep] = []
     for d in sorted(dirs):
-        out.extend(collector(d))
+        rel = _rel_dir(root_path, d)
+        for dep in collector(d):
+            out.append(replace(dep, source=f"{rel}/{dep.source}" if rel and "/" not in dep.source
+                               else dep.source))
     return out
+
+
+def _rel_dir(root_path: str, path: str) -> str:
+    """``path`` relative to ``root_path`` with '/' ('' for the root itself)."""
+    rel = os.path.relpath(path, root_path).replace(os.sep, "/").replace("\\", "/")
+    return "" if rel == "." else rel
+
+
+def _safe_rel_source(source: str) -> str:
+    """The manifest path as sent: relative to the scan root, '/' separators,
+    never absolute and never outside the root (else the bare file name)."""
+    p = str(source or "").replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    parts = p.split("/")
+    if (p.startswith("/") or re.match(r"^[A-Za-z]:", p) or ".." in parts or "" in parts):
+        return parts[-1] if parts and parts[-1] not in ("", "..") else p.rsplit("/", 1)[-1]
+    return p
 
 
 # Manifest filenames per ecosystem, to tell "no manifest" ('none') from
@@ -1255,7 +1294,7 @@ def collect_dependencies(source_dir: str) -> List[_WebDep]:
     deps.extend(_collect_recursive(source_dir, ("Cargo.lock", "Cargo.toml"), _collect_crates_deps))
     deps.extend(_collect_maven_deps(source_dir))
     deps.extend(_collect_nuget_deps(source_dir))
-    return deps
+    return [replace(d, source=_safe_rel_source(d.source)) for d in deps]
 
 
 def scan(source_dir: str, osv_client: OSVClient = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:

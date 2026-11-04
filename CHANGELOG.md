@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a range such as `^0.4.0` in package.json, composer.json or Cargo.toml).
   A `declared_range` finding says the installed version may be newer. The
   platform applies the same default view as for its own scans.
+- Source-scan dependency findings name their manifest or lockfile by its
+  path relative to the scanned folder (`backend/package.json`, was
+  `package.json`), with `/` separators, never absolute.
 - `NARVY_API_TOKEN` is read as an alias of `NARVY_TOKEN` (used when
   `NARVY_TOKEN` is not set).
 - `init-ci` templates (GitHub, GitLab, Bitbucket): the scan adds `--upload`
@@ -33,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A package version declared in two manifests of one repository
+  (`package.json` and `backend/package.json`) is reported once per
+  manifest; it was reported once. A lockfile still replaces the manifest
+  guesses of its own directory and of the directories below it.
 - `scan . --upload` sent "." as the app name; it now sends the directory
   name. The SBOM and CBOM component name had the same issue.
 - `scan --upload` from the root of a git checkout with a remote sends the

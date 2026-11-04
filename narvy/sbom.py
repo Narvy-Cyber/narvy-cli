@@ -206,6 +206,10 @@ def collect_components(target: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any
     if os.path.isdir(target):
         scope["kind"] = "source-directory"
         deps = web_deps._dedupe(web_deps.collect_dependencies(target))
+        # One component per package@version (bom-ref, below): the manifest with
+        # the strongest version proof first, as before the per-manifest dedupe.
+        deps.sort(key=lambda d: -web_deps._VERSION_SOURCE_RANK.get(
+            web_deps.version_source_for(d.source, d.version_source), 0))
         licenses = _license_index(target)
         for d in deps:
             comps.append(_component(d.ecosystem, d.name, d.version, d.source,
