@@ -37,9 +37,54 @@ def _git(cwd, *args):
     ("git@github.com:a/b.git", "github.com:a/b.git"),
     ("ssh://git@github.com/a/b.git", "ssh://github.com/a/b.git"),
     ("", None),
+    # unencoded / # ? in the password: urlsplit raised or kept a fragment
+    ("https://ci:pa/ss#wo?rd@gitlab.com/shop/api.git", "https://gitlab.com/shop/api.git"),
+    ("https://ci:pa:ss@gitlab.com:notaport/shop/api.git", "https://gitlab.com/shop/api.git"),
+    ("https://ci:x@gitlab.com:99999/shop/api.git", "https://gitlab.com/shop/api.git"),
+    # scheme-less user:SECRET@host/o/r
+    ("deploy:SECRET@github.com/o/r", "github.com/o/r"),
+    ("deploy:SECRET@github.com:o/r.git", "github.com:o/r.git"),
+    ("not a url", None),
+    ("https://@/x", None),
 ])
 def test_strip_credentials(url, expected):
-    assert repo_identity.strip_credentials(url) == expected
+    got = repo_identity.strip_credentials(url)
+    assert got == expected
+    assert "SECRET" not in str(got) and "pa" not in str(got).split("/")[0]
+
+
+def test_git_identity_never_raises(monkeypatch, tmp_path):
+    """A remote that breaks the parser must not fail the upload after the scan."""
+    monkeypatch.setattr(repo_identity, "_git_identity",
+                        lambda p: (_ for _ in ()).throw(ValueError("Port could not be cast")))
+    assert repo_identity.git_identity(str(tmp_path)) == (None, None)
+
+
+def test_malformed_remote_with_secret_never_echoed(monkeypatch, tmp_path, capsys):
+    """Real checkout whose remote has an unencoded password: upload goes on,
+    no fragment of the password is printed, even on a 402."""
+    if not shutil.which("git"):
+        pytest.skip("git not installed")
+    repo = tmp_path / "shop"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "remote", "add", "origin", "https://ci:TOP/SEC#RET@gitlab.com:bad/shop/api.git")
+    _creds(monkeypatch, {"token": "t", "plan": "titan"})
+    sent = {}
+
+    def fake_ingest(token, **kw):
+        sent.update(kw)
+        return 402, {"error": "asset_limit_exceeded", "current": 1, "max": 1, "upgrade_url": "/billing",
+                     "tried": ["git remote gitlab.com/shop/api", 'name "shop"']}
+    monkeypatch.setattr(cli_main.uploader, "ingest_results", fake_ingest)
+    with pytest.raises(SystemExit):
+        cli_main._submit_results_ingest([], "web-source", str(repo))
+    out = capsys.readouterr()
+    text = out.out + out.err
+    for frag in ("TOP", "SEC", "RET", "gitlab.com"):
+        assert frag not in text, frag
+    assert sent["git_remote"] == "https://gitlab.com/shop/api.git"
+    assert "its git remote" in " ".join(text.split())
 
 
 @needs_git
@@ -108,7 +153,7 @@ def test_asset_limit_message_says_what_it_tried_and_how_to_target():
     old.pop("tried")
     msg = cli_main._format_asset_limit_error(old, tried=['git remote https://github.com/a/b.git',
                                                           'name "b-main"'])
-    assert 'git remote https://github.com/a/b.git, name "b-main"' in msg
+    assert 'its git remote, name "b-main"' in msg and "github.com" not in msg
     # Commands without --app keep the plain message.
     assert "--app" not in cli_main._format_asset_limit_error(data)
 

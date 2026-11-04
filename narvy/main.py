@@ -763,7 +763,9 @@ def _format_asset_limit_error(data, tried=None):
         )
     cur, cap = data.get("current"), data.get("max")
     count = f" ({cur}/{cap})" if cur is not None and cap is not None else ""
-    tried = data.get("tried") or tried or []
+    # A remote URL is never echoed (it may come from a misconfigured checkout).
+    tried = ["its git remote" if str(t).startswith("git remote") else t
+             for t in (data.get("tried") or tried or [])]
     lines = [f"Asset limit reached{count}: this scan matched no app on your account, "
              "so it would add a new one."]
     if tried:
@@ -1584,7 +1586,7 @@ def _submit_results_ingest(all_findings, scan_mode, target_path, app=None):
     from narvy.repo_identity import git_identity
     git_remote, git_branch = (None, None) if app else git_identity(target_path)
     tried = ([f"app {app}"] if app else
-             ([f"git remote {git_remote}"] if git_remote else []) + [f'name "{app_name}"'])
+             (["git remote"] if git_remote else []) + [f'name "{app_name}"'])
 
     console.print(
         f"[cyan]Uploading {len(all_findings)} finding(s) to {rich_escape(_server_and_account(creds))} "
