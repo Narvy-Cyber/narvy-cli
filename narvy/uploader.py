@@ -61,14 +61,17 @@ def upload_scan(apk_path, token, platform="android", analysis_type="sast", confi
 
 
 def ingest_results(token, app_name, platform, scan_mode, findings, version=None,
-                   app=None, git_remote=None, git_branch=None, package_id=None):
+                   app=None, git_remote=None, git_branch=None, package_id=None,
+                   sca_coverage=None):
     """POST this scan's findings to /api/v1/ingest (no binary leaves this machine).
 
     The app is matched server-side on ``app`` (--app: name or app ID) if
     given, else the git remote, else ``app_name`` with and without a GitHub
     archive suffix. ``package_id`` (binary scans only: the APK manifest package
-    or the IPA CFBundleIdentifier) lets the server join the App a web upload of
-    the same binary created. Fields left None are not sent."""
+    or the IPA CFBundleIdentifier) lets the server match an App with the same
+    package id. ``sca_coverage`` (complete|partial|degraded|none) goes in
+    ``summary``: the server closes dependency rows missing from this scan only
+    on 'complete'. Fields left None are not sent."""
     body = {
         "app_name": app_name,
         "platform": platform,
@@ -80,6 +83,8 @@ def ingest_results(token, app_name, platform, scan_mode, findings, version=None,
                      ("package_id", package_id)):
         if val:
             body[key] = val
+    if sca_coverage:
+        body["summary"] = {"sca_coverage": sca_coverage}
     try:
         r = requests.post(
             f"{API_BASE}/api/v1/ingest",

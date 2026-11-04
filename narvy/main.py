@@ -1191,7 +1191,9 @@ def _sca_coverage(stats):
     if not detected and not unreachable and not reasons:
         status = "none"
     else:
-        status = "degraded" if unreachable else ("partial" if reasons else "complete")
+        # The vulnerability database missing, failing or stale: degraded.
+        db_degraded = unreachable or bool(stats.get("osv_stale_cache_served"))
+        status = "degraded" if db_degraded else ("partial" if reasons else "complete")
     cov = {
         "status": status,
         "dependencies_detected": detected,
@@ -1641,7 +1643,26 @@ def _ingest_package_id(scan_mode, package_id):
     return pkg
 
 
-def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, package_id=None):
+_SCA_COVERAGE_WORDS = ("complete", "partial", "degraded", "none")
+
+
+def _sca_coverage_word(scan_meta):
+    """The dependency check's coverage as one word for the ingest summary.
+
+    complete: the vulnerability database answered, every manifest was parsed
+    and every dependency with a version was looked up; partial: some were not
+    (unparsed manifest, query cap, unsupported ecosystem); degraded: the
+    database was missing, stale or failing, or the check stopped on an error;
+    none: no dependency to check (or the check did not run). The platform
+    closes dependency rows only on 'complete' (security_task._sca_coverage_complete)."""
+    cov = (scan_meta or {}).get("sca_coverage")
+    status = cov.get("status") if isinstance(cov, dict) else cov
+    status = str(status or "").strip().lower()
+    return status if status in _SCA_COVERAGE_WORDS else "none"
+
+
+def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, package_id=None,
+                           sca_coverage=None):
     """POST results to /api/v1/ingest. Exits with EXIT_ERROR on any failure.
     ``app``: --app (name or app ID) of an existing app to file the scan under.
     ``package_id``: the scanned binary's package / bundle id (binary modes only)."""
@@ -1671,6 +1692,7 @@ def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, packa
             scan_mode=_ingest_scan_mode_label(scan_mode), findings=all_findings,
             app=app, git_remote=git_remote, git_branch=git_branch,
             package_id=_ingest_package_id(scan_mode, package_id),
+            sca_coverage=sca_coverage,
         )
     except Exception as e:
         console.print(f"[bold red]Upload to {uploader.server_host()} failed:[/bold red] {e}")
@@ -1751,7 +1773,8 @@ def _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta=N
             by_root.setdefault(s["path"], [])
     # --app targets the scanned project; a nested iOS project keeps its own app.
     _submit_results_ingest(main, scan_mode, target_path, app=app,
-                           package_id=(scan_meta or {}).get("package_id"))
+                           package_id=(scan_meta or {}).get("package_id"),
+                           sca_coverage=_sca_coverage_word(scan_meta))
     for root, findings in by_root.items():
         console.print(f"[dim]iOS project in {rich_escape(root)}/:[/dim]")
         _submit_results_ingest(findings, "ios-source", os.path.join(target_path, root))

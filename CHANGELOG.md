@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Source-scan dependency findings name their manifest or lockfile by its
   path relative to the scanned folder (`backend/package.json`, was
   `package.json`), with `/` separators, never absolute.
+- `scan --upload` sends the dependency check status as
+  `summary.sca_coverage` (`complete`, `partial`, `degraded` or `none`).
+  The platform closes dependency findings missing from an upload only when
+  it is `complete`; no earlier CLI sent it.
 - `NARVY_API_TOKEN` is read as an alias of `NARVY_TOKEN` (used when
   `NARVY_TOKEN` is not set).
 - `init-ci` templates (GitHub, GitLab, Bitbucket): the scan adds `--upload`
@@ -36,10 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- A package version declared in two manifests of one repository
-  (`package.json` and `backend/package.json`) is reported once per
-  manifest; it was reported once. A lockfile still replaces the manifest
-  guesses of its own directory and of the directories below it.
+- A package version declared in several manifests is reported once, on the
+  manifest the platform's own scan picks: the first one in a top-down walk
+  (the root before its subfolders), unless another one has a stronger
+  version proof (lockfile, then exact pin, then range). A lockfile drops
+  the manifest versions of its directory and the ones below it that it
+  locks, and any declared range there (`package.json`, `composer.json`,
+  `Gemfile`), as the platform does.
+- SCA coverage is `degraded` (was `partial`) when results came from a
+  stale vulnerability database copy.
 - `scan . --upload` sent "." as the app name; it now sends the directory
   name. The SBOM and CBOM component name had the same issue.
 - `scan --upload` from the root of a git checkout with a remote sends the
