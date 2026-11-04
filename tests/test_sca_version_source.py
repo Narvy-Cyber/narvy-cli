@@ -96,18 +96,10 @@ def test_manifest_scan_tags_each_dependency(tmp_path, monkeypatch):
 
 
 def test_dedupe_keeps_the_exact_pin_over_a_range_floor():
-    # Same manifest directory: one entry, the stronger version proof.
-    a = _WebDep("x:y", "1.2.3", "Maven", "svc/build.gradle", "declared_range")
-    b = _WebDep("x:y", "1.2.3", "Maven", "svc/pom.xml", "declared_exact")
-    (kept,) = web_deps._dedupe([a, b])
-    assert kept.version_source == "declared_exact"
-
-
-def test_dedupe_keeps_one_entry_per_manifest_directory():
-    # Two manifests of a monorepo: both reported (the platform keys rows by manifest).
     a = _WebDep("x", "1.2.3", "npm", "a/package.json", "declared_range")
     b = _WebDep("x", "1.2.3", "npm", "b/package.json", "declared_exact")
-    assert sorted(d.source for d in web_deps._dedupe([a, b])) == ["a/package.json", "b/package.json"]
+    (kept,) = web_deps._dedupe([a, b])
+    assert kept.version_source == "declared_exact"
 
 
 def test_matches_the_hosted_engine_fallback_classes():

@@ -184,9 +184,12 @@ def test_dedupe_drops_manifest_floor_when_a_lockfile_resolves_the_package():
         _WebDep("lodash", "4.17.21", "npm", "yarn.lock"),
         _WebDep("lodash", "4.0.0", "npm", "packages/a/package.json"),
         _WebDep("left-pad", "1.1.0", "npm", "examples/x/package.json"),
+        _WebDep("is-odd", "3.0.1", "npm", "examples/x/package.json", "declared_exact"),
     ]
     got = sorted((d.name, d.version) for d in web_deps._dedupe(deps))
-    assert got == [("left-pad", "1.1.0"), ("lodash", "4.17.21")]
+    # Same rule as the platform (lockfile_parser._drop_manifest_guesses_under_lockfiles):
+    # a range floor under a lockfile is dropped; an exact pin it does not lock is kept.
+    assert got == [("is-odd", "3.0.1"), ("lodash", "4.17.21")]
 
 
 def test_dedupe_same_name_other_ecosystem_is_separate():

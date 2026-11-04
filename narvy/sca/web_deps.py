@@ -1113,26 +1113,56 @@ def _rel_ancestors(rel_dir: str) -> List[str]:
     return out
 
 
-def _dedupe(deps: List[_WebDep]) -> List[_WebDep]:
-    """One entry per (ecosystem, name, version) and manifest directory.
+# lockfile_parser._LOCKFILES_BY_ECO / _MANIFESTS on the platform: a declared
+# range in one of these manifests, at or under a lockfile of its ecosystem,
+# is never the installed version.
+_RANGE_DROP_LOCKFILES = {
+    "npm": frozenset({"package-lock.json", "pnpm-lock.yaml", "yarn.lock"}),
+    "Packagist": frozenset({"composer.lock"}),
+    "RubyGems": frozenset({"Gemfile.lock"}),
+}
+_RANGE_DROP_MANIFESTS = frozenset({"package.json", "composer.json", "Gemfile"})
 
-    A monorepo with the same package@version in package.json and
-    backend/package.json reports both: the platform keys dependency rows by
-    manifest. A lockfile often holds several versions of one package (lodash
-    4.17.21 at the top, 4.17.4 nested under an old dependency); every one is
-    checked. A manifest-only version is dropped when a lockfile in the same
-    directory or a parent one (a workspace root) resolves that package, since
-    the manifest range floor is not what is installed.
+
+def _walk_order(dep: _WebDep) -> Tuple[str, ...]:
+    """Top-down walk position of the manifest's directory: the root first,
+    then each folder before its subfolders (os.walk order, siblings sorted)."""
+    d = _source_dir(dep)
+    return tuple(d.split("/")) if d else ()
+
+
+def _dedupe(deps: List[_WebDep]) -> List[_WebDep]:
+    """One entry per (ecosystem, name, version), the same choice as the
+    platform's lockfile parser (src/web/sca/lockfile_parser.parse_all_lockfiles):
+
+    * a manifest-only version is dropped when a lockfile in its directory or
+      a parent one (a workspace root) resolves that package, or when it is a
+      declared range under such a lockfile: the range floor is not what is
+      installed;
+    * then one package@version across all manifests: the first one met in a
+      top-down walk (the root before its subfolders) is the primary, unless a
+      later one carries a stronger version proof (lockfile > exact pin >
+      range floor). Its path is the one reported.
+
+    A lockfile often holds several versions of one package (lodash 4.17.21 at
+    the top, 4.17.4 nested under an old dependency); every one is checked.
     """
     resolved = {(d.ecosystem, _source_dir(d), d.name) for d in deps if _is_resolved(d)}
-    best: Dict[Tuple[str, str, str, str], _WebDep] = {}
-    for dep in deps:
-        if not _is_resolved(dep) and any(
-                (dep.ecosystem, a, dep.name) in resolved for a in _rel_ancestors(_source_dir(dep))):
-            continue
-        key = (dep.ecosystem, dep.name, dep.version, _source_dir(dep))
+    lock_dirs = {(d.ecosystem, _source_dir(d)) for d in deps
+                 if os.path.basename(d.source) in _RANGE_DROP_LOCKFILES.get(d.ecosystem, ())}
+    best: Dict[Tuple[str, str, str], _WebDep] = {}
+    for dep in sorted(deps, key=_walk_order):
+        if not _is_resolved(dep):
+            above = _rel_ancestors(_source_dir(dep))
+            if any((dep.ecosystem, a, dep.name) in resolved for a in above):
+                continue
+            if (os.path.basename(dep.source) in _RANGE_DROP_MANIFESTS
+                    and version_source_for(dep.source, dep.version_source) == VERSION_SOURCE_DECLARED_RANGE
+                    and any((dep.ecosystem, a) in lock_dirs for a in above)):
+                continue
+        key = (dep.ecosystem, dep.name, dep.version)
         # Same package@version from two manifests: the stronger version proof
-        # is kept (an exact pin over a range floor).
+        # is kept (an exact pin over a range floor); on a tie, the first one.
         if key not in best or (_VERSION_SOURCE_RANK.get(version_source_for(dep.source, dep.version_source), 0)
                                > _VERSION_SOURCE_RANK.get(version_source_for(best[key].source, best[key].version_source), 0)):
             best[key] = dep
