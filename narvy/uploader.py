@@ -61,12 +61,14 @@ def upload_scan(apk_path, token, platform="android", analysis_type="sast", confi
 
 
 def ingest_results(token, app_name, platform, scan_mode, findings, version=None,
-                   app=None, git_remote=None, git_branch=None):
+                   app=None, git_remote=None, git_branch=None, package_id=None):
     """POST this scan's findings to /api/v1/ingest (no binary leaves this machine).
 
     The app is matched server-side on ``app`` (--app: name or app ID) if
     given, else the git remote, else ``app_name`` with and without a GitHub
-    archive suffix. Fields left None are not sent."""
+    archive suffix. ``package_id`` (binary scans only: the APK manifest package
+    or the IPA CFBundleIdentifier) lets the server join the App a web upload of
+    the same binary created. Fields left None are not sent."""
     body = {
         "app_name": app_name,
         "platform": platform,
@@ -74,7 +76,8 @@ def ingest_results(token, app_name, platform, scan_mode, findings, version=None,
         "version": version,
         "findings": findings,
     }
-    for key, val in (("app", app), ("git_remote", git_remote), ("git_branch", git_branch)):
+    for key, val in (("app", app), ("git_remote", git_remote), ("git_branch", git_branch),
+                     ("package_id", package_id)):
         if val:
             body[key] = val
     try:

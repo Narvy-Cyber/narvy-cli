@@ -43,7 +43,7 @@ from .apk_memory_preflight import is_auto as is_auto_mem
 from .rule_engine import load_rules_from_dir, run_rules_on_file
 from . import auth, own_reports, uploader, telemetry
 from . import secret_output
-from .third_party_filter import get_own_package_roots, resolve_file_scope, check_android_override
+from .third_party_filter import get_own_package_roots, resolve_file_scope, check_android_override, detect_own_package
 from .scope_config import load_scope_config
 from . import semgrep_engine
 from .pathnorm import canonical_path
@@ -937,6 +937,8 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
             rules = []
             rules_run = {}
             all_findings = []
+            # The decoded manifest's package attribute (None when jadx did not run).
+            package_id = detect_own_package(temp_dir)
             if code_skipped is None:
                 task2 = progress.add_task("[cyan]Analyzing files...", total=None)
                 rules_path = os.path.join(os.path.dirname(__file__), 'rules', 'android')
@@ -1049,7 +1051,7 @@ def _run_local_scan(apk_path, max_mem, override_config=None, force=False,
                     console.print("[dim]Native hardening check skipped (lief not installed).[/dim]")
             except Exception as e:
                 console.print(f"[dim]Native hardening check failed (continuing without it): {e}[/dim]")
-    meta = {"sca_coverage": sca_cov, "rules_run": rules_run}
+    meta = {"sca_coverage": sca_cov, "rules_run": rules_run, "package_id": package_id}
     if code_skipped is not None:
         meta["code_coverage"] = {"status": "not_run", "reason": "tool_missing_offline", "note": code_skipped}
     return all_findings, rules, meta
@@ -1440,7 +1442,8 @@ def _run_ios_binary_scan(ipa_path, override_config=None):
         sca_cov = _sca_failed_coverage(e)
 
     return result["findings"], result["rule_defs"], {"encrypted": bool(result.get("encrypted")), "sca_coverage": sca_cov,
-                                                     "rules_run": {"binary": len(ios_binary_analyzer.all_rule_defs())}}
+                                                     "rules_run": {"binary": len(ios_binary_analyzer.all_rule_defs())},
+                                                     "package_id": result.get("bundle_id")}
 
 
 def _run_split_bundle_scan(bundle_path, max_mem, override_config=None, force=False):
@@ -1571,9 +1574,25 @@ def _upload_failed_label(status):
     return f"Upload to {uploader.server_host()} failed ({f'HTTP {status}' if status else 'no response'}):"
 
 
-def _submit_results_ingest(all_findings, scan_mode, target_path, app=None):
+_BINARY_SCAN_MODES = ("android", "android-bundle", "ios-binary")
+_PACKAGE_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,199}$")
+
+
+def _ingest_package_id(scan_mode, package_id):
+    """The package / bundle id to send, or None. Binary scans only, dotted ids only
+    (the server's clean_package_id shape): never a source scan, never a placeholder."""
+    if scan_mode not in _BINARY_SCAN_MODES or not isinstance(package_id, str):
+        return None
+    pkg = package_id.strip()
+    if not _PACKAGE_ID_RE.match(pkg) or "." not in pkg.strip("."):
+        return None
+    return pkg
+
+
+def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, package_id=None):
     """POST results to /api/v1/ingest. Exits with EXIT_ERROR on any failure.
-    ``app``: --app (name or app ID) of an existing app to file the scan under."""
+    ``app``: --app (name or app ID) of an existing app to file the scan under.
+    ``package_id``: the scanned binary's package / bundle id (binary modes only)."""
     creds = auth.load_credentials()
     if not creds:
         console.print("[bold red]Not logged in.[/bold red] Run `narvy login` first, or drop --upload for a local-only scan.")
@@ -1597,6 +1616,7 @@ def _submit_results_ingest(all_findings, scan_mode, target_path, app=None):
             creds["token"], app_name=app_name, platform=platform,
             scan_mode=_ingest_scan_mode_label(scan_mode), findings=all_findings,
             app=app, git_remote=git_remote, git_branch=git_branch,
+            package_id=_ingest_package_id(scan_mode, package_id),
         )
     except Exception as e:
         console.print(f"[bold red]Upload to {uploader.server_host()} failed:[/bold red] {e}")
@@ -1676,7 +1696,8 @@ def _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta=N
         if s.get("mode") == "ios-source" and s.get("status") != "failed":
             by_root.setdefault(s["path"], [])
     # --app targets the scanned project; a nested iOS project keeps its own app.
-    _submit_results_ingest(main, scan_mode, target_path, app=app)
+    _submit_results_ingest(main, scan_mode, target_path, app=app,
+                           package_id=(scan_meta or {}).get("package_id"))
     for root, findings in by_root.items():
         console.print(f"[dim]iOS project in {rich_escape(root)}/:[/dim]")
         _submit_results_ingest(findings, "ios-source", os.path.join(target_path, root))

@@ -981,6 +981,7 @@ def analyze_ipa(ipa_path: str, override_config: Optional[ScopeConfig] = None) ->
                 return result
 
             app_bundle_id = get_own_bundle_id(plist)
+            result["bundle_id"] = app_bundle_id
 
             exe_name = plist.get("CFBundleExecutable")
             if not exe_name:
