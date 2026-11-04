@@ -112,7 +112,7 @@ def test_second_run_does_not_scan_the_first_report(tmp_path, fmt, name):
 def test_upload_line_names_the_server_when_token_comes_from_env(monkeypatch):
     monkeypatch.setattr(uploader, "API_BASE", "https://narvy.io")
     assert cli_main._server_and_account({"token": "t", "email": "", "plan": ""}) == "narvy.io"
-    assert cli_main._server_and_account({"email": "a@b.c", "plan": "starter"}) == "narvy.io (a@b.c, starter)"
+    assert cli_main._server_and_account({"email": "a@b.c", "plan": "starter"}) == "narvy.io (a@b.c, Starter)"
     monkeypatch.setattr(uploader, "API_BASE", "http://127.0.0.1:9")
     assert cli_main._server_and_account({}) == "127.0.0.1:9"
     assert "127.0.0.1:9" in cli_main._upload_failed_label(401)
@@ -125,8 +125,9 @@ def test_upload_failure_prints_the_host(tmp_path):
     r = _run_cli("scan", root, "--upload",
                  env_extra={"NARVY_TOKEN": "bogus", "NARVY_URL": "http://127.0.0.1:9"})
     assert r.returncode == cli_main.EXIT_ERROR
-    assert "to 127.0.0.1:9 for server-side curation" in _text(r)
+    # The token check runs before the scan: the unreachable server is reported up front.
     assert "Upload to 127.0.0.1:9 failed" in _text(r)
+    assert "for server-side curation" not in _text(r)
 
 
 # ------------------------------------------------------------ flask cookie rules

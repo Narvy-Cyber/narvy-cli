@@ -24,16 +24,15 @@ python -m pip install --user pipx
 python -m pipx ensurepath
 # close and reopen your terminal after this (PATH change needs a fresh shell)
 
-# Install the CLI - one command, that's it:
-pipx install /path/to/narvy   # or a git URL once this is published
+# Install the CLI from PyPI (the package is narvy-cli, the command is narvy):
+pipx install narvy-cli
 
 narvy doctor
 narvy scan /path/to/some.apk
 ```
 
-To upgrade after pulling a new version: `pipx uninstall narvy`
-then `pipx install /path/to/narvy` again (pipx doesn't have a
-one-shot "reinstall from local path" command).
+To upgrade: `pipx upgrade narvy-cli`. Without pipx: `pip install narvy-cli`
+(`pip install --upgrade narvy-cli` to upgrade).
 
 ---
 
@@ -93,7 +92,7 @@ narvy --help
 
 ## Prerequisites (all platforms)
 
-- **Python 3.9+** (any recent Python 3 works)
+- **Python 3.10+**
 - **Java: none required.** jadx needs a JRE 11+, but the CLI auto-detects
   your system Java and, if it's missing or too old (or JAVA_HOME is
   stale/broken), auto-downloads
@@ -126,9 +125,18 @@ narvy scan /path/to/some.apk --upload
   Semgrep-powered AST engine, can take several minutes on larger apps,
   that's normal, don't interrupt it), then either "No issues found" or a
   table of findings with Severity/Rule Name/File/Line columns.
-- Step 2 prints "Logged in as your@email.com (your-plan plan)."
+- Step 2 prints "Logged in as your@email.com (Starter plan)." with the
+  plan name shown on narvy.io/pricing.
 - Step 3 prints "Results uploaded. scan_id=..." followed by a direct
   "View this scan: https://narvy.io/analysis/s/..." link.
+
+**CI, no `narvy login`:** set the token in the `NARVY_TOKEN` environment
+variable (a CI secret). It takes precedence over a stored login.
+`NARVY_API_TOKEN` is read as an alias when `NARVY_TOKEN` is not set. With
+`--upload`, the token is checked before the scan starts: a rejected token or
+an unreachable server exits 4 right away. `narvy init-ci --github`,
+`--gitlab` and `--bitbucket` write a pipeline that adds `--upload` only when
+`NARVY_TOKEN` is set.
 
 **If something doesn't match this exactly, run `narvy doctor` first
 and report ITS output - it catches the whole class of environment issues
@@ -162,12 +170,9 @@ anything failed. `.apks` bundles (raw bundletool output) are found but not
 uploaded - same restriction `scan --upload` already has on a single file -
 and reported separately so they don't get silently dropped.
 
-`scans` currently depends on a server endpoint (`GET /api/v1/scans`) that
-is **not deployed yet** as of this writing - it will fail with a clear "not
-available yet" message until the server ships it. It is real, tested CLI
-code, ready to work the moment the server side lands; it is not fake or
-half-built, it is genuinely blocked on separate server-side work. Track
-your scans at narvy.io in the meantime.
+`scans` lists the most recent scans on your account (`GET /api/v1/scans`):
+scan ID, app, app ID, platform, type, status, findings and date. The app
+ID is what `scan --upload --app <name or app ID>` takes.
 
 ---
 
@@ -212,7 +217,7 @@ works - it falls back to LIEF's symbol-table-only Obj-C detection (no
 per-method names, but nothing crashes and nothing is silently skipped).
 
 ```bash
-pip install narvy[ios-full]   # pulls in icdump on top of the base install
+pip install 'narvy-cli[ios-full]'   # pulls in icdump on top of the base install
 # or just: pip install icdump           # into the same venv/pipx env, any time
 ```
 
@@ -452,13 +457,13 @@ couple of minutes) a hardening index, a severity breakdown, and a list of
 ### `narvy cloud-scan` - AWS posture check, your own credentials
 
 ```bash
-pip install narvy[cloud]   # pulls in boto3, opt-in (see below)
+pip install 'narvy-cli[cloud]'   # pulls in boto3 and google-auth, opt-in (see below)
 aws configure                        # if you haven't already
 narvy cloud-scan --provider aws
 narvy cloud-scan --provider aws --region eu-west-3 --format json
 ```
 
-**Prerequisite: `pip install narvy[cloud]`** (boto3 is an opt-in
+**Prerequisite: `pip install 'narvy-cli[cloud]'`** (boto3 is an opt-in
 extra - most Android/iOS-only users never touch this command, so the base
 install stays light; running `cloud-scan` without it prints a clear
 one-line fix instead of a traceback) **and your own already-configured AWS
@@ -489,6 +494,10 @@ go to stdout by default or to `--output-file` if given.
 | 0 | the scan ran with full coverage and found nothing at or above your threshold |
 | 1 | the gate tripped: at least one finding is at or above your threshold (the reason is printed, with the count per severity) |
 | 2 | the gate could not be evaluated (part of the scan didn't run), so it won't pass the build |
+| 3 | the target or arguments are not usable (path not found, unsupported file type or project, refused URL, invalid option) |
+| 4 | the scan, login, upload or report write failed (including a token rejected before an `--upload` scan) |
+
+Codes 3 and 4 apply with or without `--fail-on`.
 
 Exit 2 is the one worth reading twice. A gate is a claim about your code, not
 about the scan, and there are cases where the scan finishes without ever having

@@ -420,7 +420,7 @@ def build_cbom(target: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "metadata": {
             "timestamp": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             "tools": {"components": [{"type": "application", "name": "narvy-cli", "version": __version__}]},
-            "component": {"type": "application", "name": os.path.basename(os.path.normpath(target)) or target,
+            "component": {"type": "application", "name": os.path.basename(os.path.abspath(target)) or target,
                           "bom-ref": "target"},
             "properties": meta_props,
         },

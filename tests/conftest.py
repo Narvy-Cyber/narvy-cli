@@ -31,3 +31,14 @@ def _isolated_get_only_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(NucleiScanner, "_GET_ONLY_CACHE", {})
     monkeypatch.setattr(NucleiScanner, "_GET_ONLY_DISK_LOADED", False)
     monkeypatch.setattr(NucleiScanner, "_GET_ONLY_DIRTY", False)
+
+
+@pytest.fixture(autouse=True)
+def _no_token_check(monkeypatch):
+    """No test calls the real /api/v1/whoami (the pre-scan --upload token check);
+    tests of that check patch uploader.whoami themselves. The runner's own
+    NARVY_TOKEN / NARVY_API_TOKEN never leak into a test."""
+    from narvy import uploader
+    monkeypatch.delenv("NARVY_TOKEN", raising=False)
+    monkeypatch.delenv("NARVY_API_TOKEN", raising=False)
+    monkeypatch.setattr(uploader, "whoami", lambda token: (200, {"email": "t@example.org", "plan": "starter"}))

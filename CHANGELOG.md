@@ -24,8 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a range such as `^0.4.0` in package.json, composer.json or Cargo.toml).
   A `declared_range` finding says the installed version may be newer. The
   platform applies the same default view as for its own scans.
+- `NARVY_API_TOKEN` is read as an alias of `NARVY_TOKEN` (used when
+  `NARVY_TOKEN` is not set).
+- `init-ci` templates (GitHub, GitLab, Bitbucket): the scan adds `--upload`
+  when a `NARVY_TOKEN` secret or variable is set. The Bitbucket template
+  now caches the OSV database.
 
 ### Fixed
+
+- `scan . --upload` sent "." as the app name; it now sends the directory
+  name. The SBOM and CBOM component name had the same issue.
+- `scan --upload` checks the token before the scan: a rejected token
+  (401/403), a missing login or an unreachable server exits 4 before
+  scanning instead of after.
+- After a local scan, a logged-in user is told to add `--upload`, not to
+  run `narvy login`.
 
 - `cloud-scan` (AWS): a WAF error (regional or global), an S3 bucket ACL
   error, an IAM login profile error, a CIS 1.2 MFA error or a CIS 1.3
@@ -39,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `login`, `scans` and the upload line show the plan by its public name
+  (`Pro`, not `titan`).
+- SETUP.md: PyPI install (`pipx install narvy-cli`), `narvy-cli[...]`
+  extras, Python 3.10+, `scans` documented as available, exit codes 3 and
+  4, `NARVY_TOKEN` for CI. README: `NARVY_TOKEN` and the OSV cache
+  directory (`XDG_CACHE_HOME`, `NARVY_OSV_DB_DIR`).
 - Secret masking, same as the platform: a value of 8 to 19 characters shows
   its first 2 and last 2 characters and the description gives its length
   (fully masked before). Below 8 characters the value stays fully masked;

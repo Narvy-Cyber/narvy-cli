@@ -20,9 +20,14 @@ def _env(name):
     return os.environ.get(f"NARVY_{name}", "").strip()
 
 
+def token_from_env():
+    """The CI token: NARVY_TOKEN, or NARVY_API_TOKEN (the name the narvy.io cli.sh script reads) as an alias."""
+    return _env("TOKEN") or _env("API_TOKEN")
+
+
 def load_credentials():
-    # NARVY_TOKEN overrides the stored file for CI / parallel use.
-    env_token = _env("TOKEN")
+    # NARVY_TOKEN (alias NARVY_API_TOKEN) overrides the stored file for CI / parallel use.
+    env_token = token_from_env()
     if env_token:
         return {
             "token": env_token,

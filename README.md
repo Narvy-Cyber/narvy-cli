@@ -133,7 +133,7 @@ Three other commands work on targets you own, without an app file:
 | iOS library names | only with `NARVY_GITHUB_ADVISORIES=1` (never with `--offline`) | api.github.com |
 | JRE and jadx downloads | first APK scan, only if Java 11+ or jadx is missing | api.adoptium.net, github.com |
 | One anonymous usage event per command (fields listed in [Telemetry](#telemetry)) | every command except `store-check` and `telemetry`, on by default | narvy.io |
-| Findings, never code or binary | only with `--upload` (needs `narvy login`) | your Narvy account |
+| Findings, never code or binary | only with `--upload` (needs `narvy login` or `NARVY_TOKEN`) | your Narvy account |
 
 `scan --offline` sends nothing: no database or tool download, no usage
 event, no GitHub advisory lookup. If jadx or Java is missing for an APK scan,
@@ -305,6 +305,12 @@ paid plan (Starter and up) and is never on by default. `narvy upload-all
 <directory>` does the same for every binary target found in a folder in one
 command. `narvy scans` lists recent scans on your account from the terminal.
 
+In CI, set the token in the `NARVY_TOKEN` environment variable instead of
+running `narvy login` (narvy.io > Profile > API Credentials). It takes
+precedence over a stored login. `NARVY_API_TOKEN` is read as an alias when
+`NARVY_TOKEN` is not set. With `--upload`, the token is checked before the
+scan starts: a rejected token or an unreachable server exits 4 right away.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -384,7 +390,8 @@ crates.io, NuGet, SwiftURL), the CLI downloads
 `https://osv-vulnerabilities.storage.googleapis.com/<ecosystem>/all.zip`.
 The request names the ecosystem and nothing else: no package name, no code,
 no path. The file is checked (size, md5, zip integrity), stored as SQLite in
-`~/.cache/narvy/osv/` (`NARVY_OSV_DB_DIR` to change it) with a sha256
+`~/.cache/narvy/osv/` (`$XDG_CACHE_HOME/narvy/osv/` when `XDG_CACHE_HOME` is
+set, `NARVY_OSV_DB_DIR` to choose another directory) with a sha256
 checked on each use, and downloaded again when older than 24 hours.
 
 ```bash
@@ -419,7 +426,9 @@ library with no known source repository URL) are counted as unverified.
 ### CI
 
 Cache `~/.cache/narvy/osv` between runs, or every run downloads the
-database again. `narvy init-ci --github` and `--gitlab` write this for you.
+database again. `narvy init-ci --github`, `--gitlab` and `--bitbucket` write
+this for you, and add `--upload` to the scan when a `NARVY_TOKEN` secret or
+variable is set (without one the scan stays local).
 
 GitHub Actions, one key per UTC day:
 

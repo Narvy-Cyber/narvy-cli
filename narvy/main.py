@@ -730,6 +730,14 @@ def _print_upgrade_hint(status, data):
         console.print(f"[dim]Plans and upgrade: {url}[/dim]")
 
 
+def _logged_in():
+    try:
+        creds = auth.load_credentials()
+    except Exception:  # noqa: BLE001 - unreadable credentials file: logged out
+        return False
+    return bool(creds and creds.get("token"))
+
+
 def _on_free_tier():
     """True when the user is on the free tier: not logged in, or logged in on
     the free / community plan. A token without a known plan (NARVY_TOKEN
@@ -790,6 +798,26 @@ def _preflight_output_writable(out_file):
     return None
 
 
+def _require_valid_token():
+    """Before an --upload scan: exit EXIT_ERROR when not logged in, when the server
+    rejects the token (401/403) or cannot be reached, instead of after a long scan.
+    Any other answer goes on: the upload reports its own error."""
+    creds = auth.load_credentials()
+    if not creds or not creds.get("token"):
+        console.print("[bold red]Not logged in.[/bold red] Run `narvy login` first, or set NARVY_TOKEN.")
+        raise SystemExit(EXIT_ERROR)
+    status, data = uploader.whoami(creds["token"])
+    if status in (401, 403):
+        source = "NARVY_TOKEN" if auth.token_from_env() else "The stored token"
+        console.print(f"[bold red]{source} was rejected by {uploader.server_host()} (HTTP {status}).[/bold red] "
+                      "Run `narvy login` with a current token (narvy.io > Profile > API Credentials).")
+        raise SystemExit(EXIT_ERROR)
+    if not status:
+        console.print(f"[bold red]{_upload_failed_label(status)}[/bold red] {(data or {}).get('error')}")
+        raise SystemExit(EXIT_ERROR)
+    return creds
+
+
 def cmd_login(args):
     token = args.token
     if not token:
@@ -821,7 +849,8 @@ def cmd_login(args):
         console.print(f"[bold red]Login to {uploader.server_host()} failed:[/bold red] {data.get('error', status)}")
         raise SystemExit(EXIT_ERROR)
     auth.save_token(token, data["email"], data["plan"])
-    console.print(f"[bold green]Logged in as {data['email']} ({data['plan']} plan).[/bold green]")
+    console.print(f"[bold green]Logged in as {rich_escape(str(data['email']))} "
+                  f"({rich_escape(_plan_name(data['plan']))} plan).[/bold green]")
 
 
 def cmd_logout(args):
@@ -1563,9 +1592,24 @@ def _ingest_scan_mode_label(scan_mode: str) -> str:
     return "android-binary" if scan_mode == "android" else scan_mode
 
 
+# Server plan keys -> the names on narvy.io/pricing (website/payment_routes._DISPLAY_NAMES).
+_PLAN_NAMES = {
+    "free": "Community", "community": "Community", "solo": "Solo", "starter": "Starter",
+    "starter_legacy": "Starter (legacy)", "titan": "Pro", "pro": "Pro", "team": "Pro",
+    "business": "Business", "compliance": "Business", "professional": "Business",
+    "scale": "Business", "enterprise": "Enterprise",
+}
+
+
+def _plan_name(plan):
+    """User-facing plan name ('Pro', not 'titan'); an unknown key is shown capitalized."""
+    key = str(plan or "").strip()
+    return _PLAN_NAMES.get(key.lower(), key[:1].upper() + key[1:])
+
+
 def _server_and_account(creds):
-    """'narvy.io (you@example.com, starter)'; NARVY_TOKEN alone carries no email or plan."""
-    parts = [p for p in ((creds or {}).get("email"), (creds or {}).get("plan")) if p]
+    """'narvy.io (you@example.com, Starter)'; NARVY_TOKEN alone carries no email or plan."""
+    parts = [p for p in ((creds or {}).get("email"), _plan_name((creds or {}).get("plan"))) if p]
     host = uploader.server_host()
     return f"{host} ({', '.join(parts)})" if parts else host
 
@@ -1599,7 +1643,7 @@ def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, packa
         raise SystemExit(EXIT_ERROR)
 
     platform = _ingest_platform_for_scan_mode(scan_mode)
-    app_name = os.path.basename(os.path.normpath(target_path))
+    app_name = os.path.basename(os.path.abspath(target_path))
     app_name = re.sub(r"\.(zip|apk|aab|ipa|xapk|apkm|apks)$", "", app_name, flags=re.IGNORECASE) or app_name
 
     from narvy.repo_identity import git_identity
@@ -2099,9 +2143,7 @@ def cmd_scan(args):
     # Fail fast on bad input before the (possibly long) scan starts.
     # Check login first so --upload doesn't fail only after the scan.
     if args.upload or getattr(args, "upload_binary", False):
-        if not auth.load_credentials():
-            console.print("[bold red]Not logged in.[/bold red] Run `narvy login` first.")
-            raise SystemExit(EXIT_ERROR)
+        _require_valid_token()
 
     # --max-mem goes straight to JADX as -Xmx; validate before a bad value leaks a raw JVM error.
     if scan_mode in ("android", "android-bundle"):
@@ -2462,8 +2504,9 @@ def cmd_scan(args):
             else:
                 console.print("Same rule in the same file is grouped into one row; no cross-file "
                               "de-duplication or false-positive filtering was applied.")
+        _how = "add [bold]--upload[/bold]" if _logged_in() else "run `narvy login` and add [bold]--upload[/bold]"
         console.print("To keep results in your Narvy dashboard (de-duplication, false-positive filtering, "
-                      "history), run `narvy login` and add [bold]--upload[/bold].")
+                      f"history), {_how}.")
 
     if scan_meta.get("code_coverage"):
         console.print(
@@ -3455,7 +3498,7 @@ def cli(prog=None):
     _osv_mode = p_scan.add_mutually_exclusive_group()
     _osv_mode.add_argument("--offline", action="store_true",
                            help="Dependency check (SCA) uses only the OSV database already cached in "
-                                "~/.cache/narvy/osv; nothing is downloaded.")
+                                "~/.cache/narvy/osv (NARVY_OSV_DB_DIR to change it); nothing is downloaded.")
     _osv_mode.add_argument("--osv-api", action="store_true",
                            help="Dependency check (SCA) through the OSV API instead of the local database. "
                                 "Sends the names and versions of your dependencies to the API "

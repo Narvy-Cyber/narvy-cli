@@ -42,11 +42,17 @@ jobs:
 
       - name: Run Narvy scan
         # SARIF is written before the --fail-on gate, so the Security tab fills even on a failing build.
+        # With a NARVY_TOKEN repository secret (narvy.io > Profile > API Credentials), --upload also
+        # sends the findings (never code) to your Narvy dashboard. Without it, the scan stays local.
+        # Secrets are not passed to pull requests from forks: those runs stay local.
+        env:
+          NARVY_TOKEN: ${{ secrets.NARVY_TOKEN }}
         run: |
           narvy scan . \
             --output sarif \
             --file narvy-results.sarif \
-            --fail-on high
+            --fail-on high \
+            ${NARVY_TOKEN:+--upload}
 
       - name: Save the OSV database cache
         if: always()   # also when --fail-on failed the build
