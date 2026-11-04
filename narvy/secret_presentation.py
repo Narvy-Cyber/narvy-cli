@@ -19,9 +19,12 @@ the customer sees:
   tokens, Supabase anon JWTs, Google AIza keys in client code) are not
   secrets: they become Info "Public client key ... check its restrictions".
 * masking: every secret value is replaced by ``abcd\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022wxyz`` (first 4
-  and last 4 characters, values shorter than 20 characters fully masked) in
-  every text field of the finding. File and line stay visible. A
-  ``secret_sha256`` of the first raw value is kept for dedup.
+  and last 4 characters) in every text field of the finding. A value of 8 to
+  19 characters shows its first 2 and last 2 (``ab\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022yz``) and the
+  description states its length; a shorter one is fully masked (2026-11-04,
+  persona "Claire": a fully masked 9-character "password" could not be
+  triaged). File and line stay visible. A ``secret_sha256`` of the first raw
+  value is kept for dedup.
 * fingerprint stability: before any text field that feeds the vulnerability
   fingerprint (code snippet / sink / description) is changed, the hashes the
   fingerprint would have used are stamped in ``fingerprint_mask_basis``.
@@ -48,7 +51,8 @@ MASK_BASIS_SCHEME = "mask-v1"
 # Bullets, not asterisks: "********" is Markdown emphasis and vanished from
 # rendered descriptions (the PDF showed "AIzad9Fg", which reads as a short key).
 MASK_FILL = "\u2022" * 8
-_MIN_PARTIAL_LEN = 20  # below this the value is fully masked (at least 12 chars hidden)
+_MIN_PARTIAL_LEN = 20  # from this length: first 4 + last 4 (at least 12 chars hidden)
+_MIN_SHORT_PARTIAL_LEN = 8  # 8..19: first 2 + last 2 (at least half hidden); below: fully masked
 
 # ---------------------------------------------------------------------------
 # Masking primitives
@@ -57,12 +61,23 @@ _MIN_PARTIAL_LEN = 20  # below this the value is fully masked (at least 12 chars
 
 def mask_value(value: Any) -> str:
     """First 4 + last 4 characters, the rest replaced by a fixed-width fill
-    (the length is not revealed). Values shorter than 20 characters are fully
-    masked, so at most 8 of at least 20 characters are ever shown."""
+    (the masked string never reveals the length). A value of 8 to 19
+    characters shows its first 2 and last 2 (at least half of it hidden), a
+    shorter one is fully masked."""
     v = str(value or "")
-    if len(v) < _MIN_PARTIAL_LEN:
+    if len(v) < _MIN_SHORT_PARTIAL_LEN:
         return MASK_FILL
+    if len(v) < _MIN_PARTIAL_LEN:
+        return v[:2] + MASK_FILL + v[-2:]
     return v[:4] + MASK_FILL + v[-4:]
+
+
+def masked_length(value: Any) -> Optional[int]:
+    """The length a reader is told for a masked value: only for a value
+    shorter than 20 characters (a long key's length says nothing useful and
+    stays hidden)."""
+    v = str(value or "")
+    return len(v) if 0 < len(v) < _MIN_PARTIAL_LEN else None
 
 
 def secret_sha256(value: Any) -> str:
@@ -643,11 +658,17 @@ def _location(f: Dict[str, Any]) -> str:
             return f"{file_}:{int(line)}"
     except (TypeError, ValueError):
         pass
+    # A bytecode finding without a source line (R8 build, quick scan) names
+    # its method (src/android/bytecode_analyzer._secret_location_fields).
+    meth = f.get("bytecode_method")
+    if isinstance(meth, str) and meth.strip() and len(meth) <= 120:
+        return f"{file_} {meth.strip()}"
     return str(file_)
 
 
 def _wording(kind: str, provider: Optional[str], basis: str, confidence: str,
-             masked: Optional[str], f: Dict[str, Any]) -> Dict[str, str]:
+             masked: Optional[str], f: Dict[str, Any],
+             length: Optional[int] = None) -> Dict[str, str]:
     if provider:
         lab_en, lab_fr = _PROVIDER_LABELS.get(provider, (provider, provider))
     else:
@@ -681,6 +702,9 @@ def _wording(kind: str, provider: Optional[str], basis: str, confidence: str,
     loc_fr = f" dans {where}" if where else ""
     val_en = f" Value (masked): {masked}." if masked else ""
     val_fr = f" Valeur (masquée) : {masked}." if masked else ""
+    if masked and length:
+        val_en = f" Value (masked): {masked}, {int(length)} characters long."
+        val_fr = f" Valeur (masquée) : {masked}, longueur {int(length)} caractères."
     conf_en = {"likely": "likely (the format is checked structurally)",
                "potential": "potential (no format check for this value)"}[confidence]
     conf_fr = {"likely": "probable (le format est vérifié structurellement)",
@@ -758,7 +782,8 @@ def _stored_tables() -> None:
 
     desc_rx = re.compile(
         r"^A value(?: at (?P<where>.+?))? (?P<why>" + alt(whys) + r")\."
-        r"(?: Value \(masked\): (?P<masked>.+?)\.)? Narvy did not test this value: it does not "
+        r"(?: Value \(masked\): (?P<masked>.+?)(?:, (?P<n>\d+) characters long)?\.)?"
+        r" Narvy did not test this value: it does not "
         r"know whether it is valid, active, revoked or restricted\. Confidence: (?P<conf>"
         + alt(confs) + r")\. If it is a real credential, anyone who can read the (?P<art>"
         + alt(arts) + r") can read it too\. " + re.escape(sev_en) + r"$", re.S)
@@ -808,6 +833,8 @@ def stored_text_fr(text: Any) -> Optional[str]:
             vals = {k: maps[k][g[k]] for k in maps}
             vals["loc"] = f" dans {g['where']}" if g.get("where") else ""
             vals["val"] = f" Valeur (masquée) : {g['masked']}." if g.get("masked") else ""
+            if g.get("masked") and g.get("n"):
+                vals["val"] = f" Valeur (masquée) : {g['masked']}, longueur {g['n']} caractères."
             return tpl.format(**vals)
     except Exception:  # noqa: BLE001 - presentation never raises
         return None
@@ -1036,7 +1063,9 @@ def present_finding(f: Any, context: Optional[Dict[str, Any]] = None) -> bool:
         f.pop("secret_confidence", None)
     else:
         words = _wording(info["kind"], info["provider"], info["basis"], info["confidence"],
-                         masked, fv)
+                         masked, fv,
+                         length=(masked_length(first_raw)
+                                 if first_raw and info["provider"] != "private_key" else None))
         f["is_secret"] = True
         f["secret_confidence"] = info["confidence"]
         if not f.get("confidence"):
