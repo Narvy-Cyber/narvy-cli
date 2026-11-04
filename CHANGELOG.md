@@ -5,6 +5,41 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1]
+
+### Added
+
+- `scan --upload --app NAME_OR_ID`: adds the results to an existing app.
+  Without it, the upload sends the git remote (credentials stripped) and
+  branch of the scanned folder when it is the root of a checkout, and the
+  platform matches the app on the remote, then on the folder name with and
+  without an archive suffix (`-main`, `-<sha>`...).
+- `scans`: App ID column.
+- Dependency findings (SCA) carry `version_source`: `lockfile`,
+  `declared_exact` (exact pin in a manifest) or `declared_range` (lower bound
+  of a range such as `^0.4.0` in package.json, composer.json or Cargo.toml).
+  A `declared_range` finding says the installed version may be newer. The
+  platform applies the same default view as for its own scans.
+
+### Fixed
+
+- `cloud-scan` (AWS): a WAF error (regional or global), an S3 bucket ACL
+  error, an IAM login profile error, a CIS 1.2 MFA error or a CIS 1.3
+  credential report error was logged and dropped, and the scan reported
+  `coverage: complete, checks_skipped: 0`. Each one now counts in
+  `checks_skipped` with its reason in `coverage.errors`, coverage is
+  `partial`, and `--fail-on` exits 2 when nothing else breached.
+- Upload "asset limit reached" (402): says which app it looked for and how to
+  target one with `--app`.
+- SCA summary: one count, distinct advisories.
+
+### Changed
+
+- Secret masking, same as the platform: a value of 8 to 19 characters shows
+  its first 2 and last 2 characters and the description gives its length
+  (fully masked before). Below 8 characters the value stays fully masked;
+  from 20 characters, first 4 and last 4 as before.
+
 ## [1.3.0]
 
 1.2.2 was not published on its own; its changes ship in 1.3.0.
