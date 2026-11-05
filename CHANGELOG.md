@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NARVY_TOKEN` is not set).
 - `init-ci` templates (GitHub, GitLab, Bitbucket): the scan adds `--upload`
   when a `NARVY_TOKEN` secret or variable is set. The comments say that
-  `--upload` needs a paid plan. The Bitbucket template
+  `--upload` needs a paid plan. The GitLab template installs `narvy-cli>=1.3.1`. The Bitbucket template
   now caches the OSV database.
 
 ### Fixed

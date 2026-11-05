@@ -122,3 +122,13 @@ def test_matches_the_hosted_engine_fallback_classes():
         assert version_source_for(base) == "declared_exact", base
     for base in ns["_SCA_RANGE_MANIFESTS"]:
         assert version_source_for(base) == "declared_range", base
+
+
+@pytest.mark.parametrize("summary", ["Prototype Pollution in minimist", "Prototype Pollution in minimist.",
+                                     "Prototype Pollution in minimist  "])
+def test_range_sentence_starts_a_new_sentence(summary):
+    osv = dict(_OSV, summary=summary)
+    f = _finding_from_osv(_WebDep("minimist", "0.0.8", "npm", "package.json", "declared_range"), osv)
+    d = f["details"]["description"]
+    assert "Prototype Pollution in minimist. 0.0.8 is the lower bound" in d
+    assert ".." not in d

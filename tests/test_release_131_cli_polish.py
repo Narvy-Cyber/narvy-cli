@@ -304,3 +304,19 @@ def test_no_semgrep_path_maps_error_to_critical():
     assert "CRITICAL" not in semgrep_engine.SEVERITY_MAP.values()
     for mod in (ios_src, web_src):
         assert "_SEMGREP_SEVERITY_MAP" not in inspect.getsource(mod)
+
+
+def test_ci_templates_never_pin_below_1_3_1():
+    import os
+    import re
+    base = os.path.join(os.path.dirname(cli_main.__file__), "ci_templates")
+    for n in ("github", "gitlab", "bitbucket"):
+        t = open(os.path.join(base, n + ".yml")).read()
+        for spec in re.findall(r'narvy-cli([<>=!~][^"\s]*)?', t):
+            assert spec in ("", ">=1.3.1"), (n, spec)
+
+
+def test_readme_lists_the_token_check():
+    import os
+    readme = open(os.path.join(os.path.dirname(cli_main.__file__), "..", "README.md")).read()
+    assert "/api/v1/whoami" in readme and "API token only" in readme

@@ -1195,6 +1195,10 @@ def _finding_from_osv(dep: _WebDep, osv_finding_dict: Dict[str, Any]) -> Dict[st
     rule_id = f"SCA-{cve_id}"
     version_source = version_source_for(dep.source, dep.version_source)
     if version_source == VERSION_SOURCE_DECLARED_RANGE:
+        # OSV summaries usually carry no final period ("Prototype Pollution in minimist").
+        description = description.rstrip()
+        if not description.endswith((".", "!", "?")):
+            description += "."
         description += (f" {dep.version} is the lower bound of the range declared in {dep.source}; "
                         f"the installed version may be newer.")
     finding = {
