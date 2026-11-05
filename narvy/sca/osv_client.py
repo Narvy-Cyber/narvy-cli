@@ -179,6 +179,15 @@ _SEVERITY_BUCKETS = [
 ]
 
 
+# CWE of a vulnerable third-party dependency, the same pair as the platform
+# (src/web/sca/web_sca.SCA_DEPENDENCY_CWE, stamped on both engines):
+# CWE-1395 "Dependency on Vulnerable Third-Party Component" (the MITRE
+# weakness); CWE-1035 (OWASP Top Ten 2017 A9, a category) as the secondary
+# for the compliance matrices keyed on it.
+SCA_DEPENDENCY_CWE = "CWE-1395"
+SCA_DEPENDENCY_CWE_SECONDARY = "CWE-1035"
+
+
 @dataclass
 class OSVFinding:
     """Normalized OSV vulnerability, ready to merge into the CLI finding schema."""
@@ -187,7 +196,7 @@ class OSVFinding:
     title: str = ""
     cve: str = ""
     osv_id: str = ""
-    cwe: str = "CWE-1104"
+    cwe: str = SCA_DEPENDENCY_CWE
     severity: str = "MEDIUM"
     cvss_score: float = 0.0
     summary: str = ""

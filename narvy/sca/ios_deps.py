@@ -17,7 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .osv_client import OSVClient, coverage_after, coverage_before, get_default_client
+from .osv_client import (SCA_DEPENDENCY_CWE, SCA_DEPENDENCY_CWE_SECONDARY, OSVClient,
+                         coverage_after, coverage_before, get_default_client)
 from ..ios.third_party_filter import (
     get_vendored_pods_with_versions,
     IOS_THIRD_PARTY_FRAMEWORK_PREFIXES,
@@ -253,7 +254,7 @@ def _parse_github_advisory(advisory: Dict[str, Any], dep_name: str, dep_version:
         severity = "MEDIUM"
 
     cwes = advisory.get('cwes') or []
-    cwe = cwes[0].get('cwe_id', 'CWE-1104') if cwes else 'CWE-1104'
+    cwe = cwes[0].get('cwe_id') if cwes else None
 
     return {
         "cve": cve_id,
@@ -440,7 +441,10 @@ def _finding_from_cve(dep: _IOSDep, cve_dict: Dict[str, Any], source_label: str)
         "details": {
             "description": description,
             "recommendation": recommendation,
-            "cwe": cve_dict.get("cwe", "CWE-1104"),
+            # The finding's CWE is the dependency weakness, as on the platform;
+            # the advisory's own CWE (curated list, GitHub) stays in advisory_cwe.
+            "cwe": SCA_DEPENDENCY_CWE,
+            "cwe_secondary": SCA_DEPENDENCY_CWE_SECONDARY,
             "masvs": "MSTG-CODE-5",
         },
         "line": 1,
@@ -455,6 +459,8 @@ def _finding_from_cve(dep: _IOSDep, cve_dict: Dict[str, Any], source_label: str)
             "cve_source": source_label,
         },
     }
+    if cve_dict.get("cwe") and cve_dict["cwe"] != SCA_DEPENDENCY_CWE:
+        finding["sca"]["advisory_cwe"] = cve_dict["cwe"]
     # Podfile.lock / Package.resolved give the resolved version; a version
     # read from a framework binary has no version_source (as on the platform).
     if dep.source in ("podfile.lock", "package.resolved"):

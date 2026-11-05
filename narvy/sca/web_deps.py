@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .osv_client import MAX_DEPENDENCIES_PER_SCAN, OSVClient, coverage_after, coverage_before, get_default_client
+from .osv_client import SCA_DEPENDENCY_CWE, SCA_DEPENDENCY_CWE_SECONDARY, MAX_DEPENDENCIES_PER_SCAN, OSVClient, coverage_after, coverage_before, get_default_client
 
 logger = logging.getLogger(__name__)
 
@@ -1209,7 +1209,8 @@ def _finding_from_osv(dep: _WebDep, osv_finding_dict: Dict[str, Any]) -> Dict[st
         "details": {
             "description": description,
             "recommendation": recommendation,
-            "cwe": osv_finding_dict.get("cwe", "CWE-1104"),
+            "cwe": SCA_DEPENDENCY_CWE,
+            "cwe_secondary": SCA_DEPENDENCY_CWE_SECONDARY,
             "masvs": "MSTG-CODE-5",
         },
         "line": 1,

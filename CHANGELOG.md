@@ -79,6 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Vulnerable-dependency findings name CWE-1395 (Dependency on Vulnerable
+  Third-Party Component), with CWE-1035 as secondary, as narvy.io does (was
+  CWE-1104). An iOS advisory's own CWE (curated list, GitHub) is kept in
+  `sca.advisory_cwe`.
 - Code findings use the same severity mapping as narvy.io: a Semgrep rule
   of severity ERROR is reported HIGH (was CRITICAL), WARNING is MEDIUM (was
   HIGH), INFO is LOW (was MEDIUM). A `--fail-on` threshold therefore trips

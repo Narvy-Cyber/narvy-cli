@@ -9,7 +9,7 @@ import zipfile
 from dataclasses import dataclass
 from typing import Any, Dict, List, Set, Tuple
 
-from .osv_client import MAX_DEPENDENCIES_PER_SCAN, OSVClient, coverage_after, coverage_before, get_default_client
+from .osv_client import SCA_DEPENDENCY_CWE, SCA_DEPENDENCY_CWE_SECONDARY, MAX_DEPENDENCIES_PER_SCAN, OSVClient, coverage_after, coverage_before, get_default_client
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +262,8 @@ def _finding_from_osv(dep: _Dep, osv_finding_dict: Dict[str, Any]) -> Dict[str, 
         "details": {
             "description": description,
             "recommendation": recommendation,
-            "cwe": osv_finding_dict.get("cwe", "CWE-1104"),
+            "cwe": SCA_DEPENDENCY_CWE,
+            "cwe_secondary": SCA_DEPENDENCY_CWE_SECONDARY,
             "masvs": "MSTG-CODE-5",
         },
         # SARIF startLine requires an int; a dependency finding has no source line.
