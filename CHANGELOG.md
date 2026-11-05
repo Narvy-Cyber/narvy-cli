@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2]
+
+### Changed
+
+- `scan --upload --fail-on`: findings your team dismissed in Narvy (false
+  positive, accepted risk, won't fix) no longer fail the build. The CLI
+  reads them from the `dismissed` field of the upload response and prints
+  how many it left out. Without `--upload`, when the upload fails, or when
+  the server does not send that field, the gate uses every local finding
+  as before. Reports and the upload itself keep every finding.
+
 ## [1.3.1]
 
 ### Added

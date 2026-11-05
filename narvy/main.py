@@ -11,7 +11,7 @@ import time
 import json
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress
@@ -1768,9 +1768,42 @@ def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, packa
     return data
 
 
+# Team triage that keeps a finding out of the build gate (the platform's
+# "dismissed" statuses: tracker false positive / accepted risk / won't fix).
+_DISMISSED_STATUSES = frozenset({"false_positive", "accepted_risk", "wont_fix"})
+
+
+def _dismissed_indices(data, sent_count):
+    """{index: status} of the submitted findings the team dismissed in Narvy,
+    or None when the response does not say (older server).
+
+    Contract (server side, POST /api/v1/ingest response): ``dismissed`` = a
+    list of {"index": <position in the submitted ``findings`` array>,
+    "status": "false_positive" | "accepted_risk" | "wont_fix"}, present (even
+    empty) whenever the server applied triage. A rolled-up dependency finding
+    lists every submitted index it was built from. Entries out of range or
+    with another status are ignored."""
+    if not isinstance(data, dict) or not isinstance(data.get("dismissed"), list):
+        return None
+    out = {}
+    for e in data["dismissed"]:
+        if not isinstance(e, dict):
+            continue
+        idx, status = e.get("index"), str(e.get("status") or "").strip().lower()
+        if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < sent_count \
+                and status in _DISMISSED_STATUSES:
+            out[idx] = status
+    return out
+
+
 def _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta=None, app=None):
-    """Upload each scanned surface under its own platform (nested iOS goes up as iOS source)."""
+    """Upload each scanned surface under its own platform (nested iOS goes up as iOS source).
+
+    Returns the findings of ``all_findings`` the team dismissed in Narvy (a
+    list, possibly empty) when EVERY upload's response carried the
+    ``dismissed`` field, else None (the build gate then stays local)."""
     by_root: Dict[str, List[Dict[str, Any]]] = {}
+    origin: Dict[str, List[Dict[str, Any]]] = {}
     main: List[Dict[str, Any]] = []
     for f in all_findings:
         root = f.get("_surface_root")
@@ -1781,18 +1814,32 @@ def _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta=N
             if fp.startswith(prefix):
                 g["file_path"] = fp[len(prefix):]
             by_root.setdefault(root, []).append(g)
+            origin.setdefault(root, []).append(f)
         else:
             main.append(f)
     for s in (scan_meta or {}).get("surfaces", [])[1:]:
         if s.get("mode") == "ios-source" and s.get("status") != "failed":
             by_root.setdefault(s["path"], [])
+            origin.setdefault(s["path"], [])
+    dismissed: Optional[List[Dict[str, Any]]] = []
     # --app targets the scanned project; a nested iOS project keeps its own app.
-    _submit_results_ingest(main, scan_mode, target_path, app=app,
-                           package_id=(scan_meta or {}).get("package_id"),
-                           sca_coverage=_sca_coverage_word(scan_meta))
+    data = _submit_results_ingest(main, scan_mode, target_path, app=app,
+                                  package_id=(scan_meta or {}).get("package_id"),
+                                  sca_coverage=_sca_coverage_word(scan_meta))
+    idx = _dismissed_indices(data, len(main))
+    if idx is None:
+        dismissed = None
+    else:
+        dismissed.extend(main[i] for i in sorted(idx))
     for root, findings in by_root.items():
         console.print(f"[dim]iOS project in {rich_escape(root)}/:[/dim]")
-        _submit_results_ingest(findings, "ios-source", os.path.join(target_path, root))
+        data = _submit_results_ingest(findings, "ios-source", os.path.join(target_path, root))
+        idx = _dismissed_indices(data, len(findings))
+        if idx is None:
+            dismissed = None
+        elif dismissed is not None:
+            dismissed.extend(origin[root][i] for i in sorted(idx))
+    return dismissed
 
 
 _ENGINE_LABELS = {
@@ -2434,9 +2481,10 @@ def cmd_scan(args):
     if _premium_note:
         console.print(f"\n[dim]{rich_escape(_premium_note)}[/dim]")
 
+    team_dismissed = None
     if args.upload and not getattr(args, "upload_binary", False):
-        _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta,
-                                   app=getattr(args, "app", None))
+        team_dismissed = _submit_results_by_surface(all_findings, scan_mode, target_path, scan_meta,
+                                                    app=getattr(args, "app", None))
     elif args.upload:
         # Legacy --upload-binary: POST the binary and let the server re-scan it.
         # upload_scan() opens the path in binary mode, so refuse a directory.
@@ -2636,8 +2684,23 @@ def cmd_scan(args):
                 _gap_note = semgrep_engine.degraded_coverage_note()
                 if _gap_note:
                     coverage_gaps.append(_gap_note)
-    _exit_on_fail_on(all_findings, getattr(args, "fail_on", None),
-                     coverage_gaps=coverage_gaps)
+    _exit_on_fail_on(_gate_findings(all_findings, team_dismissed, getattr(args, "fail_on", None)),
+                     getattr(args, "fail_on", None), coverage_gaps=coverage_gaps)
+
+
+def _gate_findings(all_findings, team_dismissed, fail_on):
+    """The findings --fail-on gates on: all of them, minus the ones the team
+    dismissed in Narvy when the upload's response said which (else the local
+    gate, unchanged). Reports, SARIF and the upload keep every finding."""
+    if not team_dismissed:
+        return all_findings
+    gone = {id(f) for f in team_dismissed}
+    kept = [f for f in all_findings if id(f) not in gone]
+    excluded = len(all_findings) - len(kept)
+    if fail_on and excluded:
+        console.print(f"[dim]--fail-on: {excluded} finding(s) excluded because your team "
+                      "dismissed them in Narvy (false positive, accepted risk or won't fix).[/dim]")
+    return kept
 
 
 _UPLOAD_ALL_TARGET_EXTS = (".apk", ".aab", ".apkm", ".xapk", ".ipa")
