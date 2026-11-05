@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   platform matches the app on the remote, then on the folder name with and
   without an archive suffix (`-main`, `-<sha>`...).
 - `scans`: App ID column.
+- `scan --upload` prints the app ID and how the platform matched it (package
+  id, repository, name, cloud account, `--app`, or new app); no qualifier
+  when the platform does not say.
 - `scan app.apk|app.aab|app.ipa --upload` sends the package name from the
   decoded manifest, or CFBundleIdentifier from Info.plist, as `package_id`,
   so the server can match the results to an app with the same package id.

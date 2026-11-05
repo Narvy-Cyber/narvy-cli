@@ -1628,6 +1628,23 @@ def _upload_failed_label(status):
     return f"Upload to {uploader.server_host()} failed ({f'HTTP {status}' if status else 'no response'}):"
 
 
+# The ingest's app_matched_by -> what the upload line says. An unknown value
+# or none gets no qualifier: never "new app" unless the server says "new".
+_APP_MATCH_LABELS = {
+    "new": "new app",
+    "app": "matched by --app",
+    "package_id": "matched by package id",
+    "git_remote": "matched by repository",
+    "normalized_name": "matched by repository name",
+    "name": "matched by name",
+    "cloud_account": "matched by cloud account",
+}
+
+
+def _app_match_label(value):
+    return _APP_MATCH_LABELS.get(str(value).strip().lower()) if isinstance(value, str) else None
+
+
 _BINARY_SCAN_MODES = ("android", "android-bundle", "ios-binary")
 _PACKAGE_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]{0,199}$")
 
@@ -1728,11 +1745,9 @@ def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, packa
     dropped = data.get("dropped", 0)
 
     console.print(f"[bold green]Results uploaded.[/bold green] scan_id={scan_id}")
-    _matched = {"app": "--app", "git_remote": "its git remote", "name": "its name",
-                "normalized_name": "its repository name"}.get(data.get("app_matched_by"))
     if data.get("app_id") is not None:
-        console.print(f"[dim]App ID {data.get('app_id')}"
-                      f"{f' (matched on {_matched})' if _matched else ' (new app)'}.[/dim]")
+        _label = _app_match_label(data.get("app_matched_by"))
+        console.print(f"[dim]App ID {data.get('app_id')}{f' ({_label})' if _label else ''}.[/dim]")
     console.print(
         f"[dim]CLI detected {received} -> Narvy cloud curated: {total_detected} distinct "
         f"after dedup, {actionable} actionable, {hidden} hidden by default view.[/dim]"

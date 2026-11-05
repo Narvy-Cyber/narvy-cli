@@ -259,3 +259,36 @@ def test_csharp_limited_coverage_wording_by_tier():
     paid = source_analyzer._LOW_COVERAGE_STACKS_PAID["csharp"]
     assert "free" not in paid.lower() and "paid" not in paid.lower()
     assert "free rule set" in source_analyzer._LOW_COVERAGE_STACKS["csharp"]
+
+
+# --------------------------------------------------------------- app_matched_by
+
+@pytest.mark.parametrize("matched_by,expected", [
+    ("package_id", "App ID 7 (matched by package id)."),
+    ("git_remote", "App ID 7 (matched by repository)."),
+    ("name", "App ID 7 (matched by name)."),
+    ("normalized_name", "App ID 7 (matched by repository name)."),
+    ("cloud_account", "App ID 7 (matched by cloud account)."),
+    ("app", "App ID 7 (matched by --app)."),
+    ("new", "App ID 7 (new app)."),
+    (None, "App ID 7."),
+    ("something_else", "App ID 7."),
+    ("", "App ID 7."),
+    (42, "App ID 7."),
+])
+def test_upload_line_names_how_the_app_was_matched(monkeypatch, tmp_path, matched_by, expected):
+    import io
+    from rich.console import Console
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_main, "console", Console(file=buf, width=240, no_color=True, highlight=False))
+    _creds(monkeypatch, {"token": "t", "plan": "titan"})
+    monkeypatch.setattr(repo_identity, "git_identity", lambda p: (None, None))
+    body = {"scan_id": "s", "app_id": 7}
+    if matched_by is not None:
+        body["app_matched_by"] = matched_by
+    monkeypatch.setattr(cli_main.uploader, "ingest_results", lambda token, **kw: (201, body))
+    cli_main._submit_results_ingest([], "web-source", str(tmp_path))
+    out = buf.getvalue()
+    assert expected in out
+    if matched_by != "new":
+        assert "new app" not in out
