@@ -3499,9 +3499,14 @@ def cmd_init_ci(args):
         raise SystemExit(EXIT_ERROR)
 
     console.print(f"[bold green]Wrote {platform} CI template to {dest}[/bold green]")
+    _runs_on = {
+        "github": "on pushes to main or master and on every pull request",
+        "gitlab": "on every push (merge request branches included)",
+        "bitbucket": "on every push and every pull request",
+    }.get(platform, "on every push")
     console.print(
-        "[dim]It installs the CLI from PyPI with [bold]pip install narvy-cli[/bold] "
-        "and runs on every push and pull request.[/dim]"
+        "[dim]It installs the CLI from PyPI with [bold]pip install \"narvy-cli>=1.3.2\"[/bold] "
+        f"and runs {_runs_on}.[/dim]"
     )
     if platform == "gitlab":
         console.print(

@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from . import severity_calibration as _cal
 from .osv_client import SCA_DEPENDENCY_CWE, SCA_DEPENDENCY_CWE_SECONDARY, MAX_DEPENDENCIES_PER_SCAN, OSVClient, coverage_after, coverage_before, get_default_client
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,11 @@ class _WebDep:
     # it per spec: "declared_exact" for an exact pin, "declared_range" for a
     # range reduced to its lower bound.
     version_source: str = ""
+    # SCA severity calibration inputs (same as the platform's lockfile parser):
+    # the declared range when the version is its lower bound, and the scope
+    # the file states ("runtime", "dev", or "unknown" when it does not say).
+    declared_spec: str = ""
+    scope: str = "unknown"
 
 
 # version_source, as the Narvy platform's lockfile parser tags a dependency:
@@ -125,7 +131,9 @@ def _parse_package_lock(path: str) -> List[_WebDep]:
             name = key.split("node_modules/")[-1]
             if not name:
                 continue
-            deps.append(_WebDep(name, version, "npm", "package-lock.json"))
+            dev = bool(meta.get("dev") or meta.get("devOptional"))
+            deps.append(_WebDep(name, version, "npm", "package-lock.json",
+                                scope="dev" if dev else "runtime"))
         if deps:
             return deps
     # lockfileVersion 1: nested "dependencies" map.
@@ -133,7 +141,8 @@ def _parse_package_lock(path: str) -> List[_WebDep]:
     if isinstance(dependencies, dict):
         for name, meta in dependencies.items():
             if isinstance(meta, dict) and meta.get("version"):
-                deps.append(_WebDep(name, meta["version"], "npm", "package-lock.json"))
+                deps.append(_WebDep(name, meta["version"], "npm", "package-lock.json",
+                                    scope="dev" if meta.get("dev") else "runtime"))
     return deps
 
 
@@ -151,7 +160,10 @@ def _parse_package_json(path: str) -> List[_WebDep]:
         for name, spec in section.items():
             got = _npm_declared(str(spec))
             if got:
-                deps.append(_WebDep(name, got[0], "npm", "package.json", got[1]))
+                deps.append(_WebDep(name, got[0], "npm", "package.json", got[1],
+                                    declared_spec=(str(spec).strip()
+                                                   if got[1] == VERSION_SOURCE_DECLARED_RANGE else ""),
+                                    scope="dev" if key == "devDependencies" else "runtime"))
     return deps
 
 
@@ -411,7 +423,8 @@ def _parse_composer_lock(path: str) -> List[_WebDep]:
             version = entry.get("version")
             if name and version:
                 # composer.lock versions are sometimes prefixed "v".
-                deps.append(_WebDep(name, str(version).lstrip("vV"), "Packagist", "composer.lock"))
+                deps.append(_WebDep(name, str(version).lstrip("vV"), "Packagist", "composer.lock",
+                                    scope="dev" if key == "packages-dev" else "runtime"))
     return deps
 
 
@@ -431,7 +444,10 @@ def _parse_composer_json(path: str) -> List[_WebDep]:
                 continue
             got = _php_declared(str(spec))
             if got:
-                deps.append(_WebDep(name, got[0], "Packagist", "composer.json", got[1]))
+                deps.append(_WebDep(name, got[0], "Packagist", "composer.json", got[1],
+                                    declared_spec=(str(spec).strip()
+                                                   if got[1] == VERSION_SOURCE_DECLARED_RANGE else ""),
+                                    scope="dev" if key == "require-dev" else "runtime"))
     return deps
 
 
@@ -1163,10 +1179,20 @@ def _dedupe(deps: List[_WebDep]) -> List[_WebDep]:
         key = (dep.ecosystem, dep.name, dep.version)
         # Same package@version from two manifests: the stronger version proof
         # is kept (an exact pin over a range floor); on a tie, the first one.
-        if key not in best or (_VERSION_SOURCE_RANK.get(version_source_for(dep.source, dep.version_source), 0)
-                               > _VERSION_SOURCE_RANK.get(version_source_for(best[key].source, best[key].version_source), 0)):
+        # The broadest scope seen wins (a runtime copy is never dev-only).
+        prev = best.get(key)
+        if prev is None or (_VERSION_SOURCE_RANK.get(version_source_for(dep.source, dep.version_source), 0)
+                            > _VERSION_SOURCE_RANK.get(version_source_for(prev.source, prev.version_source), 0)):
             best[key] = dep
+        if prev is not None:
+            scope = max((prev.scope, dep.scope), key=lambda sc: _SCOPE_RANK.get(sc, 2))
+            if best[key].scope != scope:
+                best[key] = replace(best[key], scope=scope)
     return list(best.values())
+
+
+# lockfile_parser._SCOPE_RANK on the platform.
+_SCOPE_RANK = {"dev": 0, "build": 1, "unknown": 2, "runtime": 3}
 
 
 _VERSION_SOURCE_RANK = {VERSION_SOURCE_DECLARED_RANGE: 1, VERSION_SOURCE_DECLARED_EXACT: 2,
@@ -1230,6 +1256,83 @@ def _finding_from_osv(dep: _WebDep, osv_finding_dict: Dict[str, Any]) -> Dict[st
         finding["version_source"] = version_source
         finding["sca"]["version_source"] = version_source
     return finding
+
+
+def _calibrate(dep: _WebDep, osv_findings: List[Dict[str, Any]],
+               go_imports: Optional[Set[str]]) -> Dict[str, Any]:
+    """The platform's severity for this package@version
+    (src/web/sca/web_sca._finding_from_osv_group, steps 1-5 of
+    severity_calibration): {"shown", "advisory": {id: sev}, "reasons",
+    "advisory_worst"}. Advisory preconditions (npm proxy-addr / ws / nanoid)
+    and the build-only scope are not ported (see CHANGELOG)."""
+    recs = [f for f in osv_findings if isinstance(f, dict)]
+    if not recs:
+        return {}
+    advisory_worst = None
+    for f in recs:
+        advisory_worst = _cal.worst([w for w in (advisory_worst, f.get("advisory_worst_severity"),
+                                                 _cal.canonical(f.get("severity"))) if w])
+    declared_range = version_source_for(dep.source, dep.version_source) == VERSION_SOURCE_DECLARED_RANGE
+    adv: Dict[int, str] = {}
+    why: Dict[int, List[str]] = {}
+    patched: Dict[int, bool] = {}
+    for f in recs:
+        adv[id(f)], why[id(f)] = _cal.advisory_severity(
+            f.get("mirror_worst_severity") or _cal.canonical(f.get("severity")),
+            f.get("reviewed_severity") or "", f.get("cvss_vector") or "")
+        patched[id(f)] = bool(declared_range and dep.declared_spec
+                              and _cal.fix_within_range(dep.declared_spec, f.get("fixed_version"),
+                                                        dep.ecosystem) is True)
+    remaining = [f for f in recs if not patched[id(f)]]
+    all_patched = not remaining
+    considered = remaining or recs
+    affected_imported: Optional[bool] = None
+    if dep.ecosystem == "Go" and go_imports is not None:
+        verdicts = [_cal.imports_affected(f.get("affected_imports") or [], go_imports) for f in considered]
+        if verdicts and all(v is False for v in verdicts):
+            affected_imported = False
+        elif any(v is True for v in verdicts):
+            affected_imported = True
+    base = _cal.worst(adv[id(f)] for f in considered) or "Medium"
+    base = _cal.cap(base, advisory_worst or base)
+    shown, ctx_reasons = _cal.calibrate(base, all_patched_within_range=all_patched,
+                                        scope=dep.scope, affected_imported=affected_imported)
+    reasons: List[str] = []
+    if _cal.rank(base) < _cal.rank(advisory_worst or base):
+        for f in considered:
+            if _cal.rank(adv[id(f)]) == _cal.rank(base) or why[id(f)]:
+                for w in why[id(f)]:
+                    if w not in reasons:
+                        reasons.append(w)
+        if any(patched.values()) and not all_patched:
+            reasons.append(_cal.REASON_FIX_IN_RANGE)
+    for r in ctx_reasons:
+        if r not in reasons:
+            reasons.append(r)
+    per = {id(f): ("Low" if patched[id(f)] else adv[id(f)]) for f in recs}
+    return {"shown": shown, "per": per, "reasons": reasons, "advisory_worst": advisory_worst}
+
+
+def _apply_calibration(finding: Dict[str, Any], osv_finding: Dict[str, Any],
+                       calibrated: Dict[str, Any]) -> None:
+    """Severity of one advisory finding so that the worst one of the package
+    equals the platform's single dependency finding (the ingest rolls them up
+    on the worst): min(this advisory's own calibrated rating, the package's).
+    The advisory's rating stays in severity_advisory, with the reasons."""
+    if not calibrated:
+        return
+    own = calibrated["per"].get(id(osv_finding)) or calibrated["shown"]
+    sev = own if _cal.rank(own) <= _cal.rank(calibrated["shown"]) else calibrated["shown"]
+    sev = sev.upper()
+    if sev != finding["severity"]:
+        finding["severity_advisory"] = finding["severity"]
+        finding["severity"] = sev
+        if calibrated["reasons"]:
+            finding["severity_calibration"] = list(calibrated["reasons"])
+            notes = [_cal.REASON_NOTES_EN[r] for r in calibrated["reasons"] if r in _cal.REASON_NOTES_EN]
+            if notes and isinstance(finding.get("details"), dict):
+                finding["details"]["description"] = (finding["details"]["description"].rstrip()
+                                                     + " Severity: " + " ".join(notes))
 
 
 def _rule_def_from_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
@@ -1376,6 +1479,18 @@ def scan(source_dir: str, osv_client: OSVClient = None) -> Tuple[List[Dict[str, 
     vulnerable_coords: Set[str] = set()
 
     cov_before = coverage_before(client)
+    _go_cache: Dict[str, Any] = {}
+
+    def go_imports(dep: _WebDep):
+        """First-party Go imports, read once and only for a Go dependency."""
+        if dep.ecosystem != "Go":
+            return None
+        if "v" not in _go_cache:
+            try:
+                _go_cache["v"] = _cal.go_first_party_imports(source_dir)
+            except Exception:  # noqa: BLE001 - reachability is best effort
+                _go_cache["v"] = None
+        return _go_cache["v"]
 
     for ecosystem, eco_deps in by_ecosystem.items():
         pkg_version_pairs = [(d.name, d.version) for d in eco_deps]
@@ -1388,9 +1503,15 @@ def scan(source_dir: str, osv_client: OSVClient = None) -> Tuple[List[Dict[str, 
             if not has_vuln.get(key, False):
                 continue
 
-            osv_findings = client.query_dict(dep.name, dep.version, ecosystem=ecosystem)
+            try:
+                osv_findings = client.query_dict(dep.name, dep.version, ecosystem=ecosystem,
+                                                 platform_grouping=True)
+            except TypeError:  # a duck-typed client without the platform grouping
+                osv_findings = client.query_dict(dep.name, dep.version, ecosystem=ecosystem)
+            calibrated = _calibrate(dep, osv_findings, go_imports(dep))
             for osv_finding in osv_findings:
                 finding = _finding_from_osv(dep, osv_finding)
+                _apply_calibration(finding, osv_finding, calibrated)
                 findings.append(finding)
                 rule_defs.append(_rule_def_from_finding(finding))
                 stats["cves_found"] += 1

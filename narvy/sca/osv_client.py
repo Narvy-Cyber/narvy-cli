@@ -209,6 +209,12 @@ class OSVFinding:
     package_name: str = ""
     package_version: str = ""
     ecosystem: str = ""
+    # SCA severity calibration inputs, read like the platform's osv_client:
+    # the GitHub-reviewed label (GHSA records only), the CVSS v3 vector (v4
+    # when no v3) and the Go import paths the advisory lists.
+    reviewed_severity: str = ""
+    cvss_vector: str = ""
+    affected_imports: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -218,6 +224,9 @@ class OSVFinding:
             "cve_id": self.cve,
             "osv_id": self.osv_id,
             "cwe": self.cwe,
+            "reviewed_severity": self.reviewed_severity,
+            "cvss_vector": self.cvss_vector,
+            "affected_imports": list(self.affected_imports),
             "severity": self.severity,
             "cvss_score": self.cvss_score,
             "summary": self.summary,
@@ -559,6 +568,27 @@ def _parse_osv_vuln(
 
     fixed_version: Optional[str] = _pick_fixed_version(raw, package_name, package_version)
 
+    # ---- Calibration inputs (same reading as the platform's osv_client) ----
+    reviewed_severity = ""
+    if str(osv_id).startswith("GHSA-"):
+        _lbl = str((raw.get("database_specific") or {}).get("severity") or "").upper()
+        if _lbl in ("CRITICAL", "HIGH", "MODERATE", "MEDIUM", "LOW"):
+            reviewed_severity = "MEDIUM" if _lbl == "MODERATE" else _lbl
+    cvss_vector = ""
+    for _entry in sev_arr:
+        _vec = str((_entry or {}).get("score") or "") if isinstance(_entry, dict) else ""
+        if _vec.startswith("CVSS:3"):
+            cvss_vector = _vec
+            break
+        if _vec.startswith("CVSS:4") and not cvss_vector:
+            cvss_vector = _vec
+    affected_imports: List[str] = []
+    for _aff in raw.get("affected", []) or []:
+        for _imp in (((_aff or {}).get("ecosystem_specific") or {}).get("imports") or []):
+            _path = _imp.get("path") if isinstance(_imp, dict) else None
+            if _path and _path not in affected_imports:
+                affected_imports.append(str(_path))
+
     refs = []
     for ref in raw.get("references", []) or []:
         url = ref.get("url")
@@ -590,6 +620,9 @@ def _parse_osv_vuln(
         package_name=package_name,
         package_version=package_version,
         ecosystem=ecosystem,
+        reviewed_severity=reviewed_severity,
+        cvss_vector=cvss_vector,
+        affected_imports=affected_imports,
     )
 
 
@@ -844,16 +877,49 @@ class OSVClient:
         self.cache.put(package_name, version, ecosystem, raw_vulns)
         return self._parse_all(raw_vulns, package_name, version, ecosystem)
 
-    def query_dict(self, package_name: str, version: str, ecosystem: str = "Maven") -> List[Dict[str, Any]]:
-        # OSV lists one CVE under several advisory ids (GHSA/PYSEC/CVE); dedupe on the CVE.
-        out: List[Dict[str, Any]] = []
-        seen = set()
-        for f in self.query(package_name, version, ecosystem):
-            key = getattr(f, "cve", "") or getattr(f, "osv_id", "") or id(f)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(f.to_dict())
+    def query_dict(self, package_name: str, version: str, ecosystem: str = "Maven",
+                   platform_grouping: bool = False) -> List[Dict[str, Any]]:
+        """One dict per CVE (OSV lists one CVE under several advisory ids:
+        GHSA / PYSEC / CVE).
+
+        Default: the first record of each CVE. ``platform_grouping``: the
+        record the platform keeps (web_sca._finding_from_osv_group): the
+        GitHub-reviewed one when there is one, else the highest CVSS; each
+        dict then also carries ``mirror_worst_severity``, the worst rating
+        across that CVE's records, and ``advisory_worst_severity``, the worst
+        across every record of the package (the calibration's ceiling)."""
+        found = list(self.query(package_name, version, ecosystem))
+        if not platform_grouping:
+            out: List[Dict[str, Any]] = []
+            seen = set()
+            for f in found:
+                key = getattr(f, "cve", "") or getattr(f, "osv_id", "") or id(f)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(f.to_dict())
+            return out
+        from . import severity_calibration as _cal
+        advisory_worst = _cal.worst(_cal.canonical(f.severity) for f in found)
+        by_key: Dict[Any, OSVFinding] = {}
+        group_worst: Dict[Any, str] = {}
+        for f in found:
+            key = f.cve if (f.cve and f.cve.startswith("CVE-")) else f.osv_id
+            group_worst[key] = _cal.worst([group_worst.get(key, "Info"), _cal.canonical(f.severity)])
+            existing = by_key.get(key)
+            if existing is None:
+                by_key[key] = f
+            elif bool(f.reviewed_severity) != bool(existing.reviewed_severity):
+                if f.reviewed_severity:
+                    by_key[key] = f
+            elif f.cvss_score > existing.cvss_score:
+                by_key[key] = f
+        out = []
+        for key, f in by_key.items():
+            d = f.to_dict()
+            d["mirror_worst_severity"] = group_worst[key]
+            d["advisory_worst_severity"] = advisory_worst
+            out.append(d)
         return out
 
     @staticmethod

@@ -15,6 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   how many it left out. Without `--upload`, when the upload fails, or when
   the server does not send that field, the gate uses every local finding
   as before. Reports and the upload itself keep every finding.
+- Dependency findings of a source scan get the same severity as on
+  narvy.io: the platform's calibration is ported as is
+  (`narvy/sca/severity_calibration.py`). A CVE fixed by a release that the
+  declared range already admits does not set the severity, and a package
+  whose CVEs are all in that case is Low (morgan@1.9.0 with `^1.9.0`: Low,
+  was Critical). Also ported: the GitHub-reviewed advisory rating, the
+  local or physical attack vector cap (Medium), dev-only dependencies
+  (Low) and Go packages whose affected import path is not imported (Low).
+  Not ported: the build-only scope (lockfile graph) and the advisory
+  preconditions (proxy-addr, ws, nanoid). The advisory's own rating is kept
+  in `severity_advisory`, the reasons in `severity_calibration`.
+- `init-ci` templates install `narvy-cli>=1.3.2`. The Bitbucket template
+  also runs on pull requests (`pull-requests: '**'`, same step), and
+  `init-ci` says when each template runs.
 
 ## [1.3.1]
 

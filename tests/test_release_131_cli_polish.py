@@ -306,14 +306,37 @@ def test_no_semgrep_path_maps_error_to_critical():
         assert "_SEMGREP_SEVERITY_MAP" not in inspect.getsource(mod)
 
 
-def test_ci_templates_never_pin_below_1_3_1():
+def test_ci_templates_pin_1_3_2():
+    """1.3.2 is the first CLI whose --fail-on reads the team's dismissals."""
     import os
     import re
     base = os.path.join(os.path.dirname(cli_main.__file__), "ci_templates")
     for n in ("github", "gitlab", "bitbucket"):
         t = open(os.path.join(base, n + ".yml")).read()
-        for spec in re.findall(r'narvy-cli([<>=!~][^"\s]*)?', t):
-            assert spec in ("", ">=1.3.1"), (n, spec)
+        specs = re.findall(r'pip install "?narvy-cli([<>=!~][^"\s]*)?', t)
+        assert specs == [">=1.3.2"], (n, specs)
+
+
+def test_bitbucket_runs_on_pull_requests_with_the_same_step():
+    import os
+    import yaml
+    t = yaml.safe_load(open(os.path.join(os.path.dirname(cli_main.__file__), "ci_templates",
+                                         "bitbucket.yml")))
+    push = t["pipelines"]["default"][0]["step"]
+    pr = t["pipelines"]["pull-requests"]["**"][0]["step"]
+    assert push == pr and "narvy scan" in " ".join(pr["script"])
+
+
+@pytest.mark.parametrize("platform,says", [
+    ("github", "on pushes to main or master and on every pull request"),
+    ("gitlab", "on every push (merge request branches included)"),
+    ("bitbucket", "on every push and every pull request"),
+])
+def test_init_ci_says_when_the_pipeline_runs(monkeypatch, tmp_path, platform, says):
+    buf = _console(monkeypatch)
+    cli_main.cmd_init_ci(argparse.Namespace(platform=platform, output_dir=str(tmp_path), force=True))
+    out = " ".join(buf.getvalue().split())
+    assert says in out and 'narvy-cli>=1.3.2' in out
 
 
 def test_readme_lists_the_token_check():

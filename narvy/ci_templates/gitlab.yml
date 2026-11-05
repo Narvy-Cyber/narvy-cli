@@ -30,7 +30,7 @@ narvy_sast:
     when: always
   before_script:
     - pip install --upgrade pip
-    - pip install "narvy-cli>=1.3.1"
+    - pip install "narvy-cli>=1.3.2"
   script:
     - narvy scan . --output gitlab --file gl-sast-report.json ${NARVY_TOKEN:+--upload} --fail-on high || echo $? > narvy-exit-code
   artifacts:
