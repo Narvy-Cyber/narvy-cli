@@ -12,9 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scan --upload --fail-on`: findings your team dismissed in Narvy (false
   positive, accepted risk, won't fix) no longer fail the build. The CLI
   reads them from the `dismissed` field of the upload response and prints
-  how many it left out. Without `--upload`, when the upload fails, or when
-  the server does not send that field, the gate uses every local finding
-  as before. Reports and the upload itself keep every finding.
+  how many it left out. Without `--upload`, or when the server does not
+  send that field, the gate uses every local finding as before. A failed
+  upload still exits 4 before the gate runs. Reports and the upload itself
+  keep every finding.
 - Dependency findings of a source scan get the same severity as on
   narvy.io: the platform's calibration is ported as is
   (`narvy/sca/severity_calibration.py`). A CVE fixed by a release that the
