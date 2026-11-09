@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3]
+
+### Fixed
+
+- Dependency check: `packages/` folders are read again. JS workspaces (npm,
+  yarn, pnpm, Lerna, Nx, Turborepo) lost the dependencies of their members.
+  The members declared in `package.json` `workspaces`, `pnpm-workspace.yaml`,
+  `lerna.json`, Cargo `[workspace] members` and `go.work` are read even in a
+  folder the walk skips. A package@version found in the root lockfile and in
+  member manifests is one dependency; a finding lists every manifest that
+  declares it (`sca.manifests`). A NuGet restore folder named `packages/` is
+  still skipped.
+- `package-lock.json`: the lock entry of a workspace member (`packages/a`) is
+  no longer read as a dependency named `packages/a`.
+
+### Changed
+
+- `--fail-on`: an Info finding never fails the build, `any` means Low and
+  above (the narvy.io gate rule). Low findings fail `--fail-on low`.
+- `scan --upload`: the upload line says `reactivated` when the scan brought
+  back an app removed in Narvy, and how it was matched.
+- Info findings stay in the upload (narvy.io keeps them out of the default
+  view). Locked by a test; 1.3.2 already sent them.
+
 ## [1.3.2]
 
 ### Changed

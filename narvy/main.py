@@ -199,8 +199,8 @@ EXIT_CODES_HELP = (
 
 
 FAIL_ON_HELP = (
-    "CI gate: exit 1 if any finding is at or above this severity ('any' = any "
-    "finding). If nothing reaches it but part of the scan did not run, exit 2 "
+    "CI gate: exit 1 if any finding is at or above this severity ('any' = Low "
+    "and above; an Info finding never fails the gate, as on narvy.io). If nothing reaches it but part of the scan did not run, exit 2 "
     "instead of 0, because the result cannot be certified clean. Without "
     "--fail-on the exit code is 0 whatever is found."
 )
@@ -1638,6 +1638,8 @@ _APP_MATCH_LABELS = {
     "normalized_name": "matched by repository name",
     "name": "matched by name",
     "cloud_account": "matched by cloud account",
+    "package_upgrade": "matched by package id",
+    "reactivated": "reactivated",
 }
 
 
@@ -1747,6 +1749,13 @@ def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, packa
     console.print(f"[bold green]Results uploaded.[/bold green] scan_id={scan_id}")
     if data.get("app_id") is not None:
         _label = _app_match_label(data.get("app_matched_by"))
+        if str(data.get("app_matched_by") or "").strip().lower() == "reactivated":
+            # The App had been removed in Narvy; this scan brought it back
+            # (its earlier findings return with it). app_matched_on says how
+            # it was found.
+            _on = _app_match_label(data.get("app_matched_on"))
+            if _on and _on != _label and _on != "new app":
+                _label = f"{_label}, {_on}"
         console.print(f"[dim]App ID {data.get('app_id')}{f' ({_label})' if _label else ''}.[/dim]")
     console.print(
         f"[dim]CLI detected {received} -> Narvy cloud curated: {total_detected} distinct "
@@ -2832,7 +2841,10 @@ def _exit_on_fail_on(findings, fail_on, get_severity=lambda f: f.get("severity",
     telemetry.note(findings=findings, get_severity=get_severity)
     if not fail_on:
         return
-    threshold = _SEVERITY_LEVEL.get(fail_on, 0) if fail_on != "any" else 1
+    # Same rule as the platform gate (tier_view.blocking_findings): 'any' is
+    # Low and above, and an Info finding never fails the gate.
+    threshold = max(_SEVERITY_LEVEL.get(fail_on, 0) if fail_on != "any" else _SEVERITY_LEVEL["low"],
+                    _SEVERITY_LEVEL["low"])
     # Severities arrive in mixed case across the scan paths, so normalise before
     # ranking. One the map cannot rank fails the gate closed.
     breaching = []

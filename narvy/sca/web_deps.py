@@ -37,6 +37,9 @@ class _WebDep:
     # the file states ("runtime", "dev", or "unknown" when it does not say).
     declared_spec: str = ""
     scope: str = "unknown"
+    # Other manifests that carry the same package@version (a workspace
+    # member next to the root lockfile): set by _dedupe on the kept entry.
+    also_in: Tuple[str, ...] = ()
 
 
 # version_source, as the Narvy platform's lockfile parser tags a dependency:
@@ -124,6 +127,10 @@ def _parse_package_lock(path: str) -> List[_WebDep]:
     if isinstance(packages, dict):
         for key, meta in packages.items():
             if not key or not isinstance(meta, dict):
+                continue
+            # A workspace member's own entry ("packages/a") is the project,
+            # not an installed package (the platform skips it too).
+            if "node_modules/" not in key:
                 continue
             version = meta.get("version")
             if not version:
@@ -698,8 +705,41 @@ _MANIFEST_SKIP_DIR_NAMES = frozenset({
     ".git", ".gradle", ".idea", ".vscode", ".vs",
     "build", "dist", "target", "out", "bin", "obj",
     ".next", ".nuxt", ".cache", "coverage", ".pytest_cache",
-    "packages",
 })
+# `packages/` is walked: it holds the members of JS workspaces (npm, yarn,
+# pnpm, Lerna, Nx, Turborepo), Python and Go monorepos. Only the classic NuGet
+# restore folder of that name (one <Id>.<Version>/ folder per .nupkg) is pruned.
+
+
+def _is_nuget_restore_dir(path: str) -> bool:
+    """A NuGet packages.config restore folder: repositories.config, or
+    sub-folders that hold a .nupkg (checks the first few only)."""
+    try:
+        entries = sorted(os.listdir(path))
+    except OSError:
+        return False
+    if "repositories.config" in entries:
+        return True
+    checked = 0
+    for name in entries:
+        sub = os.path.join(path, name)
+        if not os.path.isdir(sub):
+            continue
+        checked += 1
+        try:
+            if any(f.endswith(".nupkg") for f in os.listdir(sub)):
+                return True
+        except OSError:
+            pass
+        if checked >= 5:
+            break
+    return False
+
+
+def _prune_dirs(cur_root: str, dirs: List[str]) -> List[str]:
+    return [d for d in dirs
+            if d not in _MANIFEST_SKIP_DIR_NAMES and not d.startswith(".")
+            and not (d == "packages" and _is_nuget_restore_dir(os.path.join(cur_root, d)))]
 
 
 def _walk_manifests(root_path: str, matcher) -> List[str]:
@@ -711,8 +751,7 @@ def _walk_manifests(root_path: str, matcher) -> List[str]:
         if depth >= _MANIFEST_WALK_MAX_DEPTH:
             dirs[:] = []
             continue
-        dirs[:] = [d for d in dirs
-                   if d not in _MANIFEST_SKIP_DIR_NAMES and not d.startswith(".")]
+        dirs[:] = _prune_dirs(cur_root, dirs)
         for f in files:
             if matcher(f):
                 found.append(os.path.join(cur_root, f))
@@ -1180,14 +1219,17 @@ def _dedupe(deps: List[_WebDep]) -> List[_WebDep]:
         # Same package@version from two manifests: the stronger version proof
         # is kept (an exact pin over a range floor); on a tie, the first one.
         # The broadest scope seen wins (a runtime copy is never dev-only).
+        # Every manifest that carried it is listed (also_in), never counted twice.
         prev = best.get(key)
         if prev is None or (_VERSION_SOURCE_RANK.get(version_source_for(dep.source, dep.version_source), 0)
                             > _VERSION_SOURCE_RANK.get(version_source_for(prev.source, prev.version_source), 0)):
             best[key] = dep
         if prev is not None:
             scope = max((prev.scope, dep.scope), key=lambda sc: _SCOPE_RANK.get(sc, 2))
-            if best[key].scope != scope:
-                best[key] = replace(best[key], scope=scope)
+            sources = [s for s in (prev.source, *prev.also_in, dep.source, *dep.also_in)
+                       if s != best[key].source]
+            also_in = tuple(dict.fromkeys(sources))
+            best[key] = replace(best[key], scope=scope, also_in=also_in)
     return list(best.values())
 
 
@@ -1245,6 +1287,7 @@ def _finding_from_osv(dep: _WebDep, osv_finding_dict: Dict[str, Any]) -> Dict[st
             "package": dep.name,
             "version": dep.version,
             "detected_via": dep.source,
+            **({"manifests": [dep.source, *dep.also_in]} if dep.also_in else {}),
             "fixed_version": fixed_version,
             "references": osv_finding_dict.get("references", []),
             "ecosystem": dep.ecosystem,
@@ -1347,11 +1390,16 @@ def _rule_def_from_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
 
 # Run a collector once per manifest-bearing directory, so monorepos and subdir
 # backends are covered (scan()'s _dedupe collapses overlap).
-def _collect_recursive(root_path: str, filenames, collector) -> List[_WebDep]:
+def _collect_recursive(root_path: str, filenames, collector, members=None) -> List[_WebDep]:
     dirs = set()
     for fn in filenames:
         for p in _walk_manifests(root_path, lambda f, _fn=fn: f == _fn):
             dirs.add(os.path.dirname(p))
+    # Workspace members the root declares are read even where the walk does
+    # not go (a skipped folder name, deeper than the walk).
+    for d in (members(root_path) if members else ()):
+        if any(os.path.isfile(os.path.join(d, fn)) for fn in filenames):
+            dirs.add(d)
     if root_path not in dirs and any(
         os.path.isfile(os.path.join(root_path, fn)) for fn in filenames
     ):
@@ -1422,14 +1470,142 @@ def _coverage_gaps(source_dir: str, deps: List[_WebDep]) -> List[str]:
     return gaps
 
 
+def _expand_member_globs(root_path: str, patterns) -> List[str]:
+    """Directories under root_path matched by workspace globs ('packages/*',
+    'apps/**', '!packages/legacy'); never outside the root, never node_modules."""
+    import glob as _glob
+    root = os.path.realpath(root_path)
+    include: Set[str] = set()
+    exclude: Set[str] = set()
+    for pat in patterns or ():
+        if not isinstance(pat, str) or not pat.strip():
+            continue
+        pat = pat.strip()
+        neg = pat.startswith("!")
+        pat = pat.lstrip("!").strip().rstrip("/")
+        while pat.startswith("./"):
+            pat = pat[2:]
+        if not pat or os.path.isabs(pat) or ".." in pat.split("/"):
+            continue
+        hits = _glob.glob(os.path.join(root, pat), recursive=True)
+        if len(hits) > _MAX_MANIFEST_FILES:
+            hits = sorted(hits)[:_MAX_MANIFEST_FILES]
+        for h in hits:
+            real = os.path.realpath(h)
+            if not os.path.isdir(real) or not (real == root or real.startswith(root + os.sep)):
+                continue
+            if "node_modules" in os.path.relpath(real, root).split(os.sep):
+                continue
+            (exclude if neg else include).add(real)
+    return sorted(include - exclude)
+
+
+def _read_json(path: str) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _pnpm_workspace_globs(path: str) -> List[str]:
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    except OSError:
+        return []
+    try:
+        import yaml
+        data = yaml.safe_load(text)
+        pk = data.get("packages") if isinstance(data, dict) else None
+        return [p for p in pk if isinstance(p, str)] if isinstance(pk, list) else []
+    except Exception:  # noqa: BLE001 - no PyYAML, or a file it rejects: line read
+        out, in_pk = [], False
+        for line in text.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if not line[0].isspace():
+                in_pk = line.split("#", 1)[0].strip() == "packages:"
+                continue
+            m = re.match(r'^\s+-\s*["\']?([^"\'#]+?)["\']?\s*(?:#.*)?$', line)
+            if in_pk and m:
+                out.append(m.group(1))
+        return out
+
+
+def _npm_workspace_members(root_path: str) -> List[str]:
+    """Member dirs declared by package.json `workspaces` (npm, yarn, Nx,
+    Turborepo), pnpm-workspace.yaml `packages` and lerna.json `packages`."""
+    globs: List[str] = []
+    pkg = _read_json(os.path.join(root_path, "package.json"))
+    if isinstance(pkg, dict):
+        ws = pkg.get("workspaces")
+        if isinstance(ws, dict):
+            ws = ws.get("packages")
+        if isinstance(ws, list):
+            globs.extend(p for p in ws if isinstance(p, str))
+    pnpm_ws = os.path.join(root_path, "pnpm-workspace.yaml")
+    if os.path.isfile(pnpm_ws):
+        globs.extend(_pnpm_workspace_globs(pnpm_ws))
+    lerna = _read_json(os.path.join(root_path, "lerna.json"))
+    if isinstance(lerna, dict) and isinstance(lerna.get("packages"), list):
+        globs.extend(p for p in lerna["packages"] if isinstance(p, str))
+    return _expand_member_globs(root_path, globs)
+
+
+_CARGO_MEMBERS_RE = re.compile(r'^\s*members\s*=\s*\[(.*?)\]', re.MULTILINE | re.DOTALL)
+
+
+def _cargo_workspace_members(root_path: str) -> List[str]:
+    """Cargo.toml `[workspace] members = [...]` dirs."""
+    try:
+        with open(os.path.join(root_path, "Cargo.toml"), "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    except OSError:
+        return []
+    m = re.search(r'^\[workspace\]\s*$(.*?)(?=^\[|\Z)', text, re.MULTILINE | re.DOTALL)
+    if not m:
+        return []
+    mm = _CARGO_MEMBERS_RE.search(m.group(1))
+    if not mm:
+        return []
+    body = "\n".join(l.split("#", 1)[0] for l in mm.group(1).splitlines())
+    return _expand_member_globs(root_path, re.findall(r'"([^"]+)"', body))
+
+
+def _go_work_members(root_path: str) -> List[str]:
+    """go.work `use` dirs (single line or block)."""
+    try:
+        with open(os.path.join(root_path, "go.work"), "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return []
+    uses, in_block = [], False
+    for raw in lines:
+        line = raw.split("//", 1)[0].strip()
+        if line.startswith("use ("):
+            in_block = True
+            continue
+        if in_block and line == ")":
+            in_block = False
+            continue
+        if line.startswith("use "):
+            uses.append(line[4:].strip())
+        elif in_block and line:
+            uses.append(line)
+    return _expand_member_globs(root_path, [u.strip('"') for u in uses])
+
+
 def collect_dependencies(source_dir: str) -> List[_WebDep]:
     deps: List[_WebDep] = []
-    deps.extend(_collect_recursive(source_dir, ("pnpm-lock.yaml", "yarn.lock", "package-lock.json", "package.json"), _collect_npm_deps))
+    deps.extend(_collect_recursive(source_dir, ("pnpm-lock.yaml", "yarn.lock", "package-lock.json", "package.json"), _collect_npm_deps,
+                                   members=_npm_workspace_members))
     deps.extend(_collect_recursive(source_dir, ("poetry.lock", "requirements.txt"), _collect_pypi_deps))
     deps.extend(_collect_recursive(source_dir, ("composer.lock", "composer.json"), _collect_packagist_deps))
-    deps.extend(_collect_recursive(source_dir, ("go.mod",), _collect_go_deps))
+    deps.extend(_collect_recursive(source_dir, ("go.mod",), _collect_go_deps, members=_go_work_members))
     deps.extend(_collect_recursive(source_dir, ("Gemfile.lock", "Gemfile"), _collect_rubygems_deps))
-    deps.extend(_collect_recursive(source_dir, ("Cargo.lock", "Cargo.toml"), _collect_crates_deps))
+    deps.extend(_collect_recursive(source_dir, ("Cargo.lock", "Cargo.toml"), _collect_crates_deps,
+                                   members=_cargo_workspace_members))
     deps.extend(_collect_maven_deps(source_dir))
     deps.extend(_collect_nuget_deps(source_dir))
     return [replace(d, source=_safe_rel_source(d.source)) for d in deps]
