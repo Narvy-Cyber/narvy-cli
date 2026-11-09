@@ -200,7 +200,8 @@ EXIT_CODES_HELP = (
 
 FAIL_ON_HELP = (
     "CI gate: exit 1 if any finding is at or above this severity ('any' = Low "
-    "and above; an Info finding never fails the gate, as on narvy.io). If nothing reaches it but part of the scan did not run, exit 2 "
+    "and above; an Info finding never fails the gate, as on narvy.io). If "
+    "nothing reaches it but part of the scan did not run, exit 2 "
     "instead of 0, because the result cannot be certified clean. Without "
     "--fail-on the exit code is 0 whatever is found."
 )
@@ -1750,9 +1751,8 @@ def _submit_results_ingest(all_findings, scan_mode, target_path, app=None, packa
     if data.get("app_id") is not None:
         _label = _app_match_label(data.get("app_matched_by"))
         if str(data.get("app_matched_by") or "").strip().lower() == "reactivated":
-            # The App had been removed in Narvy; this scan brought it back
-            # (its earlier findings return with it). app_matched_on says how
-            # it was found.
+            # The App had been removed in Narvy and this scan brought it
+            # back; app_matched_on says how it was found.
             _on = _app_match_label(data.get("app_matched_on"))
             if _on and _on != _label and _on != "new app":
                 _label = f"{_label}, {_on}"
