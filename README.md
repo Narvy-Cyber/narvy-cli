@@ -330,7 +330,8 @@ scan starts: a rejected token or an unreachable server exits 4 right away.
 With `--upload`, `--fail-on` leaves out the findings your team dismissed in
 Narvy (false positive, accepted risk, won't fix), as listed in the upload
 response, and says how many. Without `--upload`, or when the server does
-not return that list, every local finding counts.
+not return that list, every local finding counts. An Info finding never
+fails the gate; `--fail-on any` means Low and above.
 
 `narvy doctor` exits 0 when every required check passes and 1 when one fails.
 Missing optional tools are shown as INFO and do not change its exit code.
