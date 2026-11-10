@@ -516,39 +516,86 @@ rules:
     confidence: MEDIUM
     technology:
     - java
+  # The finding is the File built from the entry name. $ENTRY must be a zip
+  # entry (getNextEntry / getNextJarEntry / ZipEntry / JarEntry):
+  # `name = file.getName(); new File(dir, name)` on a java.io.File is not Zip Slip.
+  # A canonical-path (or normalized-path) containment check on the File, braced
+  # or `if (...) throw ...;`, clears it.
   patterns:
-  - pattern-either:
-    - pattern: '$ENTRY = $ZIS.getNextEntry();
-
+    - pattern-either:
+        - patterns:
+            - pattern: $OUT = new File($DESTDIR, $ENTRY.getName());
+            - pattern-either:
+                - pattern-inside: |
+                    $ENTRY = $ZIS.getNextEntry();
+                    ...
+                - pattern-inside: |
+                    while (($ENTRY = $ZIS.getNextEntry()) != null) { ... }
+                - pattern-inside: |
+                    ZipEntry $ENTRY = ...;
+                    ...
+                - pattern-inside: |
+                    for (ZipEntry $ENTRY : $COLL) { ... }
+                - pattern-inside: |
+                    $T $M(..., ZipEntry $ENTRY, ...) { ... }
+                - pattern-inside: |
+                    $ENTRY = $ZIS.getNextJarEntry();
+                    ...
+                - pattern-inside: |
+                    while (($ENTRY = $ZIS.getNextJarEntry()) != null) { ... }
+                - pattern-inside: |
+                    JarEntry $ENTRY = ...;
+                    ...
+                - pattern-inside: |
+                    for (JarEntry $ENTRY : $COLL) { ... }
+                - pattern-inside: |
+                    $T $M(..., JarEntry $ENTRY, ...) { ... }
+        - patterns:
+            - pattern: $OUT = new File($DESTDIR, $NAME);
+            - pattern-inside: |
+                $NAME = $ENTRY.getName();
+                ...
+            - pattern-either:
+                - pattern-inside: |
+                    $ENTRY = $ZIS.getNextEntry();
+                    ...
+                - pattern-inside: |
+                    while (($ENTRY = $ZIS.getNextEntry()) != null) { ... }
+                - pattern-inside: |
+                    ZipEntry $ENTRY = ...;
+                    ...
+                - pattern-inside: |
+                    for (ZipEntry $ENTRY : $COLL) { ... }
+                - pattern-inside: |
+                    $T $M(..., ZipEntry $ENTRY, ...) { ... }
+                - pattern-inside: |
+                    $ENTRY = $ZIS.getNextJarEntry();
+                    ...
+                - pattern-inside: |
+                    while (($ENTRY = $ZIS.getNextJarEntry()) != null) { ... }
+                - pattern-inside: |
+                    JarEntry $ENTRY = ...;
+                    ...
+                - pattern-inside: |
+                    for (JarEntry $ENTRY : $COLL) { ... }
+                - pattern-inside: |
+                    $T $M(..., JarEntry $ENTRY, ...) { ... }
+    - pattern-not-inside: |
+        $OUT = new File(...);
         ...
-
-        $OUT = new File($DESTDIR, $ENTRY.getName());
-
+        if (!$OUT.getCanonicalPath().startsWith(...)) { ... }
+    - pattern-not-inside: |
+        $OUT = new File(...);
         ...
-
-        '
-    - pattern: '$NAME = $ENTRY.getName();
-
+        if (!$OUT.getCanonicalPath().startsWith(...)) throw $EX;
+    - pattern-not-inside: |
+        $OUT = new File(...);
         ...
-
-        $OUT = new File($DESTDIR, $NAME);
-
+        if (!$OUT.toPath().normalize().startsWith(...)) { ... }
+    - pattern-not-inside: |
+        $OUT = new File(...);
         ...
-
-        '
-  - pattern-not: '$ENTRY = $ZIS.getNextEntry();
-
-      ...
-
-      $OUT = new File($DESTDIR, $ENTRY.getName());
-
-      ...
-
-      if (!$OUT.getCanonicalPath().startsWith(...)) { ... }
-
-      ...
-
-      '
+        if (!$OUT.toPath().normalize().startsWith(...)) throw $EX;
 - id: narvy.java.crypto.plaintext-socket-construction.plaintext-socket-construction
   message: A plain `java.net.Socket`/`java.net.ServerSocket` is constructed directly. Everything sent or received on it travels
     unencrypted, so anyone who can observe the network path can read or tamper with the traffic (CWE-319). This is an audit-level
