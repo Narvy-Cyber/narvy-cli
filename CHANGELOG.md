@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.4]
+
+### Fixed
+
+- Secrets: a high-entropy value whose name ends in `PUBKEY` / `PUB_KEY` (a
+  public key) is no longer reported. Names like `SIGNING_SECRET_KEY` still are.
+- Java zip-slip: the rule needs a real zip or jar entry (`getNextEntry()`,
+  `getNextJarEntry()`, a `ZipEntry`/`JarEntry` variable, loop or parameter) and
+  accepts a braceless `if (...) throw` check. A plain `File` is no longer
+  reported.
+- iOS UserDefaults (Swift and Objective-C): setting names such as
+  `passwordMinLength` or `tokenExpiryInterval` are no longer reported as
+  sensitive data.
+- Python deserialization (pickle, marshal, jsonpickle, shelve, zipfile
+  extractall): `request` counts only as request input (`body`, `data`, `GET`,
+  `POST`, `files`, `args`, `form`, `json`...). `request.session`,
+  `request.user` and `request.META` are no longer reported;
+  `self.request.POST` now is.
+
 ## [1.3.3]
 
 ### Fixed
