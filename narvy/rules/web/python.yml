@@ -1684,7 +1684,7 @@ rules:
       '
   - metavariable-regex:
       metavariable: $SRC
-      regex: (?i)(request|upload|response|download)
+      regex: (?i)((self\.)?request(?!\.(?!(?-i:body|data|GET|POST|COOKIES|FILES|headers|args|form|json|get_json|values|get_data|read|files|cookies|stream|text|content|environ|params|json_body|matchdict|query_params|path_params)\b))|upload|response|download)
 - id: narvy.python.pyramid.csrf-disabled-globally.csrf-disabled-globally
   message: Pyramid's default CSRF check is turned off application-wide via `set_default_csrf_options(require_csrf=False)`.
     Every unsafe-method view (POST/PUT/PATCH/DELETE) in the app loses its automatic CSRF token check unless
@@ -2746,7 +2746,7 @@ rules:
   - pattern: jsonpickle.decode($DATA)
   - metavariable-regex:
       metavariable: $DATA
-      regex: (?i)(request|upload|response|body|payload)
+      regex: (?i)((self\.)?request(?!\.(?!(?-i:body|data|GET|POST|COOKIES|FILES|headers|args|form|json|get_json|values|get_data|read|files|cookies|stream|text|content|environ|params|json_body|matchdict|query_params|path_params)\b))|upload|response|body|payload)
 - id: narvy.python.deserialization.marshal-loads-untrusted.marshal-loads-untrusted
   message: '`marshal.loads()` deserializes data that is not a fixed local trusted source. `marshal` is
     the format used for compiled Python bytecode - loading crafted marshal data from an untrusted source
@@ -2774,7 +2774,7 @@ rules:
   - pattern: marshal.loads($DATA)
   - metavariable-regex:
       metavariable: $DATA
-      regex: (?i)(request|upload|response|body|payload|socket|message|msg)
+      regex: (?i)((self\.)?request(?!\.(?!(?-i:body|data|GET|POST|COOKIES|FILES|headers|args|form|json|get_json|values|get_data|read|files|cookies|stream|text|content|environ|params|json_body|matchdict|query_params|path_params)\b))|upload|response|body|payload|socket|message|msg)
 - id: narvy.python.deserialization.pickle-loads-untrusted.pickle-loads-untrusted
   message: '`pickle.load()`/`pickle.loads()` deserializes data that is not a fixed local trusted file
     - a request body, an uploaded file, a cache/queue payload, or a network socket read. Unpickling is
@@ -2807,7 +2807,7 @@ rules:
     - pattern: cPickle.loads($DATA)
   - metavariable-regex:
       metavariable: $DATA
-      regex: (?i)(request|upload|response|body|payload|socket|redis|celery|queue|message|msg)
+      regex: (?i)((self\.)?request(?!\.(?!(?-i:body|data|GET|POST|COOKIES|FILES|headers|args|form|json|get_json|values|get_data|read|files|cookies|stream|text|content|environ|params|json_body|matchdict|query_params|path_params)\b))|upload|response|body|payload|socket|redis|celery|queue|message|msg)
 - id: narvy.python.deserialization.shelve-open-untrusted-path.shelve-open-untrusted-path
   message: '`shelve.open()` is backed by `pickle` under the hood - reading a shelve database an attacker
     can influence the path or contents of is the same RCE risk as calling `pickle.load()` directly (CWE-502).
@@ -2834,7 +2834,7 @@ rules:
   - pattern: shelve.open($PATH)
   - metavariable-regex:
       metavariable: $PATH
-      regex: (?i)(request|upload|user|param)
+      regex: (?i)((self\.)?request(?!\.(?!(?-i:body|data|GET|POST|COOKIES|FILES|headers|args|form|json|get_json|values|get_data|read|files|cookies|stream|text|content|environ|params|json_body|matchdict|query_params|path_params)\b))|upload|user|param)
 - id: narvy.python.code-injection.importlib-module-name-tainted.importlib-module-name-tainted
   message: A module name passed to `importlib.import_module()` / `__import__()` is derived from request data. Importing a
     module executes its top-level code, so an attacker who can choose the name can load and run any importable module on the

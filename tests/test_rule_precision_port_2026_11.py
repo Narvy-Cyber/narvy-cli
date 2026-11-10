@@ -171,3 +171,58 @@ def test_objc_userdefaults_skips_setting_names(tmp_path):
     rules = [r for r in load_rules_from_dir(source_analyzer.OBJC_RULES_DIR) if r["id"] == "IOS-OBJC-STORAGE-001"]
     assert len(rules) == 1
     assert sorted(f["line"] for f in run_rules_on_file(str(src), rules)) == [2, 3]
+
+
+# --- python: name-keyed deserialization rules count `request` only as input --
+
+PY_NAME_KEYED = """\
+    import marshal
+    import pickle
+    import shelve
+    import zipfile
+
+    import jsonpickle
+    from flask import request
+
+
+    def server_state(self, dest, redis_conn, k, request_bytes):
+        pickle.loads(request.session["blob"])          # 11 ok
+        pickle.loads(request.user.profile_blob)        # 12 ok
+        pickle.loads(request.method.encode())          # 13 ok
+        pickle.loads(request.data_cache)               # 14 ok
+        marshal.loads(request.session["code"])         # 15 ok
+        jsonpickle.decode(request.user.prefs)          # 16 ok
+        shelve.open(request.session["db"])             # 17 ok
+        z = zipfile.ZipFile(request.session["archive"])
+        z.extractall(dest)                             # 19 ok
+
+
+    def request_input(self, dest, redis_conn, k, request_bytes):
+        pickle.loads(request.body)                     # 23
+        pickle.loads(request.FILES["f"].read())        # 24
+        pickle.loads(request.get_data())               # 25
+        pickle.loads(self.request.POST["b"])           # 26 (missed on 1.3.3)
+        pickle.loads(request_bytes)                    # 27
+        pickle.loads(redis_conn.get(k))                # 28
+        marshal.loads(request.data)                    # 29
+        jsonpickle.decode(request.cookies["p"])        # 30
+        shelve.open(request.args["db"])                # 31
+        pickle.loads(request.text)                     # 32
+        pickle.loads(request.content)                  # 33
+        pickle.loads(request.environ["wsgi.input"].read())  # 34
+        pickle.loads(request.params["b"])              # 35
+        jsonpickle.decode(request.json_body["p"])      # 36
+        marshal.loads(request.matchdict["c"])          # 37
+        pickle.loads(request.query_params["b"])        # 38
+        shelve.open(request.path_params["db"])         # 39
+        z = zipfile.ZipFile(request.files["archive"])
+        z.extractall(dest)                             # 41
+    """
+
+
+def test_python_name_keyed_rules_count_request_only_as_input(tmp_path):
+    hits = _hits("web/python.yml", "views.py", PY_NAME_KEYED, tmp_path)
+    keyed = {"pickle-loads-untrusted", "marshal-loads-untrusted", "jsonpickle-decode-untrusted",
+             "shelve-open-untrusted-path", "zipfile-extractall-untrusted-archive"}
+    lines = sorted({line for r, line in hits if r in keyed})
+    assert lines == list(range(23, 40)) + [41]
