@@ -354,7 +354,10 @@ rules:
       category: storage
     patterns:
       - pattern: '$UD.set($VALUE, forKey: $KEY)'
+      # A setting ABOUT the secret (passwordGeneratorConfig, tokenExpiryInterval,
+      # passwordMinLength) is not the secret: the sensitive word must not be
+      # followed, in the same identifier, by a setting noun.
       - metavariable-pattern:
           metavariable: $KEY
           patterns:
-            - pattern-regex: '(?i)"[^"]*(password|token|secret|api[_-]?key)[^"]*"'
+            - pattern-regex: '(?i)"[^"]*(password|token|secret|api[_-]?key)(?!\w*(?:type|kind|config|configuration|params|parameters|settings|options|policy|length|count|attempts|enabled|disabled|timeout|mode|style|format|visible|hidden|shown|hint|label|placeholder|interval|delay|requirement|rules|strength|expir|lifetime|generator|keyboard|prompt))[^"]*"'

@@ -131,3 +131,43 @@ def test_zip_slip_entry_sources_still_caught(tmp_path):
         }
         """, tmp_path)
     assert _lines(hits, ZIP_RULE) == [9, 16, 21, 25, 31]
+
+
+# --- iOS: a UserDefaults key naming a setting ABOUT a secret is not the secret -
+
+def test_swift_userdefaults_skips_setting_names(tmp_path):
+    hits = _hits("ios_swift.yml", "Settings.swift", """\
+        import Foundation
+
+        final class Settings {
+            func save(token: String, mode: Int, cfg: Data) {
+                UserDefaults.standard.set(token, forKey: "authToken")
+                UserDefaults.standard.set(token, forKey: "userPassword")
+                UserDefaults.standard.set(cfg, forKey: "passwordGeneratorConfig")
+                UserDefaults.standard.set(mode, forKey: "passwordMinLength")
+                UserDefaults.standard.set(mode, forKey: "tokenExpiryInterval")
+                UserDefaults.standard.set(mode, forKey: "secretRevealEnabled")
+                defaults.set(token, forKey: "api_key")
+            }
+        }
+        """, tmp_path)
+    assert _lines(hits, "ios-swift-userdefaults-sensitive-data") == [5, 6, 11]
+
+
+def test_objc_userdefaults_skips_setting_names(tmp_path):
+    from narvy.ios import source_analyzer
+    from narvy.rule_engine import load_rules_from_dir, run_rules_on_file
+
+    src = tmp_path / "Settings.m"
+    src.write_text(textwrap.dedent("""\
+        - (void)save {
+            [[NSUserDefaults standardUserDefaults] setObject:t forKey:@"authToken"];
+            [[NSUserDefaults standardUserDefaults] setObject:p forKey:@"userPassword"];
+            [[NSUserDefaults standardUserDefaults] setObject:c forKey:@"passwordGeneratorConfig"];
+            [[NSUserDefaults standardUserDefaults] setObject:n forKey:@"passwordMinLength"];
+            [[NSUserDefaults standardUserDefaults] setObject:i forKey:@"tokenExpiryInterval"];
+        }
+        """))
+    rules = [r for r in load_rules_from_dir(source_analyzer.OBJC_RULES_DIR) if r["id"] == "IOS-OBJC-STORAGE-001"]
+    assert len(rules) == 1
+    assert sorted(f["line"] for f in run_rules_on_file(str(src), rules)) == [2, 3]
